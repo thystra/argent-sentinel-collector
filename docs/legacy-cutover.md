@@ -6,7 +6,10 @@ imports legacy `<date>-<ip>.sent` markers so already-reported activity is not
 resent.
 
 The cutover tool never deletes the old scripts, logs, reports, or marker state.
-In test mode it leaves legacy cron active. In production mode it backs up and
+In test mode it leaves legacy cron active. Redirected test mail is sent only to
+the configured override address and identifies any production source-protection
+reason that would normally suppress or withhold the report. In production mode it
+backs up and
 comments root-crontab and `/etc/cron.d` entries invoking
 `nginx-abuse-draft-reports.py` or `nginx-abuse-send-reports.py`.
 

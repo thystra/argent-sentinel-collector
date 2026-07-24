@@ -38,7 +38,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.4.2"
 SCHEMA_VERSION = 4
 
 DEFAULTS: dict[str, Any] = {
@@ -2343,32 +2343,56 @@ class Collector:
 
             try:
                 enrichment = self.enrich(str(incident["source_ip"]))
-                self.db.update_incident(
-                    incident_uuid,
-                    registered_cidr=enrichment.get("network_cidr"),
-                    asn=enrichment.get("asn"),
-                    asn_holder=enrichment.get("asn_holder"),
-                    network_class=enrichment.get("network_class", "unknown"),
-                )
             except Exception as exc:
-                detail = f"Enrichment failed before abuse report: {exc}"
-                next_epoch = self.report_retry_epoch()
-                self.db.update_incident(
-                    incident_uuid,
-                    report_status="failed",
-                    report_detail=detail,
-                    next_report_after_epoch=next_epoch,
-                )
-                self.db.record_report_attempt(
-                    incident_uuid,
-                    [],
-                    "failed",
-                    detail,
-                    test_mode=bool(reporting.get("test_mode")),
-                )
-                LOG.warning("Enrichment failed for %s: %s", incident["source_ip"], exc)
-                continue
-
+                if reporting.get("test_mode"):
+                    detail = f"Enrichment unavailable in test mode: {exc}"
+                    try:
+                        fallback_cidr = candidate_network(str(incident["source_ip"]))
+                    except ValueError:
+                        fallback_cidr = incident["network_cidr"]
+                    enrichment = {
+                        "network_cidr": (
+                            incident["registered_cidr"]
+                            or incident["network_cidr"]
+                            or fallback_cidr
+                        ),
+                        "network_name": None,
+                        "asn": incident["asn"],
+                        "asn_holder": incident["asn_holder"],
+                        "abuse_emails": [],
+                        "network_class": incident["network_class"] or "unknown",
+                        "_test_enrichment_error": detail,
+                    }
+                    LOG.warning(
+                        "Enrichment failed for %s; continuing in test mode: %s",
+                        incident["source_ip"],
+                        exc,
+                    )
+                else:
+                    detail = f"Enrichment failed before abuse report: {exc}"
+                    next_epoch = self.report_retry_epoch()
+                    self.db.update_incident(
+                        incident_uuid,
+                        report_status="failed",
+                        report_detail=detail,
+                        next_report_after_epoch=next_epoch,
+                    )
+                    self.db.record_report_attempt(
+                        incident_uuid,
+                        [],
+                        "failed",
+                        detail,
+                        test_mode=False,
+                    )
+                    LOG.warning("Enrichment failed for %s: %s", incident["source_ip"], exc)
+                    continue
+            self.db.update_incident(
+                incident_uuid,
+                registered_cidr=enrichment.get("network_cidr"),
+                asn=enrichment.get("asn"),
+                asn_holder=enrichment.get("asn_holder"),
+                network_class=enrichment.get("network_class", "unknown"),
+            )
             incident = self.db.incident(incident_uuid)
             recipients = self.report_recipients(enrichment)
             if not recipients:
@@ -2692,7 +2716,7 @@ class Collector:
         message = EmailMessage()
         message["From"] = str(settings["from"])
         message["To"] = ", ".join(recipients)
-        if str(settings.get("admin_copy", "")).strip():
+        if not settings.get("test_mode") and str(settings.get("admin_copy", "")).strip():
             message["Bcc"] = str(settings["admin_copy"]).strip()
         message["Date"] = email.utils.format_datetime(utc_now())
         message_id = email.utils.make_msgid(domain=str(settings["message_id_domain"]))
@@ -2720,7 +2744,11 @@ class Collector:
             "Please investigate the responsible systems or customers and take appropriate action.",
         ]
         if settings.get("test_mode"):
-            body.extend(["", "Test mode is enabled; the provider recipient was overridden."])
+            body.extend([
+                "",
+                "TEST MODE: This report was sent only to the configured recipient override.",
+                "No provider abuse contact or administrative Bcc recipient received this message.",
+            ])
         message.set_content("\n".join(body) + "\n")
         try:
             result = subprocess.run(
@@ -2752,18 +2780,29 @@ class Collector:
             return "disabled", "Abuse reporting disabled in configuration", None
         if not recipients:
             return "no-contact", "No valid abuse-report recipient was supplied", None
+        test_mode = bool(settings.get("test_mode"))
         protection, protection_detail = self.source_protection_status(str(incident["source_ip"]))
+        production_disposition = f"Source protection check passed: {protection_detail}"
         if protection == "protected":
-            return "suppressed", protection_detail, None
-        if protection == "error":
-            return "failed", f"Abuse report withheld: {protection_detail}", None
+            if not test_mode:
+                return "suppressed", protection_detail, None
+            production_disposition = (
+                f"Report would normally be suppressed: {protection_detail}"
+            )
+        elif protection == "error":
+            if not test_mode:
+                return "failed", f"Abuse report withheld: {protection_detail}", None
+            production_disposition = (
+                "Report would normally be withheld because source protection "
+                f"could not be verified: {protection_detail}"
+            )
 
         evidence = self.db.incident_evidence(str(incident["incident_uuid"]))
         sites = self.db.incident_sites(str(incident["incident_uuid"]))
         message = EmailMessage()
         message["From"] = str(settings["from"])
         message["To"] = ", ".join(recipients)
-        if str(settings.get("admin_copy", "")).strip():
+        if not settings.get("test_mode") and str(settings.get("admin_copy", "")).strip():
             message["Bcc"] = str(settings["admin_copy"]).strip()
         generated = utc_now()
         message["Date"] = email.utils.format_datetime(generated)
@@ -2849,9 +2888,15 @@ class Collector:
             body.append(f"Operator contact: {operator_contact}")
         if settings.get("test_mode"):
             body.extend([
-                "Test mode: enabled",
-                "Provider recipient overridden; this message was not sent to the RDAP abuse contact.",
+                "TEST MODE: This report was sent only to the configured recipient override.",
+                "No provider abuse contact or administrative Bcc recipient received this message.",
+                f"Production disposition: {production_disposition}",
             ])
+            enrichment_error = clean_optional(
+                enrichment.get("_test_enrichment_error"), 1000
+            )
+            if enrichment_error:
+                body.append(f"Enrichment note: {enrichment_error}")
         body.extend([
             "",
             "Evidence event UUIDs:",
@@ -2917,7 +2962,10 @@ class Collector:
                 or f"sendmail exited {result.returncode}"
             )
             return "failed", detail, message_id
-        return "sent", f"Report sent to {', '.join(recipients)}", message_id
+        detail = f"Report sent to {', '.join(recipients)}"
+        if settings.get("test_mode"):
+            detail += f"; test bypass: {production_disposition}"
+        return "sent", detail, message_id
 
 
 def stat_is_regular(mode: int) -> bool:

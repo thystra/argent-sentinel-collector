@@ -1,8 +1,12 @@
 # Production reporting controls
 
 Provider reporting remains explicitly activated. Package installation never
-enables mail. The reporting cutoff is compared to incident activity time, not
-the time the collector evaluates the incident.
+enables mail. In test mode, the configured recipient override is the sole
+recipient: provider contacts and the administrative Bcc are not used. Test mode
+may bypass source-protection and enrichment failures to exercise delivery, while
+the message records the production disposition. Age, cutoff, duplicate, cooldown,
+daily-limit, and per-run controls remain active. The reporting cutoff is compared
+to incident activity time, not the time the collector evaluates the incident.
 
 Individual reports include source/destination tuple evidence when available,
 registered network and ASN data, bounded event UUIDs, CIDR-level qualifying

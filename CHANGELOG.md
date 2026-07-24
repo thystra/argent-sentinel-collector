@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.2 — 2026-07-24
+
+- Make the configured test-mode recipient override authoritative for incident reports.
+- Send test reports only to the override address; administrative Bcc delivery is disabled in test mode.
+- Continue redirected test delivery when RDAP/RIPE enrichment is unavailable.
+- Bypass trusted, non-global, and CrowdSec-allowlisted source suppression only in test mode.
+- Label test mail prominently and record the production suppression or protection-check result in the message and audit detail.
+- Preserve production source-protection behavior and all age, cutoff, duplicate, cooldown, daily-limit, and per-run guardrails.
+
 ## 0.4.1 — 2026-07-24
 
 - Recognize OpenSSH `Invalid user ... from ... port ...` preauthentication probes as privacy-preserving SSH failure events.
