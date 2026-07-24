@@ -165,7 +165,9 @@ class V043Test(unittest.TestCase):
         self.assertEqual("goshawk066@gmail.com", str(message["To"]))
         self.assertIsNone(message["Bcc"])
         body = message.get_body(preferencelist=("plain",)).get_content()
-        self.assertIn("*** TEST MODE ***", body)
+        self.assertTrue(body.startswith("*** TEST MODE ***\n"))
+        self.assertEqual(2, body.count("*** TEST MODE ***"))
+        self.assertLess(body.find("*** TEST MODE ***"), body.find("Hello,"))
         self.assertIn("Source IP: 20.151.13.152", body)
         self.assertIn("Affected site(s): arnhalla.com", body)
         self.assertIn("Connection details:", body)
@@ -205,14 +207,14 @@ class V043Test(unittest.TestCase):
         self.assertRegex(evidence[0]["hash"], r"^sha256:[0-9a-f]{64}$")
 
     def test_release_and_collector_unit(self) -> None:
-        self.assertEqual("0.4.3", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.4.4", (ROOT / "VERSION").read_text().strip())
         for name in ("agent.py", "collector.py", "server_api.py"):
             self.assertIn(
-                'APP_VERSION = "0.4.3"',
+                'APP_VERSION = "0.4.4"',
                 (ROOT / "src" / name).read_text(),
             )
         builder = (ROOT / "packaging/build_debs.py").read_text()
-        self.assertIn('if upstream != "0.4.3":', builder)
+        self.assertIn('if upstream != "0.4.4":', builder)
         self.assertIn('"test_v043.py"', builder)
         unit = (
             ROOT / "packaging/systemd/argent-sentinel-collector.service"

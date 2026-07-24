@@ -1,4 +1,11 @@
 # Changelog
+
+## 0.4.4 — 2026-07-24
+
+- Move the redirected test-mode notice to the very top of individual abuse
+  reports and close it with a matching marker, leaving the production message
+  body visually intact beneath the test-only wrapper.
+
 ## 0.4.3 — 2026-07-24
 - Reformat individual Nginx abuse reports to match the established operator-facing report structure.
 - Include source ports, public destination IPs, internally observed destination IPs, destination ports, Host headers, protocols, statuses, categories, targets, and user agents.

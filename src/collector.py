@@ -39,7 +39,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.4.3"
+APP_VERSION = "0.4.4"
 SCHEMA_VERSION = 4
 
 DEFAULTS: dict[str, Any] = {
@@ -3486,7 +3486,7 @@ class Collector:
             and 500 <= int(item["http_status"]) <= 599
         )
 
-        body: list[str] = ["Hello,", ""]
+        body: list[str] = []
         if test_mode:
             body.extend([
                 "*** TEST MODE ***",
@@ -3499,7 +3499,8 @@ class Collector:
             )
             if enrichment_error:
                 body.append(f"Enrichment note: {enrichment_error}")
-            body.append("")
+            body.extend(["*** TEST MODE ***", ""])
+        body.extend(["Hello,", ""])
 
         if rule_id.startswith("nginx-"):
             opening = (
