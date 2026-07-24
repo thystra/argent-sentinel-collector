@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  configure)
+    if ! getent group sentinel >/dev/null 2>&1; then
+      addgroup --system sentinel >/dev/null
+    fi
+    install -d -o root -g sentinel -m 0750 \
+      /var/lib/argent-sentinel \
+      /var/lib/argent-sentinel/drop \
+      /var/lib/argent-sentinel/drop/wordpress \
+      /var/lib/argent-sentinel/drop/nginx
+    install -d -o root -g sentinel -m 2770 \
+      /var/lib/argent-sentinel/drop/nginx/abuse-context/incoming
+    install -d -o root -g root -m 0750 \
+      /var/lib/argent-sentinel/agent \
+      /var/lib/argent-sentinel/agent/pending \
+      /var/lib/argent-sentinel/agent/processing \
+      /var/lib/argent-sentinel/agent/acknowledged \
+      /var/lib/argent-sentinel/agent/rejected
+    ;;
+esac
+exit 0

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1 — 2026-07-24
+
+- Add reproducible Debian binary-package builds for `common`, `agent`, `server`,
+  and combined installations.
+- Add package-owned systemd units under `/usr/lib/systemd/system`.
+- Preserve existing live configuration and create a consistent SQLite backup
+  before package-driven schema migration.
+- Add a dedicated idempotent `migrate` command and schema-version metadata.
+- Safely archive legacy systemd overrides only when they point at the previous
+  `/usr/local/libexec` installation.
+- Keep the v0.3.1 agent package limited to local spooling and onboarding; remote
+  HTTPS delivery remains the v0.4 boundary.
+
 ## 0.3.0 — 2026-07-24
 
 - Add normalized Nginx abuse-context JSON/JSONL ingestion.

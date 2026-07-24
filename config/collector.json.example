@@ -64,7 +64,7 @@
     "timeout_seconds": 12,
     "cache_days": 7,
     "enrich_when_actions_disabled": false,
-    "user_agent": "Argent-Sentinel/0.3.0 (+self-hosted security abuse reporting)",
+    "user_agent": "Argent-Sentinel/0.3.1 (+self-hosted security abuse reporting)",
     "asn_classifications": {}
   },
   "abuse_reporting": {

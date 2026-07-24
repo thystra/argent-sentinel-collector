@@ -36,6 +36,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
+APP_VERSION = "0.3.1"
+SCHEMA_VERSION = 3
 
 DEFAULTS: dict[str, Any] = {
     "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
@@ -99,7 +101,7 @@ DEFAULTS: dict[str, Any] = {
         "timeout_seconds": 12,
         "cache_days": 7,
         "enrich_when_actions_disabled": False,
-        "user_agent": "Argent-Sentinel/0.3.0 (+self-hosted security abuse reporting)",
+        "user_agent": f"Argent-Sentinel/{APP_VERSION} (+self-hosted security abuse reporting)",
         "asn_classifications": {},
     },
     "abuse_reporting": {
@@ -215,9 +217,9 @@ def validate_config(config: Mapping[str, Any]) -> None:
         if int(network_reporting.get(name, 0)) < 1:
             raise CollectorError(f"network_reporting.{name} must be positive")
     if network_reporting.get("automatic_cidr_blocking"):
-        raise CollectorError("network_reporting.automatic_cidr_blocking is not supported in v0.3.0")
+        raise CollectorError("network_reporting.automatic_cidr_blocking is not supported in v0.3.1")
     if network_reporting.get("automatic_network_email"):
-        raise CollectorError("network_reporting.automatic_network_email is not supported in v0.3.0")
+        raise CollectorError("network_reporting.automatic_network_email is not supported in v0.3.1")
     reporting = config["abuse_reporting"]
     if reporting.get("enabled") and not valid_email_header(str(reporting.get("from", ""))):
         raise CollectorError("abuse_reporting.from must contain a valid email address")
@@ -277,6 +279,26 @@ def process_lock(path: Path) -> Iterator[None]:
         yield
 
 
+def backup_sqlite_database(source: Path, backup_dir: Path) -> Path | None:
+    """Create a consistent SQLite backup before an in-place schema migration."""
+    if not source.exists():
+        return None
+    backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(backup_dir, 0o700)
+    destination = backup_dir / source.name
+    source_conn = sqlite3.connect(source)
+    destination_conn = sqlite3.connect(destination)
+    try:
+        source_conn.execute("PRAGMA busy_timeout = 5000")
+        source_conn.backup(destination_conn)
+        destination_conn.commit()
+    finally:
+        destination_conn.close()
+        source_conn.close()
+    os.chmod(destination, 0o600)
+    return destination
+
+
 class StateDB:
     def __init__(self, path: Path) -> None:
         ensure_parent(path)
@@ -294,6 +316,11 @@ class StateDB:
     def install(self) -> None:
         self.conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS batches (
                 batch_uuid TEXT PRIMARY KEY,
                 sha256 TEXT NOT NULL,
@@ -462,6 +489,12 @@ class StateDB:
         self.ensure_column("incidents", "report_sent_epoch", "INTEGER")
         self.ensure_column("incidents", "report_recipient", "TEXT")
         self.ensure_column("incidents", "report_message_id", "TEXT")
+        self.conn.execute(
+            """INSERT INTO schema_meta (key, value, updated_at)
+               VALUES ('schema_version', ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+            (str(SCHEMA_VERSION), utc_text()),
+        )
         self.conn.commit()
 
     def ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -2357,6 +2390,7 @@ def status_output(collector: Collector) -> dict[str, Any]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Argent Sentinel host collector")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {APP_VERSION}")
     parser.add_argument("--config", default="/etc/argent-sentinel/collector.json")
     parser.add_argument("--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2370,13 +2404,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=("observing", "review", "escalation-review", "blocked", "closed"),
     )
     network_set.add_argument("--note", default="")
+    migrate = sub.add_parser("migrate", help="Back up and migrate the state database")
+    migrate.add_argument("--backup-dir", default="", help="Optional directory for a consistent pre-migration backup")
     sub.add_parser("validate-config", help="Validate configuration and exit")
     args = parser.parse_args(argv)
     configure_logging(args.verbose)
     try:
         config = load_config(Path(args.config))
         if args.command == "validate-config":
-            print(json.dumps({"status": "ok"}, indent=2))
+            print(json.dumps({"status": "ok", "version": APP_VERSION}, indent=2))
+            return 0
+        if args.command == "migrate":
+            state_path = Path(config["state_db"])
+            lock_path = Path(config["lock_file"])
+            with process_lock(lock_path):
+                backup_path = None
+                if args.backup_dir:
+                    backup_path = backup_sqlite_database(state_path, Path(args.backup_dir))
+                database = StateDB(state_path)
+                try:
+                    row = database.conn.execute(
+                        "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+                    ).fetchone()
+                    schema_version = int(row[0]) if row else SCHEMA_VERSION
+                finally:
+                    database.close()
+            print(json.dumps({
+                "status": "ok",
+                "version": APP_VERSION,
+                "schema_version": schema_version,
+                "database": str(state_path),
+                "backup": str(backup_path) if backup_path else None,
+            }, indent=2, sort_keys=True))
             return 0
         if args.command in {"status", "network-list", "network-set"}:
             collector = Collector(config)

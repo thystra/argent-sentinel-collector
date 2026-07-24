@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+case "$1" in
+  remove|deconfigure)
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+      systemctl stop argent-sentinel-collector.timer argent-sentinel-collector.service >/dev/null 2>&1 || true
+      systemctl disable argent-sentinel-collector.timer >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+exit 0

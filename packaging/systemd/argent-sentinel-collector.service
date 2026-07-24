@@ -1,0 +1,40 @@
+[Unit]
+Description=Argent Sentinel event collector and central policy engine
+After=network-online.target crowdsec.service
+Wants=network-online.target
+ConditionPathExists=/etc/argent-sentinel/collector.json
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStartPre=/usr/bin/argent-sentinel --config /etc/argent-sentinel/collector.json migrate
+ExecStart=/usr/bin/argent-sentinel --config /etc/argent-sentinel/collector.json run
+RuntimeDirectory=argent-sentinel
+RuntimeDirectoryMode=0750
+UMask=0027
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+AmbientCapabilities=
+ReadWritePaths=/var/lib/argent-sentinel
+ReadWritePaths=/run/argent-sentinel
+ReadWritePaths=-/var/spool/postfix
+ReadWritePaths=-/var/lib/postfix
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Argent Sentinel collector every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=5s
+Persistent=true
+Unit=argent-sentinel-collector.service
+
+[Install]
+WantedBy=timers.target

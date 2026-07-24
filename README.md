@@ -1,10 +1,10 @@
-# Argent Sentinel Host Collector 0.3.0
+# Argent Sentinel 0.3.1
 
 Argent Sentinel imports immutable WordPress security-event batches into a
 root-controlled SQLite state database, detects credential spraying, optionally
 requests CrowdSec decisions, enriches sources, and sends bounded abuse reports.
 
-Version 0.3.0 adds the first unified web-abuse evidence layer:
+Version 0.3.0 added the first unified web-abuse evidence layer:
 
 - Nginx `abuse_context` JSON/JSONL ingestion, disabled until explicitly enabled;
 - exact WordPress-to-Nginx correlation using a trusted request ID;
@@ -22,30 +22,57 @@ by configuration in this release. A `blocked` network-case status records an
 operator decision only; it does not run `cscli`. Remote HTTPS/mTLS delivery to
 `sentinel.argentwolf.org` remains the v0.4 transport boundary.
 
-## Upgrade
+## Build Debian packages
 
 ```bash
-python3 -m py_compile src/collector.py
-python3 tests/test_collector.py
-python3 tests/test_reporting_guardrails.py
-python3 tests/test_network_context.py
-sudo ./scripts/install-v0.3.0.sh
+./scripts/build-debs.sh
 ```
 
-The installer backs up the installed collector and live configuration, preserves
-all existing reporting values, adds missing v0.3.0 defaults, migrates SQLite in
-place, and leaves `abuse_context` disabled.
+The build writes these architecture-independent packages to `dist/deb/`:
+
+```text
+argent-sentinel-common_0.3.1-1_all.deb
+argent-sentinel-agent_0.3.1-1_all.deb
+argent-sentinel-server_0.3.1-1_all.deb
+argent-sentinel_0.3.1-1_all.deb
+```
+
+Install all four on the combined central host:
+
+```bash
+sudo apt install \
+  ./dist/deb/argent-sentinel-common_0.3.1-1_all.deb \
+  ./dist/deb/argent-sentinel-agent_0.3.1-1_all.deb \
+  ./dist/deb/argent-sentinel-server_0.3.1-1_all.deb \
+  ./dist/deb/argent-sentinel_0.3.1-1_all.deb
+```
+
+The server package preserves `/etc/argent-sentinel/collector.json`, creates a
+consistent SQLite backup under `/var/backups/argent-sentinel/`, migrates the
+database, and enables the existing `argent-sentinel-collector.timer` unit name.
+See `docs/debian-packaging.md` for package roles and agent-only installation.
+
+## Migration command
+
+```bash
+sudo argent-sentinel \
+  --config /etc/argent-sentinel/collector.json \
+  migrate --backup-dir /var/backups/argent-sentinel/manual-migration
+```
+
+The command uses SQLite's online backup API before applying idempotent schema
+changes and records the current schema version.
 
 ## Status and network cases
 
 ```bash
-sudo /usr/local/libexec/argent-sentinel/collector.py \
+sudo argent-sentinel \
   --config /etc/argent-sentinel/collector.json status
 
-sudo /usr/local/libexec/argent-sentinel/collector.py \
+sudo argent-sentinel \
   --config /etc/argent-sentinel/collector.json network-list
 
-sudo /usr/local/libexec/argent-sentinel/collector.py \
+sudo argent-sentinel \
   --config /etc/argent-sentinel/collector.json network-set \
   --cidr 198.51.100.0/24 --status review \
   --note 'Operator review requested'
