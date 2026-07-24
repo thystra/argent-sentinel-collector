@@ -1,0 +1,16 @@
+.gitignore
+CHANGELOG.md
+README.md
+REPOSITORY-INIT.md
+VERSION
+config/collector.json.example
+scripts/create-wordpress-drop.sh
+scripts/install-v0.2.1-hotfix.sh
+scripts/install-v0.2.2-reporting-guardrails.sh
+scripts/install.sh
+scripts/status.sh
+src/collector.py
+systemd/argent-sentinel-collector.service
+systemd/argent-sentinel-collector.timer
+tests/test_collector.py
+tests/test_reporting_guardrails.py

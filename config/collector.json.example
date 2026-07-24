@@ -1,0 +1,66 @@
+{
+  "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
+  "lock_file": "/run/argent-sentinel/collector.lock",
+  "incoming_globs": [
+    "/var/lib/argent-sentinel/drop/wordpress/*/incoming/*.json"
+  ],
+  "processing_dir": "/var/lib/argent-sentinel/collector/processing",
+  "archive_dir": "/var/lib/argent-sentinel/collector/archive",
+  "rejected_dir": "/var/lib/argent-sentinel/collector/rejected",
+  "max_batch_bytes": 20971520,
+  "trusted_cidrs": [
+    "127.0.0.0/8",
+    "::1/128",
+    "192.168.0.0/16"
+  ],
+  "policy": {
+    "window_seconds": 60,
+    "failure_threshold": 5,
+    "distinct_accounts": 2,
+    "single_account_threshold": 10,
+    "incident_merge_seconds": 300,
+    "max_enforcement_age_days": 7,
+    "ban_duration": "720h",
+    "reason_prefix": "argent-sentinel",
+    "network_review_window_days": 7,
+    "network_review_distinct_ips": 3,
+    "network_escalation_distinct_ips": 5,
+    "network_escalation_active_days": 3
+  },
+  "crowdsec": {
+    "enabled": false,
+    "cscli_path": "/usr/bin/cscli",
+    "command_timeout_seconds": 20
+  },
+  "enrichment": {
+    "enabled": true,
+    "rdap_url": "https://rdap.org/ip/{ip}",
+    "ripe_prefix_url": "https://stat.ripe.net/data/prefix-overview/data.json?resource={ip}",
+    "timeout_seconds": 12,
+    "cache_days": 7,
+    "enrich_when_actions_disabled": false,
+    "user_agent": "Argent-Sentinel/0.2.2 (+self-hosted security abuse reporting)",
+    "asn_classifications": {
+      "14061": "hosting"
+    }
+  },
+  "abuse_reporting": {
+    "enabled": false,
+    "test_mode": false,
+    "from": "",
+    "admin_copy": "",
+    "recipient_override": "",
+    "sendmail_path": "/usr/sbin/sendmail",
+    "send_timeout_seconds": 30,
+    "subject_prefix": "[Argent Sentinel]",
+    "message_id_domain": "argentwolf.org",
+    "operator_contact": "",
+    "max_evidence_uuids": 20,
+    "max_reports_per_run": 3,
+    "max_report_age_hours": 24,
+    "recipient_cooldown_minutes": 15,
+    "max_reports_per_recipient_per_day": 10,
+    "report_not_before_utc": "",
+    "retry_backoff_minutes": 60
+  }
+}
