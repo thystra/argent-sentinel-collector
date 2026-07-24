@@ -1,6 +1,11 @@
 {
   "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
   "lock_file": "/run/argent-sentinel/collector.lock",
+  "node": {
+    "id": "nidhoggur",
+    "fqdn": "nidhoggur.argentwolf.org",
+    "central_url": "https://sentinel.argentwolf.org/"
+  },
   "incoming_globs": [
     "/var/lib/argent-sentinel/drop/wordpress/*/incoming/*.json"
   ],
@@ -8,6 +13,26 @@
   "archive_dir": "/var/lib/argent-sentinel/collector/archive",
   "rejected_dir": "/var/lib/argent-sentinel/collector/rejected",
   "max_batch_bytes": 20971520,
+  "abuse_context": {
+    "enabled": false,
+    "incoming_globs": [
+      "/var/lib/argent-sentinel/drop/nginx/*/incoming/*.jsonl",
+      "/var/lib/argent-sentinel/drop/nginx/*/incoming/*.json"
+    ],
+    "processing_dir": "/var/lib/argent-sentinel/collector/abuse-context-processing",
+    "archive_dir": "/var/lib/argent-sentinel/collector/abuse-context-archive",
+    "rejected_dir": "/var/lib/argent-sentinel/collector/abuse-context-rejected",
+    "max_file_bytes": 20971520,
+    "max_line_bytes": 65536,
+    "fallback_correlation_seconds": 2
+  },
+  "network_reporting": {
+    "enabled": true,
+    "include_context_min_hostile_ips": 2,
+    "max_tuple_evidence": 20,
+    "automatic_cidr_blocking": false,
+    "automatic_network_email": false
+  },
   "trusted_cidrs": [
     "127.0.0.0/8",
     "::1/128",
@@ -39,10 +64,8 @@
     "timeout_seconds": 12,
     "cache_days": 7,
     "enrich_when_actions_disabled": false,
-    "user_agent": "Argent-Sentinel/0.2.2 (+self-hosted security abuse reporting)",
-    "asn_classifications": {
-      "14061": "hosting"
-    }
+    "user_agent": "Argent-Sentinel/0.3.0 (+self-hosted security abuse reporting)",
+    "asn_classifications": {}
   },
   "abuse_reporting": {
     "enabled": false,

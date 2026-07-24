@@ -1,37 +1,23 @@
 # Changelog
 
-## 0.2.2
+## 0.3.0 — 2026-07-24
 
-- Add production abuse-reporting guardrails:
-  - mandatory activation cutoff for production reporting;
-  - explicit test mode and recipient override restrictions;
-  - maximum reports per run;
-  - maximum report age;
-  - per-recipient cooldown and rolling daily limit;
-  - retry backoff;
-  - durable SQLite report-attempt audit records.
-- Add report-generation metadata, affected site identifiers, network details,
-  operator contact, and configurable Message-ID domain.
-- Add safe cross-filesystem file moves. Incoming batches are copied to a hidden
-  destination-side temporary file, flushed, atomically published, and only then
-  removed from the source filesystem when `rename(2)` returns `EXDEV`.
-- Add regression coverage for cross-filesystem batch claims and reporting
-  guardrails.
+- Add normalized Nginx abuse-context JSON/JSONL ingestion.
+- Add network observation, correlation, and network-case SQLite tables.
+- Correlate WordPress events with network tuples by trusted request ID, with a
+  bounded timestamp/path fallback.
+- Include source/destination ports and protocols in abuse reports when evidence
+  is available.
+- Include recent qualifying CIDR context in individual incident reports.
+- Add manual `network-list` and `network-set` commands without automatic CIDR
+  enforcement.
+- Add stable node/FQDN/central-service configuration for the future remote agent.
+- Add WordPress and Nginx onboarding/staging helpers.
+- Improve cutoff suppression details to include the incident `last_seen` value.
 
-## 0.2.1
+## 0.2.2 — 2026-07-23
 
-- Allow read-only status output while the scheduled collector holds its run lock.
-- Correct RIPE ASN object parsing and IPv6 RDAP URL handling.
-- Cache enrichment results and failures during a run.
-- Skip external enrichment when both CrowdSec and abuse reporting are disabled.
-- Improve SQLite busy handling and enrichment network-error handling.
-
-## 0.2.0
-
-- Initial host collector release.
-- Import immutable WordPress JSON batches into SQLite.
-- Deduplicate batches and event UUIDs.
-- Detect WordPress credential spraying and single-account brute force.
-- Submit optional long-lived CrowdSec decisions.
-- Perform RDAP/ASN enrichment and generate sanitized abuse reports.
-- Track `/24` IPv4 and `/64` IPv6 review candidates without automatic CIDR bans.
+- Add abuse-report activation cutoff, age gate, per-run limit, recipient
+  cooldown, recipient daily limit, retry backoff, audit history, and test-mode
+  constraints.
+- Preserve cross-filesystem safe batch claiming and enrichment/status fixes.

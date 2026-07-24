@@ -2,8 +2,8 @@
 """Argent Sentinel host collector.
 
 Imports atomic WordPress event batches, deduplicates immutable events, correlates
-credential-spray incidents, and optionally submits long-lived CrowdSec decisions
-and sanitized abuse reports.
+credential-spray incidents, imports Nginx abuse-context observations, correlates
+network tuples, and optionally submits CrowdSec decisions and sanitized abuse reports.
 """
 
 from __future__ import annotations
@@ -39,6 +39,11 @@ UTC = dt.timezone.utc
 
 DEFAULTS: dict[str, Any] = {
     "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
+    "node": {
+        "id": "nidhoggur",
+        "fqdn": "nidhoggur.argentwolf.org",
+        "central_url": "https://sentinel.argentwolf.org/",
+    },
     "lock_file": "/run/argent-sentinel/collector.lock",
     "incoming_globs": [
         "/var/lib/argent-sentinel/drop/wordpress/*/incoming/*.json"
@@ -47,6 +52,26 @@ DEFAULTS: dict[str, Any] = {
     "archive_dir": "/var/lib/argent-sentinel/collector/archive",
     "rejected_dir": "/var/lib/argent-sentinel/collector/rejected",
     "max_batch_bytes": 20 * 1024 * 1024,
+    "abuse_context": {
+        "enabled": False,
+        "incoming_globs": [
+            "/var/lib/argent-sentinel/drop/nginx/*/incoming/*.jsonl",
+            "/var/lib/argent-sentinel/drop/nginx/*/incoming/*.json",
+        ],
+        "processing_dir": "/var/lib/argent-sentinel/collector/abuse-context-processing",
+        "archive_dir": "/var/lib/argent-sentinel/collector/abuse-context-archive",
+        "rejected_dir": "/var/lib/argent-sentinel/collector/abuse-context-rejected",
+        "max_file_bytes": 20 * 1024 * 1024,
+        "max_line_bytes": 64 * 1024,
+        "fallback_correlation_seconds": 2,
+    },
+    "network_reporting": {
+        "enabled": True,
+        "include_context_min_hostile_ips": 2,
+        "max_tuple_evidence": 20,
+        "automatic_cidr_blocking": False,
+        "automatic_network_email": False,
+    },
     "trusted_cidrs": ["127.0.0.0/8", "::1/128", "192.168.0.0/16"],
     "policy": {
         "window_seconds": 60,
@@ -74,7 +99,7 @@ DEFAULTS: dict[str, Any] = {
         "timeout_seconds": 12,
         "cache_days": 7,
         "enrich_when_actions_disabled": False,
-        "user_agent": "Argent-Sentinel/0.2.2 (+self-hosted security abuse reporting)",
+        "user_agent": "Argent-Sentinel/0.3.0 (+self-hosted security abuse reporting)",
         "asn_classifications": {},
     },
     "abuse_reporting": {
@@ -175,6 +200,24 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise CollectorError("policy.reason_prefix is required")
     for cidr in config.get("trusted_cidrs", []):
         ipaddress.ip_network(str(cidr), strict=False)
+    node = config.get("node", {})
+    if not str(node.get("id", "")).strip():
+        raise CollectorError("node.id is required")
+    central_url = str(node.get("central_url", "")).strip()
+    if central_url and urllib.parse.urlparse(central_url).scheme != "https":
+        raise CollectorError("node.central_url must use https")
+    context = config.get("abuse_context", {})
+    for name in ("max_file_bytes", "max_line_bytes", "fallback_correlation_seconds"):
+        if int(context.get(name, 0)) < 1:
+            raise CollectorError(f"abuse_context.{name} must be positive")
+    network_reporting = config.get("network_reporting", {})
+    for name in ("include_context_min_hostile_ips", "max_tuple_evidence"):
+        if int(network_reporting.get(name, 0)) < 1:
+            raise CollectorError(f"network_reporting.{name} must be positive")
+    if network_reporting.get("automatic_cidr_blocking"):
+        raise CollectorError("network_reporting.automatic_cidr_blocking is not supported in v0.3.0")
+    if network_reporting.get("automatic_network_email"):
+        raise CollectorError("network_reporting.automatic_network_email is not supported in v0.3.0")
     reporting = config["abuse_reporting"]
     if reporting.get("enabled") and not valid_email_header(str(reporting.get("from", ""))):
         raise CollectorError("abuse_reporting.from must contain a valid email address")
@@ -274,7 +317,9 @@ class StateDB:
                 source_ip TEXT,
                 account_key TEXT,
                 user_agent TEXT,
+                request_method TEXT,
                 request_path TEXT,
+                request_id TEXT,
                 metadata_json TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS events_ip_time
@@ -339,8 +384,79 @@ class StateDB:
                 ON report_attempts(recipient, test_mode, status, attempted_epoch);
             CREATE INDEX IF NOT EXISTS report_attempts_incident_time
                 ON report_attempts(incident_uuid, attempted_epoch);
+            CREATE TABLE IF NOT EXISTS observation_files (
+                file_uuid TEXT PRIMARY KEY,
+                sha256 TEXT NOT NULL UNIQUE,
+                source_host TEXT NOT NULL,
+                original_path TEXT NOT NULL,
+                archived_path TEXT,
+                imported_at TEXT NOT NULL,
+                observation_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS network_observations (
+                observation_uuid TEXT PRIMARY KEY,
+                file_uuid TEXT NOT NULL REFERENCES observation_files(file_uuid),
+                occurred_epoch INTEGER NOT NULL,
+                occurred_at TEXT NOT NULL,
+                source_host TEXT NOT NULL,
+                request_id TEXT,
+                source_ip TEXT NOT NULL,
+                source_port INTEGER,
+                destination_ip TEXT,
+                destination_port INTEGER,
+                transport_protocol TEXT,
+                application_protocol TEXT,
+                tls_protocol TEXT,
+                host TEXT,
+                server_name TEXT,
+                request_method TEXT,
+                request_uri TEXT,
+                http_status INTEGER,
+                user_agent TEXT,
+                raw_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS observations_request_id
+                ON network_observations(request_id, source_ip);
+            CREATE INDEX IF NOT EXISTS observations_ip_time
+                ON network_observations(source_ip, occurred_epoch);
+            CREATE TABLE IF NOT EXISTS incident_network_observations (
+                incident_uuid TEXT NOT NULL REFERENCES incidents(incident_uuid),
+                observation_uuid TEXT NOT NULL REFERENCES network_observations(observation_uuid),
+                correlation_method TEXT NOT NULL,
+                correlated_at TEXT NOT NULL,
+                PRIMARY KEY (incident_uuid, observation_uuid)
+            );
+            CREATE TABLE IF NOT EXISTS network_cases (
+                network_cidr TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'observing',
+                hostile_ips INTEGER NOT NULL DEFAULT 0,
+                incident_count INTEGER NOT NULL DEFAULT 0,
+                event_count INTEGER NOT NULL DEFAULT 0,
+                active_days INTEGER NOT NULL DEFAULT 0,
+                first_seen TEXT,
+                last_seen TEXT,
+                operator_note TEXT,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS network_case_incidents (
+                network_cidr TEXT NOT NULL REFERENCES network_cases(network_cidr),
+                incident_uuid TEXT NOT NULL REFERENCES incidents(incident_uuid),
+                PRIMARY KEY (network_cidr, incident_uuid)
+            );
+            CREATE TABLE IF NOT EXISTS network_case_reports (
+                report_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                network_cidr TEXT NOT NULL REFERENCES network_cases(network_cidr),
+                report_type TEXT NOT NULL,
+                attempted_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                recipient TEXT,
+                detail TEXT,
+                message_id TEXT
+            );
             """
         )
+        self.ensure_column("events", "request_method", "TEXT")
+        self.ensure_column("events", "request_id", "TEXT")
         self.ensure_column("incidents", "registered_cidr", "TEXT")
         self.ensure_column("incidents", "next_report_after_epoch", "INTEGER NOT NULL DEFAULT 0")
         self.ensure_column("incidents", "report_sent_epoch", "INTEGER")
@@ -387,8 +503,8 @@ class StateDB:
                     """INSERT OR IGNORE INTO events
                     (event_uuid, batch_uuid, occurred_epoch, occurred_at, recorded_at,
                      site_id, source_host, event_type, outcome, source_ip, account_key,
-                     user_agent, request_path, metadata_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     user_agent, request_method, request_path, request_id, metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         event["event_uuid"],
                         batch["batch_uuid"],
@@ -402,7 +518,9 @@ class StateDB:
                         event.get("source_ip"),
                         event.get("account_key"),
                         event.get("user_agent"),
+                        event.get("request_method"),
                         event.get("request_path"),
+                        event.get("request_id"),
                         json.dumps(event.get("metadata", {}), sort_keys=True, separators=(",", ":")),
                     ),
                 )
@@ -421,7 +539,7 @@ class StateDB:
         return list(
             self.conn.execute(
                 """SELECT event_uuid, occurred_epoch, occurred_at, site_id, account_key,
-                          user_agent, request_path
+                          user_agent, request_method, request_path, request_id
                    FROM events
                    WHERE source_ip = ?
                      AND event_type = 'login_failed'
@@ -655,6 +773,241 @@ class StateDB:
             )
         )
 
+    def import_observations(
+        self,
+        file_uuid: str,
+        digest: str,
+        source_host: str,
+        original_path: Path,
+        observations: Sequence[Mapping[str, Any]],
+    ) -> int:
+        imported = 0
+        with self.conn:
+            existing = self.conn.execute(
+                "SELECT file_uuid FROM observation_files WHERE sha256 = ?", (digest,)
+            ).fetchone()
+            if existing is not None:
+                return 0
+            self.conn.execute(
+                """INSERT INTO observation_files
+                (file_uuid, sha256, source_host, original_path, imported_at, observation_count)
+                VALUES (?, ?, ?, ?, ?, 0)""",
+                (file_uuid, digest, source_host, str(original_path), utc_text()),
+            )
+            for item in observations:
+                cursor = self.conn.execute(
+                    """INSERT OR IGNORE INTO network_observations
+                    (observation_uuid, file_uuid, occurred_epoch, occurred_at, source_host,
+                     request_id, source_ip, source_port, destination_ip, destination_port,
+                     transport_protocol, application_protocol, tls_protocol, host, server_name,
+                     request_method, request_uri, http_status, user_agent, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        item["observation_uuid"], file_uuid, item["occurred_epoch"],
+                        item["occurred_at"], item["source_host"], item.get("request_id"),
+                        item["source_ip"], item.get("source_port"), item.get("destination_ip"),
+                        item.get("destination_port"), item.get("transport_protocol"),
+                        item.get("application_protocol"), item.get("tls_protocol"),
+                        item.get("host"), item.get("server_name"), item.get("request_method"),
+                        item.get("request_uri"), item.get("http_status"), item.get("user_agent"),
+                        json.dumps(item.get("raw", {}), sort_keys=True, separators=(",", ":")),
+                    ),
+                )
+                imported += 1 if cursor.rowcount == 1 else 0
+            self.conn.execute(
+                "UPDATE observation_files SET observation_count = ? WHERE file_uuid = ?",
+                (imported, file_uuid),
+            )
+        return imported
+
+    def set_observation_archive_path(self, file_uuid: str, path: Path) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE observation_files SET archived_path = ? WHERE file_uuid = ?",
+                (str(path), file_uuid),
+            )
+
+    def correlate_network_observations(self, fallback_seconds: int) -> int:
+        linked = 0
+        with self.conn:
+            exact = self.conn.execute(
+                """SELECT DISTINCT ie.incident_uuid, no.observation_uuid
+                   FROM incident_events ie
+                   JOIN events e ON e.event_uuid = ie.event_uuid
+                   JOIN network_observations no
+                     ON no.request_id = e.request_id AND no.source_ip = e.source_ip
+                   WHERE e.request_id IS NOT NULL
+                     AND NOT EXISTS (
+                         SELECT 1 FROM incident_network_observations ino
+                         WHERE ino.incident_uuid = ie.incident_uuid
+                           AND ino.observation_uuid = no.observation_uuid
+                     )"""
+            ).fetchall()
+            for row in exact:
+                self.conn.execute(
+                    """INSERT OR IGNORE INTO incident_network_observations
+                    (incident_uuid, observation_uuid, correlation_method, correlated_at)
+                    VALUES (?, ?, 'request-id', ?)""",
+                    (row["incident_uuid"], row["observation_uuid"], utc_text()),
+                )
+                linked += 1
+
+            approximate = self.conn.execute(
+                """SELECT DISTINCT ie.incident_uuid, no.observation_uuid
+                   FROM incident_events ie
+                   JOIN events e ON e.event_uuid = ie.event_uuid
+                   JOIN network_observations no
+                     ON no.source_ip = e.source_ip
+                    AND ABS(no.occurred_epoch - e.occurred_epoch) <= ?
+                    AND (e.request_path IS NULL OR no.request_uri IS NULL
+                         OR no.request_uri = e.request_path
+                         OR no.request_uri LIKE e.request_path || '?%')
+                   WHERE e.request_id IS NULL
+                     AND NOT EXISTS (
+                         SELECT 1 FROM incident_network_observations ino
+                         WHERE ino.incident_uuid = ie.incident_uuid
+                           AND ino.observation_uuid = no.observation_uuid
+                     )""",
+                (int(fallback_seconds),),
+            ).fetchall()
+            for row in approximate:
+                self.conn.execute(
+                    """INSERT OR IGNORE INTO incident_network_observations
+                    (incident_uuid, observation_uuid, correlation_method, correlated_at)
+                    VALUES (?, ?, 'timestamp-path', ?)""",
+                    (row["incident_uuid"], row["observation_uuid"], utc_text()),
+                )
+                linked += 1
+        return linked
+
+    def incident_network_evidence(self, incident_uuid: str, limit: int = 20) -> list[sqlite3.Row]:
+        bounded = max(1, min(100, int(limit)))
+        return list(
+            self.conn.execute(
+                """SELECT no.*, ino.correlation_method
+                   FROM incident_network_observations ino
+                   JOIN network_observations no
+                     ON no.observation_uuid = ino.observation_uuid
+                   WHERE ino.incident_uuid = ?
+                   ORDER BY no.occurred_epoch ASC, no.observation_uuid ASC
+                   LIMIT ?""",
+                (incident_uuid, bounded),
+            )
+        )
+
+    def network_context(self, network_cidr: str, policy: Mapping[str, Any]) -> dict[str, Any]:
+        cutoff = int(utc_now().timestamp()) - int(policy["network_review_window_days"]) * 86400
+        row = self.conn.execute(
+            """SELECT COUNT(DISTINCT source_ip) AS hostile_ips,
+                      COUNT(*) AS incident_count,
+                      COALESCE(SUM(event_count), 0) AS event_count,
+                      COUNT(DISTINCT substr(first_seen, 1, 10)) AS active_days,
+                      MIN(first_seen) AS first_seen,
+                      MAX(last_seen) AS last_seen
+               FROM incidents
+               WHERE network_cidr = ? AND last_seen_epoch >= ?""",
+            (network_cidr, cutoff),
+        ).fetchone()
+        hostile_ips = int(row["hostile_ips"] or 0)
+        active_days = int(row["active_days"] or 0)
+        status = "observing"
+        if hostile_ips >= int(policy["network_escalation_distinct_ips"]) or active_days >= int(policy["network_escalation_active_days"]):
+            status = "escalation-review"
+        elif hostile_ips >= int(policy["network_review_distinct_ips"]):
+            status = "review"
+        existing = self.conn.execute(
+            "SELECT status, operator_note FROM network_cases WHERE network_cidr = ?",
+            (network_cidr,),
+        ).fetchone()
+        if existing is not None and str(existing["status"]) in {"blocked", "closed"}:
+            status = str(existing["status"])
+        return {
+            "network_cidr": network_cidr,
+            "hostile_ips": hostile_ips,
+            "incident_count": int(row["incident_count"] or 0),
+            "event_count": int(row["event_count"] or 0),
+            "active_days": active_days,
+            "first_seen": row["first_seen"],
+            "last_seen": row["last_seen"],
+            "status": status,
+            "operator_note": existing["operator_note"] if existing is not None else None,
+        }
+
+    def sync_network_cases(self, policy: Mapping[str, Any]) -> int:
+        changed = 0
+        candidates = self.network_candidates(policy)
+        now = utc_text()
+        with self.conn:
+            for candidate in candidates:
+                context = self.network_context(str(candidate["network_cidr"]), policy)
+                current = self.conn.execute(
+                    "SELECT status FROM network_cases WHERE network_cidr = ?",
+                    (context["network_cidr"],),
+                ).fetchone()
+                status = context["status"]
+                if current is not None and str(current["status"]) in {"blocked", "closed"}:
+                    status = str(current["status"])
+                self.conn.execute(
+                    """INSERT INTO network_cases
+                    (network_cidr, status, hostile_ips, incident_count, event_count, active_days,
+                     first_seen, last_seen, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(network_cidr) DO UPDATE SET
+                     status=CASE WHEN network_cases.status IN ('blocked','closed')
+                                 THEN network_cases.status ELSE excluded.status END,
+                     hostile_ips=excluded.hostile_ips,
+                     incident_count=excluded.incident_count,
+                     event_count=excluded.event_count,
+                     active_days=excluded.active_days,
+                     first_seen=excluded.first_seen,
+                     last_seen=excluded.last_seen,
+                     updated_at=excluded.updated_at""",
+                    (
+                        context["network_cidr"], status, context["hostile_ips"],
+                        context["incident_count"], context["event_count"],
+                        context["active_days"], context["first_seen"],
+                        context["last_seen"], now,
+                    ),
+                )
+                self.conn.execute(
+                    """INSERT OR IGNORE INTO network_case_incidents(network_cidr, incident_uuid)
+                       SELECT ?, incident_uuid FROM incidents WHERE network_cidr = ?""",
+                    (context["network_cidr"], context["network_cidr"]),
+                )
+                changed += 1
+        return changed
+
+    def network_cases(self, limit: int = 100) -> list[sqlite3.Row]:
+        return list(self.conn.execute(
+            """SELECT * FROM network_cases
+               ORDER BY CASE status WHEN 'blocked' THEN 0 WHEN 'escalation-review' THEN 1
+                                    WHEN 'review' THEN 2 ELSE 3 END,
+                        hostile_ips DESC, last_seen DESC LIMIT ?""",
+            (max(1, min(500, int(limit))),),
+        ))
+
+    def set_network_case(self, network_cidr: str, status: str, note: str | None) -> None:
+        normalized = str(ipaddress.ip_network(network_cidr, strict=False))
+        allowed = {"observing", "review", "escalation-review", "blocked", "closed"}
+        if status not in allowed:
+            raise CollectorError(f"Unsupported network case status: {status}")
+        context = self.network_context(normalized, DEFAULTS["policy"])
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO network_cases
+                (network_cidr, status, hostile_ips, incident_count, event_count, active_days,
+                 first_seen, last_seen, operator_note, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(network_cidr) DO UPDATE SET
+                 status=excluded.status, operator_note=excluded.operator_note,
+                 updated_at=excluded.updated_at""",
+                (
+                    normalized, status, context["hostile_ips"], context["incident_count"],
+                    context["event_count"], context["active_days"], context["first_seen"],
+                    context["last_seen"], clean_optional(note, 2000), utc_text(),
+                ),
+            )
+
     def cache_get(self, source_ip: str, now_epoch: int) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT * FROM enrichment_cache WHERE source_ip = ? AND expires_epoch > ?",
@@ -689,7 +1042,7 @@ class StateDB:
 
     def counts(self) -> dict[str, int]:
         result: dict[str, int] = {}
-        for table in ("batches", "events", "incidents"):
+        for table in ("batches", "events", "incidents", "network_observations", "network_cases"):
             result[table] = int(self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
         result["pending_decisions"] = int(
             self.conn.execute("SELECT COUNT(*) FROM incidents WHERE decision_status IN ('pending','failed')").fetchone()[0]
@@ -851,9 +1204,87 @@ def normalize_event(raw: Any, site_id: str) -> dict[str, Any]:
         "source_ip": source_ip,
         "account_key": account_key,
         "user_agent": clean_optional(raw.get("user_agent"), 512),
+        "request_method": clean_optional(request.get("method"), 16),
         "request_path": clean_optional(request.get("path"), 1024),
+        "request_id": normalize_request_id(request.get("request_id") or metadata.get("request_id")),
         "metadata": metadata,
     }
+
+
+def normalize_network_observation(raw: Any, default_source_host: str) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise CollectorError("Abuse-context observation must be an object")
+    timestamp = first_value(raw, "occurred_at", "timestamp", "time", "time_iso8601", "@timestamp")
+    occurred = parse_time(timestamp)
+    source_value = first_value(raw, "source_ip", "remote_addr", "client_ip")
+    if source_value is None:
+        raise CollectorError("Abuse-context observation is missing source_ip")
+    try:
+        source_ip = str(ipaddress.ip_address(str(source_value)))
+    except ValueError as exc:
+        raise CollectorError("Abuse-context observation contains malformed source_ip") from exc
+    destination_ip = None
+    destination_value = first_value(raw, "destination_ip", "server_addr", "local_addr")
+    if destination_value is not None:
+        try:
+            destination_ip = str(ipaddress.ip_address(str(destination_value)))
+        except ValueError as exc:
+            raise CollectorError("Abuse-context observation contains malformed destination_ip") from exc
+    status_value = first_value(raw, "http_status", "status")
+    try:
+        http_status = int(status_value) if status_value not in (None, "", "-") else None
+    except (TypeError, ValueError):
+        http_status = None
+    canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return {
+        "observation_uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, f"argent-sentinel:{fingerprint}")),
+        "occurred_epoch": int(occurred.timestamp()),
+        "occurred_at": utc_text(occurred),
+        "source_host": clean_optional(first_value(raw, "source_host", "node_id"), 255) or default_source_host,
+        "request_id": normalize_request_id(first_value(raw, "request_id", "requestid", "nginx_request_id")),
+        "source_ip": source_ip,
+        "source_port": normalize_port(first_value(raw, "source_port", "remote_port", "client_port")),
+        "destination_ip": destination_ip,
+        "destination_port": normalize_port(first_value(raw, "destination_port", "server_port", "local_port")),
+        "transport_protocol": (clean_optional(first_value(raw, "transport_protocol", "transport"), 16) or "TCP").upper(),
+        "application_protocol": clean_optional(first_value(raw, "application_protocol", "server_protocol", "protocol"), 64),
+        "tls_protocol": clean_optional(first_value(raw, "tls_protocol", "ssl_protocol"), 64),
+        "host": clean_optional(first_value(raw, "host", "http_host"), 255),
+        "server_name": clean_optional(first_value(raw, "server_name", "vhost"), 255),
+        "request_method": clean_optional(first_value(raw, "request_method", "method"), 16),
+        "request_uri": clean_optional(first_value(raw, "request_uri", "uri", "request_path"), 2048),
+        "http_status": http_status,
+        "user_agent": clean_optional(first_value(raw, "user_agent", "http_user_agent"), 512),
+        "raw": raw,
+    }
+
+
+def normalize_request_id(value: Any) -> str | None:
+    cleaned = clean_optional(value, 128)
+    if cleaned is None:
+        return None
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:")
+    if len(cleaned) < 8 or any(character not in allowed for character in cleaned):
+        return None
+    return cleaned
+
+
+def normalize_port(value: Any) -> int | None:
+    if value in (None, "", "-"):
+        return None
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
+def first_value(raw: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in raw and raw[key] not in (None, "", "-"):
+            return raw[key]
+    return None
 
 
 def clean_optional(value: Any, limit: int) -> str | None:
@@ -885,8 +1316,16 @@ class Collector:
             except Exception as exc:  # continue processing independent batches
                 LOG.exception("Rejecting batch %s: %s", path, exc)
                 self.reject_file(claimed or path, str(exc))
+        context_files = self.import_abuse_context_files()
+        linked = self.db.correlate_network_observations(
+            int(self.config["abuse_context"]["fallback_correlation_seconds"])
+        )
+        self.db.sync_network_cases(self.config["policy"])
         self.retry_pending_incidents()
-        LOG.info("Collector run complete: %d files", imported_files)
+        LOG.info(
+            "Collector run complete: %d WordPress files, %d abuse-context files, %d tuple links",
+            imported_files, context_files, linked,
+        )
         return imported_files
 
     def incoming_files(self) -> list[Path]:
@@ -898,6 +1337,106 @@ class Collector:
                     continue
                 paths.add(path)
         return sorted(paths, key=lambda item: str(item))
+
+    def abuse_context_files(self) -> list[Path]:
+        if not self.config["abuse_context"].get("enabled"):
+            return []
+        paths: set[Path] = set()
+        for pattern in self.config["abuse_context"].get("incoming_globs", []):
+            for value in glob.glob(str(pattern)):
+                path = Path(value)
+                if path.name.startswith(".") or path.suffix.lower() not in {".json", ".jsonl", ".ndjson"}:
+                    continue
+                paths.add(path)
+        return sorted(paths, key=lambda item: str(item))
+
+    def import_abuse_context_files(self) -> int:
+        imported_files = 0
+        for original in self.abuse_context_files():
+            claimed: Path | None = None
+            try:
+                claimed = self.claim_context_file(original)
+                self.process_abuse_context_file(claimed, original)
+                imported_files += 1
+            except Exception as exc:
+                LOG.exception("Rejecting abuse-context file %s: %s", original, exc)
+                self.reject_context_file(claimed or original, str(exc))
+        return imported_files
+
+    def claim_context_file(self, path: Path) -> Path:
+        initial = path.lstat()
+        if path.is_symlink() or not path.is_file():
+            raise CollectorError("Abuse-context input must be a regular, non-symlink file")
+        if initial.st_size <= 0 or initial.st_size > int(self.config["abuse_context"]["max_file_bytes"]):
+            raise CollectorError("Abuse-context file size is outside configured limits")
+        processing = Path(self.config["abuse_context"]["processing_dir"])
+        processing.mkdir(parents=True, exist_ok=True, mode=0o750)
+        claimed = processing / f"{uuid.uuid4()}-{path.name}"
+        self.move_regular_file(path, claimed, initial)
+        if os.geteuid() == 0:
+            os.chown(claimed, 0, 0)
+        os.chmod(claimed, 0o400)
+        return claimed
+
+    def process_abuse_context_file(self, path: Path, original_path: Path) -> None:
+        data = path.read_bytes()
+        if not data or len(data) > int(self.config["abuse_context"]["max_file_bytes"]):
+            raise CollectorError("Abuse-context file size is outside configured limits")
+        digest = hashlib.sha256(data).hexdigest()
+        raw_items: list[Any] = []
+        stripped = data.lstrip()
+        if stripped.startswith(b"["):
+            try:
+                parsed = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise CollectorError(f"Abuse-context JSON is invalid: {exc}") from exc
+            if not isinstance(parsed, list):
+                raise CollectorError("Abuse-context JSON root must be an array")
+            raw_items = parsed
+        else:
+            for number, line in enumerate(data.splitlines(), 1):
+                if not line.strip():
+                    continue
+                if len(line) > int(self.config["abuse_context"]["max_line_bytes"]):
+                    raise CollectorError(f"Abuse-context line {number} exceeds max_line_bytes")
+                try:
+                    raw_items.append(json.loads(line.decode("utf-8")))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise CollectorError(f"Abuse-context line {number} is invalid JSON: {exc}") from exc
+        source_host = str(self.config["node"]["id"])
+        observations = [normalize_network_observation(item, source_host) for item in raw_items]
+        file_uuid = str(uuid.uuid4())
+        imported = self.db.import_observations(
+            file_uuid, digest, source_host, original_path, observations
+        )
+        archive = self.archive_context_file(path, original_path.name, file_uuid)
+        self.db.set_observation_archive_path(file_uuid, archive)
+        LOG.info("Imported abuse-context file %s: %d observations", original_path, imported)
+
+    def archive_context_file(self, path: Path, original_name: str, file_uuid: str) -> Path:
+        now = utc_now()
+        destination = Path(self.config["abuse_context"]["archive_dir"]) / f"{now:%Y}" / f"{now:%m}" / f"{now:%d}"
+        destination.mkdir(parents=True, exist_ok=True, mode=0o750)
+        final = destination / Path(original_name).name
+        if final.exists():
+            final = destination / f"{Path(original_name).stem}-{file_uuid}{Path(original_name).suffix}"
+        self.move_regular_file(path, final)
+        os.chmod(final, 0o640)
+        return final
+
+    def reject_context_file(self, path: Path, error: str) -> None:
+        if not path.exists() or path.is_symlink():
+            return
+        destination = Path(self.config["abuse_context"]["rejected_dir"]) / f"{utc_now():%Y-%m-%d}"
+        destination.mkdir(parents=True, exist_ok=True, mode=0o750)
+        final = destination / path.name
+        if final.exists():
+            final = destination / f"{path.stem}-{uuid.uuid4()}{path.suffix}"
+        self.move_regular_file(path, final)
+        os.chmod(final, 0o640)
+        final.with_suffix(final.suffix + ".error.txt").write_text(
+            clean_optional(error, 2000) or "Unknown error", encoding="utf-8"
+        )
 
     def claim_file(self, path: Path) -> Path:
         try:
@@ -1593,6 +2132,13 @@ class Collector:
             if len(agents) >= 2:
                 break
         network_name = clean_optional(enrichment.get("network_name"), 255) or "unknown"
+        network_context = self.db.network_context(
+            str(incident["network_cidr"]), self.config["policy"]
+        ) if incident["network_cidr"] else None
+        tuple_evidence = self.db.incident_network_evidence(
+            str(incident["incident_uuid"]),
+            int(self.config["network_reporting"]["max_tuple_evidence"]),
+        )
         body = [
             "This is an automated abuse report from a self-hosted server operator.",
             "",
@@ -1611,6 +2157,24 @@ class Collector:
             f"Action taken: CrowdSec decision status {incident['decision_status']}; configured duration {self.config['policy']['ban_duration']}",
             f"Incident UUID: {incident['incident_uuid']}",
         ]
+        if (
+            network_context
+            and self.config["network_reporting"].get("enabled")
+            and int(network_context["hostile_ips"])
+                >= int(self.config["network_reporting"]["include_context_min_hostile_ips"])
+        ):
+            body.extend([
+                "",
+                "Recent CIDR context (qualifying Sentinel incidents only):",
+                f"  CIDR: {network_context['network_cidr']}",
+                f"  Distinct hostile source IPs: {network_context['hostile_ips']}",
+                f"  Qualifying incidents: {network_context['incident_count']}",
+                f"  Failed authentication events: {network_context['event_count']}",
+                f"  Active days: {network_context['active_days']}",
+                f"  First/last observed: {network_context['first_seen'] or 'unknown'} to {network_context['last_seen'] or 'unknown'}",
+                f"  Network case status: {network_context['status']}",
+                "  CIDR blocking is manual; this context does not assert that the entire allocation is abusive.",
+            ])
         operator_contact = clean_optional(settings.get("operator_contact"), 254)
         if operator_contact:
             body.append(f"Operator contact: {operator_contact}")
@@ -1624,6 +2188,31 @@ class Collector:
             "Evidence event UUIDs:",
             *[f"  - {event_id}" for event_id in event_ids],
         ])
+        if tuple_evidence:
+            body.extend(["", "Correlated network evidence:"])
+            for row in tuple_evidence:
+                source = f"{row['source_ip']}:{row['source_port']}" if row['source_port'] else str(row['source_ip'])
+                destination_ip = row['destination_ip'] or "unknown"
+                destination = f"{destination_ip}:{row['destination_port']}" if row['destination_port'] else destination_ip
+                protocols = " / ".join(
+                    str(value) for value in (
+                        row['transport_protocol'], row['application_protocol'], row['tls_protocol']
+                    ) if value
+                ) or "unknown"
+                request = " ".join(
+                    str(value) for value in (row['request_method'], row['request_uri']) if value
+                ) or "request unavailable"
+                status_text = f" status={row['http_status']}" if row['http_status'] is not None else ""
+                body.append(
+                    f"  - {row['occurred_at']} {source} -> {destination}; {protocols}; "
+                    f"{request}{status_text}; correlation={row['correlation_method']}"
+                )
+        else:
+            body.extend([
+                "",
+                "Correlated network evidence: unavailable for this incident.",
+                "The application evidence below remains sufficient to identify the source IP and time window.",
+            ])
         if agents:
             body.extend(["", "Sanitized user-agent examples:", *[f"  - {agent}" for agent in agents]])
         body.extend([
@@ -1737,6 +2326,13 @@ def configure_logging(verbose: bool) -> None:
 def status_output(collector: Collector) -> dict[str, Any]:
     return {
         "counts": collector.db.counts(),
+        "node": collector.config["node"],
+        "abuse_context": {
+            "enabled": bool(collector.config["abuse_context"]["enabled"]),
+            "incoming_globs": collector.config["abuse_context"]["incoming_globs"],
+            "fallback_correlation_seconds": collector.config["abuse_context"]["fallback_correlation_seconds"],
+        },
+        "network_reporting": collector.config["network_reporting"],
         "crowdsec_enabled": bool(collector.config["crowdsec"]["enabled"]),
         "abuse_reporting_enabled": bool(collector.config["abuse_reporting"]["enabled"]),
         "abuse_reporting_guardrails": {
@@ -1755,6 +2351,7 @@ def status_output(collector: Collector) -> dict[str, Any]:
         "recent_incidents": [dict(row) for row in collector.db.recent_incidents(20)],
         "recent_report_attempts": [dict(row) for row in collector.db.recent_report_attempts(20)],
         "network_candidates": collector.db.network_candidates(collector.config["policy"]),
+        "network_cases": [dict(row) for row in collector.db.network_cases(100)],
     }
 
 
@@ -1765,6 +2362,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("run", help="Import batches, evaluate policy, and retry actions")
     sub.add_parser("status", help="Print collector state and CIDR candidates")
+    sub.add_parser("network-list", help="Print network case records")
+    network_set = sub.add_parser("network-set", help="Set a manual network-case status")
+    network_set.add_argument("--cidr", required=True)
+    network_set.add_argument(
+        "--status", required=True,
+        choices=("observing", "review", "escalation-review", "blocked", "closed"),
+    )
+    network_set.add_argument("--note", default="")
     sub.add_parser("validate-config", help="Validate configuration and exit")
     args = parser.parse_args(argv)
     configure_logging(args.verbose)
@@ -1773,10 +2378,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "validate-config":
             print(json.dumps({"status": "ok"}, indent=2))
             return 0
-        if args.command == "status":
+        if args.command in {"status", "network-list", "network-set"}:
             collector = Collector(config)
             try:
-                print(json.dumps(status_output(collector), indent=2, sort_keys=True))
+                if args.command == "status":
+                    print(json.dumps(status_output(collector), indent=2, sort_keys=True))
+                elif args.command == "network-list":
+                    collector.db.sync_network_cases(config["policy"])
+                    print(json.dumps([dict(row) for row in collector.db.network_cases(500)], indent=2, sort_keys=True))
+                else:
+                    collector.db.set_network_case(args.cidr, args.status, args.note)
+                    print(json.dumps({
+                        "network_cidr": str(ipaddress.ip_network(args.cidr, strict=False)),
+                        "status": args.status,
+                        "note": clean_optional(args.note, 2000),
+                        "enforcement_changed": False,
+                    }, indent=2, sort_keys=True))
             finally:
                 collector.close()
             return 0
