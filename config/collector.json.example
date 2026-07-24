@@ -31,7 +31,16 @@
     "send_timeout_seconds": 30,
     "sendmail_path": "/usr/sbin/sendmail",
     "subject_prefix": "[Argent Sentinel]",
-    "test_mode": false
+    "test_mode": false,
+    "attach_xarf": true,
+    "xarf_version": "4.2.0",
+    "xarf_max_evidence_lines": 20,
+    "resolve_target_dns": true,
+    "resolve_source_rdns": true,
+    "public_target_ips": [],
+    "reporter_org": "",
+    "reporter_org_domain": "",
+    "reporter_contact_name": ""
   },
   "archive_dir": "/var/lib/argent-sentinel/collector/archive",
   "crowdsec": {
@@ -47,7 +56,7 @@
     "rdap_url": "https://rdap.org/ip/{ip}",
     "ripe_prefix_url": "https://stat.ripe.net/data/prefix-overview/data.json?resource={ip}",
     "timeout_seconds": 12,
-    "user_agent": "Argent-Sentinel/0.4.1 (+self-hosted security abuse reporting)"
+    "user_agent": "Argent-Sentinel/0.4.3 (+self-hosted security abuse reporting)"
   },
   "incoming_globs": [
     "/var/lib/argent-sentinel/drop/wordpress/*/incoming/*.json",

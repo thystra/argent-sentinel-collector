@@ -134,7 +134,28 @@ class V042Test(unittest.TestCase):
             "Report would normally be suppressed: CrowdSec reports address is allowlisted",
             decoded_body,
         )
-        self.assertNotIn("abuse@example.net", payload)
+        from email import policy as email_policy
+        from email.parser import Parser as EmailParser
+
+        parsed_message = EmailParser(
+            policy=email_policy.default
+        ).parsestr(payload)
+
+        recipient_headers = "\n".join(
+            str(parsed_message.get(name, ""))
+            for name in ("To", "Cc", "Bcc")
+        )
+
+        self.assertEqual(
+            "goshawk066@gmail.com",
+            str(parsed_message["To"]),
+        )
+        self.assertIsNone(parsed_message["Cc"])
+        self.assertIsNone(parsed_message["Bcc"])
+        self.assertNotIn(
+            "abuse@example.net",
+            recipient_headers,
+        )
 
     def test_production_mode_still_suppresses_protected_source(self) -> None:
         incident_uuid = self.add_incident("2001:4860:4860::8844")
@@ -181,11 +202,11 @@ class V042Test(unittest.TestCase):
         self.assertIn("unit-test RDAP timeout", str(captured["_test_enrichment_error"]))
 
     def test_release_versions_are_consistent(self) -> None:
-        self.assertEqual("0.4.2", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.4.3", (ROOT / "VERSION").read_text().strip())
         for name in ("agent.py", "collector.py", "server_api.py"):
-            self.assertIn('APP_VERSION = "0.4.2"', (ROOT / "src" / name).read_text())
+            self.assertIn('APP_VERSION = "0.4.3"', (ROOT / "src" / name).read_text())
         builder = (ROOT / "packaging/build_debs.py").read_text()
-        self.assertIn('if upstream != "0.4.2":', builder)
+        self.assertIn('if upstream != "0.4.3":', builder)
         self.assertIn('"test_v042.py"', builder)
 
 

@@ -10,6 +10,7 @@ CrowdSec decisions and sanitized abuse reports.
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import datetime as dt
 import email.utils
@@ -38,7 +39,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.4.2"
+APP_VERSION = "0.4.3"
 SCHEMA_VERSION = 4
 
 DEFAULTS: dict[str, Any] = {
@@ -148,6 +149,15 @@ DEFAULTS: dict[str, Any] = {
         "max_reports_per_recipient_per_day": 10,
         "report_not_before_utc": "",
         "retry_backoff_minutes": 60,
+        "attach_xarf": True,
+        "xarf_version": "4.2.0",
+        "xarf_max_evidence_lines": 20,
+        "resolve_target_dns": True,
+        "resolve_source_rdns": True,
+        "public_target_ips": [],
+        "reporter_org": "",
+        "reporter_org_domain": "",
+        "reporter_contact_name": "",
     },
 }
 
@@ -329,6 +339,32 @@ def validate_config(config: Mapping[str, Any]) -> None:
     ):
         if int(reporting.get(name, 0)) < 1:
             raise CollectorError(f"abuse_reporting.{name} must be positive")
+    if str(reporting.get("xarf_version", "4.2.0")) != "4.2.0":
+        raise CollectorError(
+            "abuse_reporting.xarf_version must be '4.2.0'"
+        )
+    if int(reporting.get("xarf_max_evidence_lines", 0)) < 1:
+        raise CollectorError("abuse_reporting.xarf_max_evidence_lines must be positive")
+    public_targets = reporting.get("public_target_ips", [])
+    if not isinstance(public_targets, (list, Mapping)):
+        raise CollectorError("abuse_reporting.public_target_ips must be a list or object")
+    target_values: list[Any] = []
+    if isinstance(public_targets, Mapping):
+        for key, values in public_targets.items():
+            if not isinstance(key, str) or not isinstance(values, list):
+                raise CollectorError(
+                    "abuse_reporting.public_target_ips object values must be lists"
+                )
+            target_values.extend(values)
+    else:
+        target_values.extend(public_targets)
+    for value in target_values:
+        try:
+            ipaddress.ip_address(str(value))
+        except ValueError as exc:
+            raise CollectorError(
+                f"abuse_reporting.public_target_ips contains invalid address: {value!r}"
+            ) from exc
     if int(reporting.get("recipient_cooldown_minutes", 0)) < 0:
         raise CollectorError("abuse_reporting.recipient_cooldown_minutes cannot be negative")
     cutoff = str(reporting.get("report_not_before_utc", "")).strip()
@@ -2769,6 +2805,579 @@ class Collector:
         )
         return status, detail, message_id
 
+    @staticmethod
+    def _report_value(row: Any, key: str, default: Any = None) -> Any:
+        if isinstance(row, Mapping):
+            return row.get(key, default)
+        try:
+            return row[key]
+        except (KeyError, IndexError, TypeError):
+            return default
+
+    @staticmethod
+    def _report_metadata(row: Any) -> dict[str, Any]:
+        raw = Collector._report_value(row, "metadata_json", "{}")
+        if isinstance(raw, Mapping):
+            return dict(raw)
+        try:
+            parsed = json.loads(str(raw or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _report_unique(values: Sequence[Any]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            cleaned = clean_optional(value, 2048)
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            result.append(cleaned)
+        return result
+
+    @staticmethod
+    def _report_host(value: Any) -> str | None:
+        cleaned = clean_optional(value, 255)
+        if not cleaned or cleaned in {"_", "-"}:
+            return None
+        if cleaned.startswith("[") and "]" in cleaned:
+            cleaned = cleaned[1:cleaned.index("]")]
+        elif cleaned.count(":") == 1:
+            candidate, port = cleaned.rsplit(":", 1)
+            if port.isdigit():
+                cleaned = candidate
+        return cleaned.rstrip(".").lower() or None
+
+    def _report_target_hosts(
+        self,
+        evidence: Sequence[Any],
+        network_evidence: Sequence[Any],
+    ) -> list[str]:
+        values: list[Any] = []
+        for row in network_evidence:
+            values.extend((
+                self._report_value(row, "host"),
+                self._report_value(row, "server_name"),
+            ))
+        for row in evidence:
+            metadata = self._report_metadata(row)
+            values.append(metadata.get("host"))
+        hosts: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            host = self._report_host(value)
+            if not host or host in seen:
+                continue
+            seen.add(host)
+            hosts.append(host)
+        return hosts
+
+    def _configured_public_targets(self, host: str | None = None) -> list[str]:
+        configured = self.config["abuse_reporting"].get("public_target_ips", [])
+        values: list[Any] = []
+        if isinstance(configured, Mapping):
+            values.extend(configured.get("*", []) if isinstance(configured.get("*"), list) else [])
+            if host:
+                host_values = configured.get(host, [])
+                values.extend(host_values if isinstance(host_values, list) else [])
+        elif isinstance(configured, list):
+            values.extend(configured)
+        result: list[str] = []
+        for value in values:
+            try:
+                address = ipaddress.ip_address(str(value))
+            except ValueError:
+                continue
+            normalized = str(address)
+            if normalized not in result:
+                result.append(normalized)
+        return result
+
+    def _resolve_public_targets(
+        self,
+        hosts: Sequence[str],
+        observed_destinations: Sequence[Any],
+    ) -> tuple[dict[str, dict[str, list[str]]], list[str]]:
+        settings = self.config["abuse_reporting"]
+        resolution: dict[str, dict[str, list[str]]] = {}
+        all_targets: list[str] = []
+
+        def add_target(host: str, value: Any) -> None:
+            try:
+                address = ipaddress.ip_address(str(value))
+            except ValueError:
+                return
+            if not address.is_global:
+                return
+            normalized = str(address)
+            family = "A" if address.version == 4 else "AAAA"
+            bucket = resolution.setdefault(host, {"A": [], "AAAA": []})[family]
+            if normalized not in bucket:
+                bucket.append(normalized)
+            if normalized not in all_targets:
+                all_targets.append(normalized)
+
+        for host in hosts:
+            for value in self._configured_public_targets(host):
+                add_target(host, value)
+
+        for value in self._configured_public_targets(None):
+            add_target("*", value)
+
+        if settings.get("resolve_target_dns"):
+            for host in hosts:
+                try:
+                    ipaddress.ip_address(host)
+                except ValueError:
+                    pass
+                else:
+                    add_target(host, host)
+                    continue
+                try:
+                    answers = socket.getaddrinfo(
+                        host,
+                        None,
+                        family=socket.AF_UNSPEC,
+                        type=socket.SOCK_STREAM,
+                    )
+                except (OSError, socket.gaierror):
+                    continue
+                for answer in answers:
+                    sockaddr = answer[4]
+                    if sockaddr:
+                        add_target(host, sockaddr[0])
+
+        for value in observed_destinations:
+            try:
+                address = ipaddress.ip_address(str(value))
+            except ValueError:
+                continue
+            if address.is_global:
+                add_target("(observed destination)", address)
+
+        return resolution, all_targets
+
+    def _select_public_destination(
+        self,
+        observed_destination: Any,
+        host: str | None,
+        resolution: Mapping[str, Mapping[str, Sequence[str]]],
+        all_targets: Sequence[str],
+    ) -> str | None:
+        observed: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
+        if observed_destination not in (None, ""):
+            try:
+                observed = ipaddress.ip_address(str(observed_destination))
+            except ValueError:
+                observed = None
+        if observed is not None and observed.is_global:
+            return str(observed)
+
+        preferred_version = observed.version if observed is not None else None
+        candidates: list[str] = []
+        for key in (host, "*", "(observed destination)"):
+            if not key or key not in resolution:
+                continue
+            record = resolution[key]
+            if preferred_version == 4:
+                candidates.extend(record.get("A", []))
+            elif preferred_version == 6:
+                candidates.extend(record.get("AAAA", []))
+            candidates.extend(record.get("A", []))
+            candidates.extend(record.get("AAAA", []))
+        candidates.extend(all_targets)
+        return self._report_unique(candidates)[0] if candidates else None
+
+    def _source_reverse_dns(self, source_ip: str) -> str:
+        if not self.config["abuse_reporting"].get("resolve_source_rdns"):
+            return "(lookup disabled)"
+        try:
+            return socket.gethostbyaddr(source_ip)[0]
+        except (OSError, socket.herror, socket.gaierror):
+            return "(none)"
+
+    def _report_connections(
+        self,
+        incident: Any,
+        evidence: Sequence[Any],
+        network_evidence: Sequence[Any],
+        resolution: Mapping[str, Mapping[str, Sequence[str]]],
+        all_targets: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        source_ip = str(self._report_value(incident, "source_ip", "unknown"))
+        connections: list[dict[str, Any]] = []
+        fingerprints: set[tuple[Any, ...]] = set()
+
+        def append_connection(row: Any, *, network: bool) -> None:
+            metadata = {} if network else self._report_metadata(row)
+            host = self._report_host(
+                self._report_value(row, "host")
+                or self._report_value(row, "server_name")
+                or metadata.get("host")
+            )
+            observed_destination = self._report_value(row, "destination_ip")
+            destination_port = self._report_value(row, "destination_port")
+            tls_protocol = self._report_value(row, "tls_protocol")
+            application_protocol = self._report_value(row, "application_protocol")
+            scheme = "https" if (
+                tls_protocol
+                or destination_port == 443
+                or str(application_protocol or "").upper().startswith("HTTPS")
+            ) else "http"
+            request_uri = (
+                self._report_value(row, "request_uri")
+                if network
+                else self._report_value(row, "request_path")
+            )
+            http_status = (
+                self._report_value(row, "http_status")
+                if network
+                else metadata.get("http_status")
+            )
+            category = metadata.get("probe_category")
+            connection = {
+                "occurred_at": clean_optional(
+                    self._report_value(row, "occurred_at"), 64
+                ),
+                "source_ip": clean_optional(
+                    self._report_value(row, "source_ip") or source_ip, 64
+                ) or source_ip,
+                "source_port": self._report_value(row, "source_port"),
+                "observed_destination_ip": clean_optional(observed_destination, 64),
+                "public_destination_ip": self._select_public_destination(
+                    observed_destination, host, resolution, all_targets
+                ),
+                "destination_port": destination_port,
+                "host": host,
+                "server_name": self._report_host(
+                    self._report_value(row, "server_name")
+                ),
+                "scheme": scheme,
+                "transport_protocol": clean_optional(
+                    self._report_value(row, "transport_protocol"), 32
+                ),
+                "application_protocol": clean_optional(application_protocol, 64),
+                "tls_protocol": clean_optional(tls_protocol, 64),
+                "request_method": clean_optional(
+                    self._report_value(row, "request_method"), 16
+                ),
+                "request_uri": clean_optional(request_uri, 2048),
+                "http_status": http_status,
+                "probe_category": clean_optional(category, 128),
+                "user_agent": clean_optional(
+                    self._report_value(row, "user_agent"), 512
+                ),
+                "correlation_method": clean_optional(
+                    self._report_value(row, "correlation_method"), 64
+                ),
+            }
+            fingerprint = (
+                connection["occurred_at"],
+                connection["source_ip"],
+                connection["source_port"],
+                connection["observed_destination_ip"],
+                connection["destination_port"],
+                connection["request_method"],
+                connection["request_uri"],
+            )
+            if fingerprint in fingerprints:
+                return
+            fingerprints.add(fingerprint)
+            connections.append(connection)
+
+        for row in network_evidence:
+            append_connection(row, network=True)
+        for row in evidence:
+            append_connection(row, network=False)
+        return connections
+
+    @staticmethod
+    def _count_values(values: Sequence[Any]) -> list[tuple[str, int]]:
+        counts: dict[str, int] = {}
+        for value in values:
+            cleaned = clean_optional(value, 2048)
+            if cleaned is None:
+                continue
+            counts[cleaned] = counts.get(cleaned, 0) + 1
+        return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+
+    @staticmethod
+    def _format_endpoint(address: Any, port: Any) -> str:
+        text = clean_optional(address, 128) or "unknown"
+        try:
+            parsed = ipaddress.ip_address(text)
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.version == 6 and port:
+            return f"[{text}]:{port}"
+        return f"{text}:{port}" if port else text
+
+    def _normalized_evidence_line(self, connection: Mapping[str, Any]) -> str:
+        source = self._format_endpoint(
+            connection.get("source_ip"), connection.get("source_port")
+        )
+        destination = self._format_endpoint(
+            connection.get("public_destination_ip"),
+            connection.get("destination_port"),
+        )
+        observed = self._format_endpoint(
+            connection.get("observed_destination_ip"),
+            connection.get("destination_port"),
+        )
+        request = " ".join(
+            value for value in (
+                clean_optional(connection.get("request_method"), 16),
+                clean_optional(connection.get("request_uri"), 2048),
+            ) if value
+        ) or "request unavailable"
+        pieces = [
+            clean_optional(connection.get("occurred_at"), 64) or "time unknown",
+            f'src="{source}"',
+            f'dst="{destination}"',
+        ]
+        if connection.get("observed_destination_ip") and (
+            connection.get("observed_destination_ip")
+            != connection.get("public_destination_ip")
+        ):
+            pieces.append(f'observed_dst="{observed}"')
+        if connection.get("host"):
+            pieces.append(f'host="{connection["host"]}"')
+        if connection.get("scheme"):
+            pieces.append(f'scheme="{connection["scheme"]}"')
+        pieces.append(f'request="{request}"')
+        if connection.get("http_status") is not None:
+            pieces.append(f'status="{connection["http_status"]}"')
+        return " ".join(pieces)
+
+    def _xarf_attachment(
+        self,
+        incident: Any,
+        enrichment: Mapping[str, Any],
+        activity: str,
+        connections: Sequence[Mapping[str, Any]],
+        sites: Sequence[str],
+        generated: dt.datetime,
+        evidence_lines: Sequence[str],
+        public_targets: Sequence[str],
+    ) -> dict[str, Any]:
+        """Build a XARF v4.2 connection/vulnerability_scan report."""
+        settings = self.config["abuse_reporting"]
+        source_ip = str(self._report_value(incident, "source_ip", "unknown"))
+        representative = connections[0] if connections else {}
+
+        from_name, from_address = email.utils.parseaddr(
+            str(settings.get("from", ""))
+        )
+        operator_name, operator_address = email.utils.parseaddr(
+            str(settings.get("operator_contact", ""))
+        )
+        reporter_contact = operator_address or from_address
+        reporter_domain = (
+            clean_optional(settings.get("reporter_org_domain"), 255)
+            or clean_optional(settings.get("message_id_domain"), 255)
+            or ""
+        )
+        reporter_org = (
+            clean_optional(settings.get("reporter_org"), 200)
+            or reporter_domain
+            or str(self.config.get("node", {}).get("fqdn", ""))
+            or "Server operator"
+        )
+        if not reporter_contact:
+            reporter_contact = f"postmaster@{reporter_domain}"
+
+        reporter = {
+            "org": reporter_org,
+            "contact": reporter_contact,
+            "domain": reporter_domain,
+        }
+
+        def valid_port(value: Any) -> int | None:
+            try:
+                port = int(value)
+            except (TypeError, ValueError):
+                return None
+            return port if 1 <= port <= 65535 else None
+
+        def evidence_item(description: str, payload_text: str, content_type: str) -> dict[str, Any]:
+            raw = payload_text.encode("utf-8")
+            return {
+                "content_type": content_type,
+                "description": description,
+                "payload": base64.b64encode(raw).decode("ascii"),
+                "hash": f"sha256:{hashlib.sha256(raw).hexdigest()}",
+                "size": len(raw),
+            }
+
+        max_lines = int(settings.get("xarf_max_evidence_lines", 20))
+        normalized_lines = list(evidence_lines[:max_lines])
+
+        connection_tuples: list[dict[str, Any]] = []
+        for item in connections:
+            connection_tuples.append({
+                "timestamp": item.get("occurred_at"),
+                "source_ip": item.get("source_ip"),
+                "source_port": valid_port(item.get("source_port")),
+                "destination_ip": item.get("public_destination_ip"),
+                "observed_destination_ip": item.get("observed_destination_ip"),
+                "destination_port": valid_port(item.get("destination_port")),
+                "destination_fqdn": item.get("host"),
+                "transport_protocol": clean_optional(
+                    item.get("transport_protocol"), 32
+                ),
+                "application_protocol": clean_optional(
+                    item.get("application_protocol"), 64
+                ),
+                "tls_protocol": clean_optional(item.get("tls_protocol"), 64),
+                "scheme": clean_optional(item.get("scheme"), 16),
+                "request_method": clean_optional(item.get("request_method"), 16),
+                "request_uri": clean_optional(item.get("request_uri"), 2048),
+                "http_status": item.get("http_status"),
+                "probe_category": clean_optional(item.get("probe_category"), 128),
+                "user_agent": clean_optional(item.get("user_agent"), 1024),
+            })
+
+        tuple_json = json.dumps(
+            connection_tuples,
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        evidence: list[dict[str, Any]] = [
+            evidence_item(
+                "Correlated HTTP connection tuples and request evidence",
+                tuple_json,
+                "application/json",
+            )
+        ]
+        if normalized_lines:
+            evidence.insert(
+                0,
+                evidence_item(
+                    "Sanitized normalized request evidence",
+                    "\n".join(normalized_lines),
+                    "text/plain",
+                ),
+            )
+
+        source_port = valid_port(representative.get("source_port"))
+        destination_ip = clean_optional(
+            representative.get("public_destination_ip"), 128
+        )
+        destination_fqdn = clean_optional(representative.get("host"), 255)
+
+        targeted_ports = sorted({
+            port
+            for item in connections
+            if (port := valid_port(item.get("destination_port"))) is not None
+        })
+        targeted_services = self._report_unique([
+            item.get("scheme") for item in connections
+        ])
+        protocols = self._report_unique([
+            str(item.get("transport_protocol") or "").lower()
+            for item in connections
+        ])
+        protocol = protocols[0] if len(protocols) == 1 else "mixed"
+        if protocol not in {"tcp", "udp", "icmp", "mixed"}:
+            protocol = "tcp"
+
+        request_paths = self._report_unique([
+            item.get("request_uri") for item in connections
+        ])
+        methods = self._report_unique([
+            str(item.get("request_method") or "").upper()
+            for item in connections
+        ])
+        response_codes = sorted({
+            int(item["http_status"])
+            for item in connections
+            if isinstance(item.get("http_status"), int)
+        })
+        probe_categories = self._report_unique([
+            item.get("probe_category") for item in connections
+        ])
+        user_agents = self._report_unique([
+            item.get("user_agent") for item in connections
+        ])
+
+        first_seen = clean_optional(
+            self._report_value(incident, "first_seen"), 64
+        ) or utc_text(generated)
+        last_seen = clean_optional(
+            self._report_value(incident, "last_seen"), 64
+        ) or first_seen
+        incident_uuid = str(
+            self._report_value(incident, "incident_uuid", uuid.uuid4())
+        )
+
+        report: dict[str, Any] = {
+            "xarf_version": str(settings.get("xarf_version", "4.2.0")),
+            "report_id": incident_uuid,
+            "timestamp": first_seen,
+            "reporter": reporter,
+            "sender": dict(reporter),
+            "source_identifier": source_ip,
+            "category": "connection",
+            "type": "vulnerability_scan",
+            "evidence_source": "automated_filter",
+            "scan_type": "web_vuln_scan",
+            "protocol": protocol,
+            "first_seen": first_seen,
+            "last_seen": last_seen,
+            "total_requests": max(
+                int(self._report_value(incident, "event_count", 0) or 0),
+                len(connections),
+                1,
+            ),
+            "evidence": evidence,
+            "confidence": 1.0,
+            "description": activity,
+            "tags": [
+                "scan:web_vuln_scan",
+                "source:nginx",
+                "rule:nginx_hostile_web_probing",
+            ],
+            "affected_sites": list(sites),
+            "destination_fqdns": list(
+                self._report_unique([item.get("host") for item in connections])
+            ),
+            "public_target_ips": list(public_targets),
+            "observed_destination_ips": self._report_unique([
+                item.get("observed_destination_ip") for item in connections
+            ]),
+            "registered_network": (
+                self._report_value(incident, "registered_cidr")
+                or enrichment.get("network_cidr")
+            ),
+            "network_name": enrichment.get("network_name"),
+            "asn": self._report_value(incident, "asn") or enrichment.get("asn"),
+            "asn_holder": (
+                self._report_value(incident, "asn_holder")
+                or enrichment.get("asn_holder")
+            ),
+            "probe_categories": probe_categories,
+            "probed_resources": request_paths,
+            "http_methods": methods,
+            "response_codes": response_codes,
+            "connection_tuples": connection_tuples,
+        }
+        if source_port is not None:
+            report["source_port"] = source_port
+        if destination_ip:
+            report["destination_ip"] = destination_ip
+        if destination_fqdn:
+            report["destination_fqdn"] = destination_fqdn
+        if targeted_ports:
+            report["targeted_ports"] = targeted_ports
+        if targeted_services:
+            report["targeted_services"] = targeted_services
+        if user_agents:
+            report["user_agent"] = user_agents[0]
+        return report
+
     def send_abuse_report(
         self,
         incident: sqlite3.Row,
@@ -2780,9 +3389,14 @@ class Collector:
             return "disabled", "Abuse reporting disabled in configuration", None
         if not recipients:
             return "no-contact", "No valid abuse-report recipient was supplied", None
+
         test_mode = bool(settings.get("test_mode"))
-        protection, protection_detail = self.source_protection_status(str(incident["source_ip"]))
-        production_disposition = f"Source protection check passed: {protection_detail}"
+        protection, protection_detail = self.source_protection_status(
+            str(incident["source_ip"])
+        )
+        production_disposition = (
+            f"Source protection check passed: {protection_detail}"
+        )
         if protection == "protected":
             if not test_mode:
                 return "suppressed", protection_detail, None
@@ -2799,97 +3413,85 @@ class Collector:
 
         evidence = self.db.incident_evidence(str(incident["incident_uuid"]))
         sites = self.db.incident_sites(str(incident["incident_uuid"]))
-        message = EmailMessage()
-        message["From"] = str(settings["from"])
-        message["To"] = ", ".join(recipients)
-        if not settings.get("test_mode") and str(settings.get("admin_copy", "")).strip():
-            message["Bcc"] = str(settings["admin_copy"]).strip()
-        generated = utc_now()
-        message["Date"] = email.utils.format_datetime(generated)
-        message_id = email.utils.make_msgid(domain=str(settings["message_id_domain"]))
-        message["Message-ID"] = message_id
-        test_label = " TEST" if settings.get("test_mode") else ""
-        rule_id = str(incident["rule_id"])
-        if rule_id.startswith("sshd-"):
-            activity = "Automated OpenSSH authentication attacks"
-            event_label = "Failed authentication attempts"
-            token_label = "Distinct targeted account tokens"
-        elif rule_id.startswith("nginx-"):
-            activity = "Automated hostile web probing and exploit scanning"
-            event_label = "Qualifying hostile requests"
-            token_label = "Distinct hostile probe categories"
-        else:
-            activity = "Automated WordPress credential spraying"
-            event_label = "Failed authentication attempts"
-            token_label = "Distinct targeted account tokens"
-        message["Subject"] = (
-            f"{settings['subject_prefix']}{test_label} {activity} from {incident['source_ip']}"
-        )
-        max_ids = int(settings["max_evidence_uuids"])
-        event_ids = [str(row["event_uuid"]) for row in evidence[:max_ids]]
-        agents: list[str] = []
-        for row in evidence:
-            agent = clean_optional(row["user_agent"], 180)
-            if agent and agent not in agents:
-                agents.append(agent)
-            if len(agents) >= 2:
-                break
-        network_name = clean_optional(enrichment.get("network_name"), 255) or "unknown"
-        network_context = self.db.network_context(
-            str(incident["network_cidr"]), self.config["policy"]
-        ) if incident["network_cidr"] else None
-        tuple_evidence = self.db.incident_network_evidence(
+        network_evidence = self.db.incident_network_evidence(
             str(incident["incident_uuid"]),
             int(self.config["network_reporting"]["max_tuple_evidence"]),
         )
-        event_tuple_evidence = [
-            row for row in evidence
-            if row["source_port"] is not None or row["destination_port"] is not None
-        ][: int(self.config["network_reporting"]["max_tuple_evidence"])]
-        body = [
-            "This is an automated abuse report from a self-hosted server operator.",
-            "",
-            f"Report generated: {utc_text(generated)}",
-            f"Source IP: {incident['source_ip']}",
-            f"Activity: {activity}",
-            f"Rule: {rule_id}",
-            f"UTC interval: {incident['first_seen']} to {incident['last_seen']}",
-            f"{event_label}: {incident['event_count']}",
-            f"{token_label}: {incident['distinct_accounts']}",
-            f"Affected services/sites: {incident['site_count']}",
-            f"Affected site IDs: {', '.join(sites) if sites else 'unknown'}",
-            f"Candidate aggregation CIDR: {incident['network_cidr'] or 'unknown'}",
-            f"Registered network: {incident['registered_cidr'] or 'unknown'}",
-            f"Network name: {network_name}",
-            f"ASN: {incident['asn'] or 'unknown'} {incident['asn_holder'] or ''}".rstrip(),
-            f"Action taken: CrowdSec decision status {incident['decision_status']}; configured duration {self.config['policy']['ban_duration']}",
-            f"Incident UUID: {incident['incident_uuid']}",
+        hosts = self._report_target_hosts(evidence, network_evidence)
+        observed_destinations = [
+            self._report_value(row, "destination_ip")
+            for row in [*network_evidence, *evidence]
+            if self._report_value(row, "destination_ip")
         ]
-        if (
-            network_context
-            and self.config["network_reporting"].get("enabled")
-            and int(network_context["hostile_ips"])
-                >= int(self.config["network_reporting"]["include_context_min_hostile_ips"])
-        ):
+        resolution, public_targets = self._resolve_public_targets(
+            hosts, observed_destinations
+        )
+        connections = self._report_connections(
+            incident, evidence, network_evidence, resolution, public_targets
+        )
+
+        message = EmailMessage()
+        message["From"] = str(settings["from"])
+        message["To"] = ", ".join(recipients)
+        if not test_mode and str(settings.get("admin_copy", "")).strip():
+            message["Bcc"] = str(settings["admin_copy"]).strip()
+
+        generated = utc_now()
+        message["Date"] = email.utils.format_datetime(generated)
+        message_id = email.utils.make_msgid(
+            domain=str(settings["message_id_domain"])
+        )
+        message["Message-ID"] = message_id
+        test_label = " TEST" if test_mode else ""
+        rule_id = str(incident["rule_id"])
+        if rule_id.startswith("sshd-"):
+            activity = "Automated OpenSSH authentication attacks"
+        elif rule_id.startswith("nginx-"):
+            activity = "Automated hostile web probing and exploit scanning"
+        else:
+            activity = "Automated WordPress credential spraying"
+        message["Subject"] = (
+            f"{settings['subject_prefix']}{test_label} {activity} "
+            f"from {incident['source_ip']}"
+        )
+
+        source_ip = str(incident["source_ip"])
+        reverse_dns = self._source_reverse_dns(source_ip)
+        metadata_rows = [self._report_metadata(row) for row in evidence]
+        statuses = self._count_values([
+            item.get("http_status") for item in connections
+            if item.get("http_status") is not None
+        ])
+        categories = self._count_values([
+            metadata.get("probe_category") for metadata in metadata_rows
+        ])
+        targets = self._count_values([
+            item.get("request_uri") for item in connections
+        ])
+        agents = self._count_values([
+            item.get("user_agent") or "-" for item in connections
+        ])
+        total_requests = max(
+            int(incident["event_count"]),
+            len(connections),
+        )
+        count_4xx = sum(
+            1 for item in connections
+            if isinstance(item.get("http_status"), int)
+            and 400 <= int(item["http_status"]) <= 499
+        )
+        count_5xx = sum(
+            1 for item in connections
+            if isinstance(item.get("http_status"), int)
+            and 500 <= int(item["http_status"]) <= 599
+        )
+
+        body: list[str] = ["Hello,", ""]
+        if test_mode:
             body.extend([
-                "",
-                "Recent CIDR context (qualifying Sentinel incidents only):",
-                f"  CIDR: {network_context['network_cidr']}",
-                f"  Distinct hostile source IPs: {network_context['hostile_ips']}",
-                f"  Qualifying incidents: {network_context['incident_count']}",
-                f"  Qualifying hostile events: {network_context['event_count']}",
-                f"  Active days: {network_context['active_days']}",
-                f"  First/last observed: {network_context['first_seen'] or 'unknown'} to {network_context['last_seen'] or 'unknown'}",
-                f"  Network case status: {network_context['status']}",
-                "  CIDR blocking is manual; this context does not assert that the entire allocation is abusive.",
-            ])
-        operator_contact = clean_optional(settings.get("operator_contact"), 254)
-        if operator_contact:
-            body.append(f"Operator contact: {operator_contact}")
-        if settings.get("test_mode"):
-            body.extend([
-                "TEST MODE: This report was sent only to the configured recipient override.",
-                "No provider abuse contact or administrative Bcc recipient received this message.",
+                "*** TEST MODE ***",
+                "This report was sent only to the configured recipient override.",
+                "No provider abuse contact or administrative Bcc recipient received it.",
                 f"Production disposition: {production_disposition}",
             ])
             enrichment_error = clean_optional(
@@ -2897,58 +3499,215 @@ class Collector:
             )
             if enrichment_error:
                 body.append(f"Enrichment note: {enrichment_error}")
-        body.extend([
-            "",
-            "Evidence event UUIDs:",
-            *[f"  - {event_id}" for event_id in event_ids],
-        ])
-        if tuple_evidence or event_tuple_evidence:
-            body.extend(["", "Network evidence:"])
-            for row in tuple_evidence:
-                source = f"{row['source_ip']}:{row['source_port']}" if row['source_port'] else str(row['source_ip'])
-                destination_ip = row['destination_ip'] or "unknown"
-                destination = f"{destination_ip}:{row['destination_port']}" if row['destination_port'] else destination_ip
-                protocols = " / ".join(
-                    str(value) for value in (
-                        row['transport_protocol'], row['application_protocol'], row['tls_protocol']
-                    ) if value
-                ) or "unknown"
-                request = " ".join(
-                    str(value) for value in (row['request_method'], row['request_uri']) if value
-                ) or "request unavailable"
-                status_text = f" status={row['http_status']}" if row['http_status'] is not None else ""
-                body.append(
-                    f"  - {row['occurred_at']} {source} -> {destination}; {protocols}; "
-                    f"{request}{status_text}; correlation={row['correlation_method']}"
-                )
-            for row in event_tuple_evidence:
-                source = f"{row['source_ip']}:{row['source_port']}" if row['source_port'] else str(row['source_ip'])
-                destination_ip = row['destination_ip'] or "unknown"
-                destination = f"{destination_ip}:{row['destination_port']}" if row['destination_port'] else destination_ip
-                protocols = " / ".join(
-                    str(value) for value in (row['transport_protocol'], row['application_protocol']) if value
-                ) or "unknown"
-                body.append(
-                    f"  - {row['occurred_at']} {source} -> {destination}; {protocols}; source=service-event"
-                )
+            body.append("")
+
+        if rule_id.startswith("nginx-"):
+            opening = (
+                "I operate the affected web service(s) listed below. The source IP "
+                "generated automated exploit-scanning traffic against my server, "
+                "including requests for WordPress backdoor paths, plugin/theme PHP "
+                "probes, sensitive configuration files, command-style REST probes, "
+                "and/or other hostile web requests."
+            )
+        elif rule_id.startswith("sshd-"):
+            opening = (
+                "I operate the affected SSH service listed below. The source IP "
+                "generated automated authentication attacks against my server."
+            )
         else:
-            body.extend([
-                "",
-                "Network evidence: source port or destination tuple was unavailable for this incident.",
-                "The event evidence below still identifies the source IP and UTC time window.",
-            ])
-        if agents:
-            body.extend(["", "Sanitized user-agent examples:", *[f"  - {agent}" for agent in agents]])
+            opening = (
+                "I operate the affected WordPress service(s) listed below. The "
+                "source IP generated automated credential attacks against my server."
+            )
+
+        attach_xarf = bool(
+            settings.get("attach_xarf", True)
+            and rule_id.startswith("nginx-")
+        )
+        body.extend([
+            opening,
+            "",
+            "Please investigate this host/customer and take appropriate action.",
+            "",
+            f"Source IP: {source_ip}",
+            f"Affected site(s): {', '.join(hosts or sites) if (hosts or sites) else 'unknown'}",
+            f"Observed timeframe (UTC): {incident['first_seen']} through {incident['last_seen']}",
+            f"Reverse DNS: {reverse_dns}",
+            "",
+            "Connection details:",
+        ])
+        if connections:
+            for count, connection in enumerate(connections, 1):
+                source = self._format_endpoint(
+                    connection.get("source_ip"), connection.get("source_port")
+                )
+                destination = self._format_endpoint(
+                    connection.get("public_destination_ip"),
+                    connection.get("destination_port"),
+                )
+                details = [f"src={source}", f"dst={destination}"]
+                observed = connection.get("observed_destination_ip")
+                if observed and observed != connection.get("public_destination_ip"):
+                    details.append(
+                        "observed_dst="
+                        + self._format_endpoint(
+                            observed, connection.get("destination_port")
+                        )
+                    )
+                if connection.get("host"):
+                    details.append(f"host={connection['host']}")
+                if connection.get("scheme"):
+                    details.append(f"scheme={connection['scheme']}")
+                if connection.get("transport_protocol"):
+                    details.append(
+                        f"transport={connection['transport_protocol']}"
+                    )
+                body.append(f"  {count:>3}  " + " ".join(details))
+        else:
+            body.append("  (source/destination tuple unavailable)")
+
+        body.extend(["", "Public target IP resolution:"])
+        if resolution:
+            for host in sorted(key for key in resolution if not key.startswith("(")):
+                record = resolution[host]
+                body.append(f"  {host}")
+                body.append(
+                    "    A:    "
+                    + (", ".join(record.get("A", [])) or "(none)")
+                )
+                body.append(
+                    "    AAAA: "
+                    + (", ".join(record.get("AAAA", [])) or "(none)")
+                )
+        elif public_targets:
+            body.append("  Configured target IPs: " + ", ".join(public_targets))
+        else:
+            body.append("  (no public target IP could be determined)")
+
         body.extend([
             "",
-            "No passwords, cookies, email addresses, or targeted usernames are included in this report.",
-            "Please investigate the responsible host and take appropriate action.",
+            "Summary:",
+            f"  Total matched/related requests: {total_requests}",
+            f"  Suspicious requests:           {incident['event_count']}",
+            f"  5xx responses:                 {count_5xx}",
+            f"  4xx responses:                 {count_4xx}",
+            f"  Distinct request targets:      {len(targets)}",
+            "",
+            "Status counts:",
         ])
+        body.extend(
+            [f"  {status}: {count}" for status, count in statuses]
+            or ["  (unavailable)"]
+        )
+        body.extend(["", "Suspicious categories:"])
+        body.extend(
+            [f"  {category}: {count}" for category, count in categories]
+            or ["  (unavailable)"]
+        )
+        body.extend(["", "Top request targets:"])
+        body.extend(
+            [f"  {count:>5}  {target}" for target, count in targets[:20]]
+            or ["  (unavailable)"]
+        )
+        body.extend(["", "User-Agent strings:"])
+        body.extend(
+            [f"  {count:>5}  {agent}" for agent, count in agents[:20]]
+            or ["  (unavailable)"]
+        )
+
+        network_name = (
+            clean_optional(enrichment.get("network_name"), 255) or "unknown"
+        )
+        asn = incident["asn"] or enrichment.get("asn") or "unknown"
+        asn_holder = (
+            clean_optional(
+                incident["asn_holder"] or enrichment.get("asn_holder"), 255
+            )
+            or "unknown"
+        )
+        body.extend([
+            "",
+            "ASN / network lookup:",
+            f"  AS:              {asn}",
+            f"  Registered CIDR: {incident['registered_cidr'] or enrichment.get('network_cidr') or 'unknown'}",
+            f"  Network name:    {network_name}",
+            f"  AS holder:       {asn_holder}",
+            "",
+            "WHOIS/RDAP abuse contact evidence:",
+            f"  Abuse email(s):  {', '.join(enrichment.get('abuse_emails', [])) or '(none found)'}",
+        ])
+        raw_enrichment = enrichment.get("raw")
+        if isinstance(raw_enrichment, Mapping):
+            rdap = raw_enrichment.get("rdap")
+            if isinstance(rdap, Mapping):
+                body.append(
+                    f"  Registry handle: {clean_optional(rdap.get('handle'), 255) or 'unknown'}"
+                )
+                remarks = rdap.get("remarks")
+                if isinstance(remarks, list):
+                    descriptions: list[str] = []
+                    for remark in remarks:
+                        if not isinstance(remark, Mapping):
+                            continue
+                        value = remark.get("description")
+                        if isinstance(value, list):
+                            descriptions.extend(
+                                item for item in (
+                                    clean_optional(part, 500) for part in value
+                                ) if item
+                            )
+                    for description in descriptions[:5]:
+                        body.append(f"  Comment: {description}")
+
+        evidence_lines = [
+            self._normalized_evidence_line(item) for item in connections
+        ]
+        body.extend([
+            "",
+            "Sanitized request evidence (normalized from stored event data):",
+            *evidence_lines[: int(settings.get("xarf_max_evidence_lines", 20))],
+            "",
+            "No passwords, cookies, email addresses, or targeted usernames are "
+            "included in this report.",
+        ])
+        if attach_xarf:
+            body.append(
+                "A machine-readable XARF JSON report is attached as xarf.json."
+            )
+        operator_contact = clean_optional(
+            settings.get("operator_contact"), 254
+        )
+        if operator_contact:
+            body.append(f"Operator contact: {operator_contact}")
+
         message.set_content("\n".join(body) + "\n")
-        sendmail = str(settings["sendmail_path"])
+
+        if attach_xarf:
+            xarf = self._xarf_attachment(
+                incident,
+                enrichment,
+                activity,
+                connections,
+                hosts or sites,
+                generated,
+                evidence_lines,
+                public_targets,
+            )
+            message.add_attachment(
+                json.dumps(
+                    xarf,
+                    indent=2,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                maintype="application",
+                subtype="json",
+                filename="xarf.json",
+            )
+
         try:
             result = subprocess.run(
-                [sendmail, "-t", "-oi"],
+                [str(settings["sendmail_path"]), "-t", "-oi"],
                 input=message.as_bytes(),
                 capture_output=True,
                 timeout=int(settings["send_timeout_seconds"]),
@@ -2958,12 +3717,14 @@ class Collector:
             return "failed", f"sendmail failed: {exc}", message_id
         if result.returncode != 0:
             detail = (
-                clean_optional(result.stderr.decode("utf-8", "replace"), 1000)
+                clean_optional(
+                    result.stderr.decode("utf-8", "replace"), 1000
+                )
                 or f"sendmail exited {result.returncode}"
             )
             return "failed", detail, message_id
         detail = f"Report sent to {', '.join(recipients)}"
-        if settings.get("test_mode"):
+        if test_mode:
             detail += f"; test bypass: {production_disposition}"
         return "sent", detail, message_id
 

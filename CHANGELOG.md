@@ -1,4 +1,13 @@
 # Changelog
+## 0.4.3 — 2026-07-24
+- Reformat individual Nginx abuse reports to match the established operator-facing report structure.
+- Include source ports, public destination IPs, internally observed destination IPs, destination ports, Host headers, protocols, statuses, categories, targets, and user agents.
+- Resolve or configure public target addresses without misreporting private reverse-proxy/NAT destinations.
+- Attach a XARF v4.2.0 `connection/vulnerability_scan` `xarf.json` containing standard destination fields, hashed evidence, and every correlated connection tuple.
+- Preserve test-mode recipient isolation and annotate the production suppression disposition.
+- Permit `AF_NETLINK` in the packaged collector unit so Postfix sendmail can enumerate local interfaces.
+- Add regression tests for MIME formatting, XARF content, target-address selection, and systemd packaging.
+
 
 ## 0.4.2 — 2026-07-24
 
