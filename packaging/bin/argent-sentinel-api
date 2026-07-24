@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+exec /usr/lib/argent-sentinel/server_api.py "$@"

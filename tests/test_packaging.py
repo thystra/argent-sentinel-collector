@@ -13,9 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PackagingTest(unittest.TestCase):
     def test_release_version_is_consistent(self) -> None:
-        self.assertEqual("0.3.1", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.4.0", (ROOT / "VERSION").read_text().strip())
         source = (ROOT / "src/collector.py").read_text()
-        self.assertIn('APP_VERSION = "0.3.1"', source)
+        self.assertIn('APP_VERSION = "0.4.0"', source)
         self.assertIn("Argent-Sentinel/{APP_VERSION}", source)
 
     def test_packaging_assets_exist(self) -> None:
@@ -23,9 +23,17 @@ class PackagingTest(unittest.TestCase):
             "packaging/build_debs.py",
             "packaging/bin/argent-sentinel",
             "packaging/bin/argent-sentinel-status",
+            "packaging/bin/argent-sentinel-agent",
+            "packaging/bin/argent-sentinel-api",
+            "packaging/systemd/argent-sentinel-agent.service",
+            "packaging/systemd/argent-sentinel-agent.timer",
+            "packaging/systemd/argent-sentinel-api.service",
             "packaging/systemd/argent-sentinel-collector.service",
             "packaging/systemd/argent-sentinel-collector.timer",
+            "packaging/deb/agent.preinst",
             "packaging/deb/agent.postinst",
+            "packaging/deb/agent.prerm",
+            "packaging/deb/agent.postrm",
             "packaging/deb/server.preinst",
             "packaging/deb/server.postinst",
             "packaging/deb/server.prerm",
@@ -68,7 +76,7 @@ class PackagingTest(unittest.TestCase):
                 text=True,
                 capture_output=True,
             )
-            self.assertEqual(3, json.loads(first.stdout)["schema_version"])
+            self.assertEqual(4, json.loads(first.stdout)["schema_version"])
             backup_dir = temp_path / "backup"
             second = subprocess.run(
                 [str(ROOT / "src/collector.py"), "--config", str(path), "migrate", "--backup-dir", str(backup_dir)],

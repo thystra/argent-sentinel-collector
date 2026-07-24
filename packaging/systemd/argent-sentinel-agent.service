@@ -1,0 +1,36 @@
+[Unit]
+Description=Argent Sentinel remote node agent
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/argent-sentinel/agent.json
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/argent-sentinel-agent --config /etc/argent-sentinel/agent.json run
+RuntimeDirectory=argent-sentinel
+RuntimeDirectoryMode=0750
+UMask=0027
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/etc/argent-sentinel
+ReadWritePaths=/var/lib/argent-sentinel
+ReadWritePaths=/run/argent-sentinel
+
+[Install]
+WantedBy=multi-user.target

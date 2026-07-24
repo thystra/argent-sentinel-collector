@@ -1,0 +1,39 @@
+# Dedicated mTLS ingestion virtual host for Argent Sentinel.
+# Replace certificate paths with the paths used by your Nginx installation.
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name sentinel.argentwolf.org;
+
+    ssl_certificate     /etc/letsencrypt/live/sentinel.argentwolf.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/sentinel.argentwolf.org/privkey.pem;
+
+    # This CA signs only Argent Sentinel node client certificates.
+    ssl_client_certificate /etc/argent-sentinel/pki/ca.crt;
+    ssl_verify_client on;
+    ssl_verify_depth 2;
+
+    client_max_body_size 30m;
+
+    location = /v1/ingest {
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+
+        # Always overwrite identity headers supplied by the client.
+        proxy_set_header X-Argent-Client-Verify $ssl_client_verify;
+        proxy_set_header X-Argent-Client-DN $ssl_client_s_dn;
+        proxy_set_header X-Argent-Node "";
+        proxy_set_header X-Argent-Transport-UUID $http_x_argent_transport_uuid;
+
+        proxy_pass http://unix:/run/argent-sentinel/api.sock:;
+    }
+
+    location = /healthz {
+        proxy_pass http://unix:/run/argent-sentinel/api.sock:;
+    }
+
+    location / {
+        return 404;
+    }
+}

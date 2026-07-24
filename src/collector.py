@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Argent Sentinel host collector.
 
-Imports atomic WordPress event batches, deduplicates immutable events, correlates
-credential-spray incidents, imports Nginx abuse-context observations, correlates
-network tuples, and optionally submits CrowdSec decisions and sanitized abuse reports.
+Imports immutable WordPress and OpenSSH event batches, deduplicates events,
+correlates credential-spray and SSH brute-force incidents, imports Nginx
+abuse-context observations, correlates network tuples, and optionally submits
+CrowdSec decisions and sanitized abuse reports.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import sqlite3
 import stat
@@ -36,8 +38,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.3.1"
-SCHEMA_VERSION = 3
+APP_VERSION = "0.4.0"
+SCHEMA_VERSION = 4
 
 DEFAULTS: dict[str, Any] = {
     "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
@@ -48,7 +50,8 @@ DEFAULTS: dict[str, Any] = {
     },
     "lock_file": "/run/argent-sentinel/collector.lock",
     "incoming_globs": [
-        "/var/lib/argent-sentinel/drop/wordpress/*/incoming/*.json"
+        "/var/lib/argent-sentinel/drop/wordpress/*/incoming/*.json",
+        "/var/lib/argent-sentinel/drop/remote/*/events/incoming/*.json",
     ],
     "processing_dir": "/var/lib/argent-sentinel/collector/processing",
     "archive_dir": "/var/lib/argent-sentinel/collector/archive",
@@ -59,6 +62,8 @@ DEFAULTS: dict[str, Any] = {
         "incoming_globs": [
             "/var/lib/argent-sentinel/drop/nginx/*/incoming/*.jsonl",
             "/var/lib/argent-sentinel/drop/nginx/*/incoming/*.json",
+            "/var/lib/argent-sentinel/drop/remote/*/abuse-context/incoming/*.jsonl",
+            "/var/lib/argent-sentinel/drop/remote/*/abuse-context/incoming/*.json",
         ],
         "processing_dir": "/var/lib/argent-sentinel/collector/abuse-context-processing",
         "archive_dir": "/var/lib/argent-sentinel/collector/abuse-context-archive",
@@ -73,6 +78,27 @@ DEFAULTS: dict[str, Any] = {
         "max_tuple_evidence": 20,
         "automatic_cidr_blocking": False,
         "automatic_network_email": False,
+    },
+    "sshd_policy": {
+        "enabled": True,
+        "window_seconds": 120,
+        "failure_threshold": 8,
+        "distinct_accounts": 3,
+        "single_account_threshold": 12,
+        "incident_merge_seconds": 300,
+    },
+    "web_policy": {
+        "enabled": True,
+        "window_seconds": 600,
+        "suspicious_threshold": 3,
+        "distinct_targets": 1,
+        "high_volume_threshold": 100,
+        "high_volume_distinct_targets": 25,
+        "incident_merge_seconds": 1800,
+    },
+    "legacy_reporting": {
+        "marker_state_dir": "/var/lib/nginx-abuse-drafts",
+        "suppress_matching_markers": True,
     },
     "trusted_cidrs": ["127.0.0.0/8", "::1/128", "192.168.0.0/16"],
     "policy": {
@@ -124,6 +150,55 @@ DEFAULTS: dict[str, Any] = {
         "retry_backoff_minutes": 60,
     },
 }
+
+
+WEB_PROBE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("generic-root-php-backdoor", re.compile(
+        r"^/(?:3PJcpMFsD8B|admin|adminfuns|ahax|bless|bolt|buy|classwithtostring|css|database|edit|file|filemanager|files|fm|goods|info|item|log|m|mah|mini|radio|root|simple|system|system_log|t|user|worksec|wp|wp-admin|wp-content|wp-file|wp-wlx|x|666|1|222|404|about|ab)\.php(?:\?|$)",
+        re.IGNORECASE,
+    )),
+    ("wp-special-sensitive-php", re.compile(
+        r"^/(?:wp-config-sample\.php|wp-content/plugins/hello\.php|wp-admin/includes/admin\.php)(?:\?|$)", re.IGNORECASE,
+    )),
+    ("wp-content-php-probe", re.compile(
+        r"^/wp-content/(?:uploads|plugins|themes)/[^?\s]*\.php(?:\?|$)", re.IGNORECASE,
+    )),
+    ("wp-includes-php-probe", re.compile(r"^/wp-includes/[^?\s]*\.php(?:\?|$)", re.IGNORECASE)),
+    ("wp-json-command-probe", re.compile(
+        r"^/wp-json/wp/v2/posts[^?\s]*(?:\?.*)?(?:cmd=|exec=|system=|shell=|passthru=)", re.IGNORECASE,
+    )),
+    ("sensitive-file-probe", re.compile(
+        r"(?:^|/)(?:\.env|\.git/config|\.git/HEAD|wp-config\.php|wp-config\.php\.bak|phpinfo\.php|server-status)(?:\?|$|/)", re.IGNORECASE,
+    )),
+    ("path-traversal-probe", re.compile(
+        r"(?:\.\./|%2e%2e|%252e%252e|/etc/passwd|/proc/self/environ)", re.IGNORECASE,
+    )),
+    ("cgi-shell-probe", re.compile(
+        r"^/cgi-bin/.*(?:/bin/sh|/bin/bash|cmd=|login\.cgi|upload\.php)", re.IGNORECASE,
+    )),
+)
+SEARCH_BOT_UA_RE = re.compile(
+    r"(?:Googlebot|bingbot|DuckDuckBot|Applebot|Slurp|YandexBot|Baiduspider)", re.IGNORECASE
+)
+NEXTCLOUD_CLIENT_UA_RE = re.compile(r"(?:Nextcloud|NextcloudTalk|mirall)", re.IGNORECASE)
+NEXTCLOUD_DAV_METHODS = {"PUT", "MKCOL", "PROPFIND", "PROPPATCH", "MOVE", "COPY", "DELETE", "LOCK", "UNLOCK"}
+
+
+def web_probe_category(path: str) -> str | None:
+    for name, pattern in WEB_PROBE_PATTERNS:
+        if pattern.search(path):
+            return name
+    return None
+
+
+def is_authenticated_nextcloud_dav(raw: Mapping[str, Any], path: str, method: str, user_agent: str) -> bool:
+    remote_user = str(first_value(raw, "remote_user", "authenticated_user") or "").strip()
+    return bool(
+        remote_user and remote_user != "-"
+        and path.startswith("/remote.php/dav/files/")
+        and method.upper() in NEXTCLOUD_DAV_METHODS
+        and NEXTCLOUD_CLIENT_UA_RE.search(user_agent)
+    )
 
 
 class CollectorError(RuntimeError):
@@ -217,9 +292,21 @@ def validate_config(config: Mapping[str, Any]) -> None:
         if int(network_reporting.get(name, 0)) < 1:
             raise CollectorError(f"network_reporting.{name} must be positive")
     if network_reporting.get("automatic_cidr_blocking"):
-        raise CollectorError("network_reporting.automatic_cidr_blocking is not supported in v0.3.1")
-    if network_reporting.get("automatic_network_email"):
-        raise CollectorError("network_reporting.automatic_network_email is not supported in v0.3.1")
+        raise CollectorError("network_reporting.automatic_cidr_blocking remains manual in v0.4.0")
+    sshd_policy = config.get("sshd_policy", {})
+    for name in (
+        "window_seconds", "failure_threshold", "distinct_accounts",
+        "single_account_threshold", "incident_merge_seconds",
+    ):
+        if int(sshd_policy.get(name, 0)) < 1:
+            raise CollectorError(f"sshd_policy.{name} must be positive")
+    web_policy = config.get("web_policy", {})
+    for name in (
+        "window_seconds", "suspicious_threshold", "distinct_targets",
+        "high_volume_threshold", "high_volume_distinct_targets", "incident_merge_seconds",
+    ):
+        if int(web_policy.get(name, 0)) < 1:
+            raise CollectorError(f"web_policy.{name} must be positive")
     reporting = config["abuse_reporting"]
     if reporting.get("enabled") and not valid_email_header(str(reporting.get("from", ""))):
         raise CollectorError("abuse_reporting.from must contain a valid email address")
@@ -339,9 +426,15 @@ class StateDB:
                 recorded_at TEXT,
                 site_id TEXT NOT NULL,
                 source_host TEXT NOT NULL,
+                service TEXT NOT NULL DEFAULT 'wordpress',
                 event_type TEXT NOT NULL,
                 outcome TEXT NOT NULL,
                 source_ip TEXT,
+                source_port INTEGER,
+                destination_ip TEXT,
+                destination_port INTEGER,
+                transport_protocol TEXT,
+                application_protocol TEXT,
                 account_key TEXT,
                 user_agent TEXT,
                 request_method TEXT,
@@ -480,8 +573,23 @@ class StateDB:
                 detail TEXT,
                 message_id TEXT
             );
+            CREATE TABLE IF NOT EXISTS legacy_reports (
+                marker_key TEXT PRIMARY KEY,
+                source_ip TEXT NOT NULL,
+                report_date TEXT NOT NULL,
+                imported_at TEXT NOT NULL,
+                marker_path TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS legacy_reports_ip_date
+                ON legacy_reports(source_ip, report_date);
             """
         )
+        self.ensure_column("events", "service", "TEXT NOT NULL DEFAULT 'wordpress'")
+        self.ensure_column("events", "source_port", "INTEGER")
+        self.ensure_column("events", "destination_ip", "TEXT")
+        self.ensure_column("events", "destination_port", "INTEGER")
+        self.ensure_column("events", "transport_protocol", "TEXT")
+        self.ensure_column("events", "application_protocol", "TEXT")
         self.ensure_column("events", "request_method", "TEXT")
         self.ensure_column("events", "request_id", "TEXT")
         self.ensure_column("incidents", "registered_cidr", "TEXT")
@@ -535,9 +643,11 @@ class StateDB:
                 cursor = self.conn.execute(
                     """INSERT OR IGNORE INTO events
                     (event_uuid, batch_uuid, occurred_epoch, occurred_at, recorded_at,
-                     site_id, source_host, event_type, outcome, source_ip, account_key,
-                     user_agent, request_method, request_path, request_id, metadata_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     site_id, source_host, service, event_type, outcome, source_ip,
+                     source_port, destination_ip, destination_port, transport_protocol,
+                     application_protocol, account_key, user_agent, request_method,
+                     request_path, request_id, metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         event["event_uuid"],
                         batch["batch_uuid"],
@@ -546,9 +656,15 @@ class StateDB:
                         event.get("recorded_at"),
                         source["site_id"],
                         source["host"],
+                        source["service"],
                         event["event_type"],
                         event["outcome"],
                         event.get("source_ip"),
+                        event.get("source_port"),
+                        event.get("destination_ip"),
+                        event.get("destination_port"),
+                        event.get("transport_protocol"),
+                        event.get("application_protocol"),
                         event.get("account_key"),
                         event.get("user_agent"),
                         event.get("request_method"),
@@ -582,6 +698,186 @@ class StateDB:
                 (source_ip, start_epoch, end_epoch),
             )
         )
+
+    def ssh_failures(self, source_ip: str, start_epoch: int, end_epoch: int) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """SELECT event_uuid, occurred_epoch, occurred_at, site_id, account_key,
+                          source_port, destination_ip, destination_port,
+                          transport_protocol, application_protocol, metadata_json
+                   FROM events
+                   WHERE source_ip = ?
+                     AND service = 'sshd'
+                     AND event_type = 'ssh_auth_failed'
+                     AND outcome = 'denied'
+                     AND occurred_epoch BETWEEN ? AND ?
+                   ORDER BY occurred_epoch ASC, event_uuid ASC""",
+                (source_ip, start_epoch, end_epoch),
+            )
+        )
+
+    def web_probe_events(self, source_ip: str, start_epoch: int, end_epoch: int) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """SELECT event_uuid, occurred_epoch, occurred_at, site_id, account_key,
+                          source_port, destination_ip, destination_port, transport_protocol,
+                          application_protocol, request_method, request_path, request_id,
+                          user_agent, metadata_json
+                   FROM events
+                   WHERE source_ip = ?
+                     AND service = 'nginx'
+                     AND event_type = 'web_probe'
+                     AND outcome = 'denied'
+                     AND occurred_epoch BETWEEN ? AND ?
+                   ORDER BY occurred_epoch ASC, event_uuid ASC""",
+                (source_ip, start_epoch, end_epoch),
+            )
+        )
+
+    def materialize_web_probe_events(
+        self,
+        file_uuid: str,
+        source_host: str,
+        observations: Sequence[Mapping[str, Any]],
+        policy: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        if not policy.get("enabled"):
+            return []
+        by_ip: dict[str, list[Mapping[str, Any]]] = {}
+        for item in observations:
+            by_ip.setdefault(str(item["source_ip"]), []).append(item)
+        selected: list[tuple[Mapping[str, Any], str]] = []
+        for source_ip, rows in by_ip.items():
+            suspicious: list[tuple[Mapping[str, Any], str]] = []
+            error_rows: list[Mapping[str, Any]] = []
+            user_agents: dict[str, int] = {}
+            targets: set[str] = set()
+            for item in rows:
+                raw = item.get("raw", {}) if isinstance(item.get("raw"), Mapping) else {}
+                path = str(item.get("request_uri") or "")
+                method = str(item.get("request_method") or "")
+                user_agent = str(item.get("user_agent") or "")
+                status = item.get("http_status")
+                if is_authenticated_nextcloud_dav(raw, path, method, user_agent):
+                    continue
+                category = web_probe_category(path)
+                if category:
+                    suspicious.append((item, category))
+                if isinstance(status, int) and 400 <= status <= 599 and status not in {429, 444}:
+                    error_rows.append(item)
+                    targets.add(path)
+                    user_agents[user_agent] = user_agents.get(user_agent, 0) + 1
+            selected.extend(suspicious)
+            dominant_ua = max(user_agents, key=user_agents.get) if user_agents else ""
+            high_volume = (
+                len(error_rows) >= int(policy["high_volume_threshold"])
+                and len(targets) >= int(policy["high_volume_distinct_targets"])
+                and not SEARCH_BOT_UA_RE.search(dominant_ua)
+            )
+            if high_volume:
+                already = {str(item["observation_uuid"]) for item, _ in suspicious}
+                selected.extend(
+                    (item, "high-volume-web-scanner")
+                    for item in error_rows[:500]
+                    if str(item["observation_uuid"]) not in already
+                )
+        if not selected:
+            return []
+        batch_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"argent-sentinel:web-observations:{file_uuid}"))
+        if self.batch_exists(batch_uuid):
+            return []
+        site_id = f"nginx-{source_host}"[:255]
+        batch = {
+            "schema_version": 1,
+            "batch_uuid": batch_uuid,
+            "created_at": utc_text(),
+            "source": {
+                "host": source_host,
+                "site_id": site_id,
+                "site_url": f"https://{source_host}/",
+                "service": "nginx",
+                "plugin_version": APP_VERSION,
+            },
+        }
+        events: list[dict[str, Any]] = []
+        for item, category in selected:
+            path = str(item.get("request_uri") or "")
+            host = str(item.get("host") or item.get("server_name") or source_host)
+            events.append({
+                "event_uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, f"argent-sentinel:web-event:{item['observation_uuid']}")),
+                "occurred_epoch": int(item["occurred_epoch"]),
+                "occurred_at": str(item["occurred_at"]),
+                "recorded_at": utc_text(),
+                "event_type": "web_probe",
+                "outcome": "denied",
+                "source_ip": item.get("source_ip"),
+                "source_port": item.get("source_port"),
+                "destination_ip": item.get("destination_ip"),
+                "destination_port": item.get("destination_port"),
+                "transport_protocol": item.get("transport_protocol"),
+                "application_protocol": item.get("application_protocol"),
+                "account_key": f"{site_id}:probe:{category}",
+                "user_agent": item.get("user_agent"),
+                "request_method": item.get("request_method"),
+                "request_path": path,
+                "request_id": item.get("request_id"),
+                "metadata": {
+                    "probe_category": category,
+                    "http_status": item.get("http_status"),
+                    "host": host,
+                    "observation_uuid": item.get("observation_uuid"),
+                },
+            })
+        digest = hashlib.sha256((file_uuid + "\0web-events").encode()).hexdigest()
+        return self.import_batch(batch, digest, Path(f"abuse-context:{file_uuid}"), events)
+
+    def import_legacy_markers(self, state_dir: Path) -> dict[str, int]:
+        imported = 0
+        skipped = 0
+        if not state_dir.exists():
+            return {"imported": 0, "skipped": 0}
+        for marker in sorted(state_dir.glob("*.sent"), key=str):
+            name = marker.name[:-5]
+            if len(name) < 12 or name[4:5] != "-" or name[7:8] != "-":
+                skipped += 1
+                continue
+            report_date = name[:10]
+            source_text = name[11:]
+            try:
+                dt.date.fromisoformat(report_date)
+                try:
+                    source_ip = str(ipaddress.ip_address(source_text))
+                except ValueError:
+                    # Some legacy report filenames sanitized IPv6 colons as
+                    # underscores even though marker files normally retained
+                    # the literal address.
+                    source_ip = str(ipaddress.ip_address(source_text.replace("_", ":")))
+            except (ValueError, TypeError):
+                skipped += 1
+                continue
+            marker_key = hashlib.sha256(f"{report_date}\0{source_ip}".encode()).hexdigest()
+            with self.conn:
+                cursor = self.conn.execute(
+                    """INSERT OR IGNORE INTO legacy_reports
+                       (marker_key, source_ip, report_date, imported_at, marker_path)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (marker_key, source_ip, report_date, utc_text(), str(marker)),
+                )
+            imported += int(cursor.rowcount == 1)
+        return {"imported": imported, "skipped": skipped}
+
+    def legacy_report_match(self, source_ip: str, first_seen: str) -> sqlite3.Row | None:
+        try:
+            day = parse_time(first_seen).date()
+        except CollectorError:
+            return None
+        dates = [(day + dt.timedelta(days=offset)).isoformat() for offset in (-1, 0, 1)]
+        return self.conn.execute(
+            """SELECT * FROM legacy_reports
+               WHERE source_ip = ? AND report_date IN (?, ?, ?)
+               ORDER BY report_date DESC LIMIT 1""",
+            (source_ip, *dates),
+        ).fetchone()
 
     def recent_incident(self, source_ip: str, rule_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -1041,6 +1337,52 @@ class StateDB:
                 ),
             )
 
+    def network_case_incidents(self, network_cidr: str) -> list[sqlite3.Row]:
+        return list(self.conn.execute(
+            """SELECT i.* FROM network_case_incidents nci
+               JOIN incidents i ON i.incident_uuid = nci.incident_uuid
+               WHERE nci.network_cidr = ?
+               ORDER BY i.last_seen_epoch DESC""",
+            (network_cidr,),
+        ))
+
+    def network_report_sent(self, network_cidr: str, report_type: str) -> bool:
+        return self.conn.execute(
+            """SELECT 1 FROM network_case_reports
+               WHERE network_cidr=? AND report_type=? AND status='sent' LIMIT 1""",
+            (network_cidr, report_type),
+        ).fetchone() is not None
+
+    def network_report_sent_today(self, network_cidr: str, report_type: str) -> bool:
+        return self.conn.execute(
+            """SELECT 1 FROM network_case_reports
+               WHERE network_cidr=? AND report_type=? AND status='sent'
+                 AND substr(attempted_at, 1, 10) = substr(?, 1, 10)
+               LIMIT 1""",
+            (network_cidr, report_type, utc_text()),
+        ).fetchone() is not None
+
+    def record_network_report(
+        self,
+        network_cidr: str,
+        report_type: str,
+        status: str,
+        recipient: str | None,
+        detail: str,
+        message_id: str | None,
+    ) -> None:
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO network_case_reports
+                   (network_cidr, report_type, attempted_at, status, recipient, detail, message_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    network_cidr, report_type, utc_text(), status,
+                    clean_optional(recipient, 1000), clean_optional(detail, 2000),
+                    clean_optional(message_id, 255),
+                ),
+            )
+
     def cache_get(self, source_ip: str, now_epoch: int) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT * FROM enrichment_cache WHERE source_ip = ? AND expires_epoch > ?",
@@ -1172,15 +1514,15 @@ def normalize_batch(raw: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         if not isinstance(value, str) or not value.strip():
             raise CollectorError(f"Batch source.{key} is required")
         normalized_source[key] = value.strip()[:512]
-    if normalized_source["service"] != "wordpress":
-        raise CollectorError("This collector build accepts WordPress batches only")
+    if normalized_source["service"] not in {"wordpress", "sshd"}:
+        raise CollectorError("Unsupported batch source service")
     raw_events = raw.get("events")
     if not isinstance(raw_events, list) or not raw_events:
         raise CollectorError("Batch events must be a non-empty array")
     events: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw_event in raw_events:
-        event = normalize_event(raw_event, normalized_source["site_id"])
+        event = normalize_event(raw_event, normalized_source["site_id"], normalized_source["service"])
         if event["event_uuid"] in seen:
             raise CollectorError("Duplicate event_uuid inside batch")
         seen.add(event["event_uuid"])
@@ -1196,7 +1538,7 @@ def normalize_batch(raw: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     )
 
 
-def normalize_event(raw: Any, site_id: str) -> dict[str, Any]:
+def normalize_event(raw: Any, site_id: str, service: str = "wordpress") -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise CollectorError("Event must be an object")
     event_uuid = validate_uuid(raw.get("event_uuid"), "event_uuid")
@@ -1216,15 +1558,22 @@ def normalize_event(raw: Any, site_id: str) -> dict[str, Any]:
     user_id = raw.get("wordpress_user_id")
     username = raw.get("username")
     account_key: str | None = None
-    if user_id is not None:
-        try:
-            numeric_id = int(user_id)
-        except (TypeError, ValueError) as exc:
-            raise CollectorError("wordpress_user_id must be an integer") from exc
-        if numeric_id > 0:
-            account_key = f"{site_id}:user:{numeric_id}"
-    elif isinstance(username, str) and username.strip():
-        account_key = f"{site_id}:login:{username.strip().casefold()}"
+    if service == "wordpress":
+        if user_id is not None:
+            try:
+                numeric_id = int(user_id)
+            except (TypeError, ValueError) as exc:
+                raise CollectorError("wordpress_user_id must be an integer") from exc
+            if numeric_id > 0:
+                account_key = f"{site_id}:user:{numeric_id}"
+        elif isinstance(username, str) and username.strip():
+            account_key = f"{site_id}:login:{username.strip().casefold()}"
+    else:
+        account_hash = str(raw.get("account_hash", "")).strip().lower()
+        if account_hash:
+            if not re.fullmatch(r"[0-9a-f]{64}", account_hash):
+                raise CollectorError("Non-WordPress account_hash must be a SHA-256 hex token")
+            account_key = f"{site_id}:account:{account_hash}"
     request = raw.get("request") if isinstance(raw.get("request"), dict) else {}
     metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
     return {
@@ -1235,6 +1584,11 @@ def normalize_event(raw: Any, site_id: str) -> dict[str, Any]:
         "event_type": event_type,
         "outcome": outcome,
         "source_ip": source_ip,
+        "source_port": normalize_port(raw.get("source_port")),
+        "destination_ip": normalize_ip_optional(raw.get("destination_ip")),
+        "destination_port": normalize_port(raw.get("destination_port")),
+        "transport_protocol": clean_protocol(raw.get("transport_protocol")),
+        "application_protocol": clean_protocol(raw.get("application_protocol")),
         "account_key": account_key,
         "user_agent": clean_optional(raw.get("user_agent"), 512),
         "request_method": clean_optional(request.get("method"), 16),
@@ -1311,6 +1665,20 @@ def normalize_port(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return port if 1 <= port <= 65535 else None
+
+
+def normalize_ip_optional(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    try:
+        return str(ipaddress.ip_address(str(value)))
+    except ValueError as exc:
+        raise CollectorError("Malformed destination_ip") from exc
+
+
+def clean_protocol(value: Any) -> str | None:
+    cleaned = clean_optional(value, 32)
+    return cleaned.upper() if cleaned else None
 
 
 def first_value(raw: Mapping[str, Any], *keys: str) -> Any:
@@ -1442,9 +1810,14 @@ class Collector:
         imported = self.db.import_observations(
             file_uuid, digest, source_host, original_path, observations
         )
+        web_events = self.db.materialize_web_probe_events(
+            file_uuid, source_host, observations, self.config["web_policy"]
+        )
+        if web_events:
+            self.evaluate_new_events(web_events)
         archive = self.archive_context_file(path, original_path.name, file_uuid)
         self.db.set_observation_archive_path(file_uuid, archive)
-        LOG.info("Imported abuse-context file %s: %d observations", original_path, imported)
+        LOG.info("Imported abuse-context file %s: %d observations, %d web events", original_path, imported, len(web_events))
 
     def archive_context_file(self, path: Path, original_name: str, file_uuid: str) -> Path:
         now = utc_now()
@@ -1666,14 +2039,14 @@ class Collector:
         os.chmod(error_path, 0o640)
 
     def evaluate_new_events(self, events: Sequence[Mapping[str, Any]]) -> None:
-        policy_events = [
+        wordpress_events = [
             event for event in events
             if event.get("event_type") == "login_failed"
             and event.get("outcome") == "denied"
             and event.get("source_ip")
         ]
         by_ip: dict[str, list[Mapping[str, Any]]] = {}
-        for event in policy_events:
+        for event in wordpress_events:
             by_ip.setdefault(str(event["source_ip"]), []).append(event)
         window = int(self.config["policy"]["window_seconds"])
         for source_ip, new_rows in by_ip.items():
@@ -1688,7 +2061,70 @@ class Collector:
                     int(self.config["policy"]["incident_merge_seconds"]),
                 )
                 LOG.warning(
-                    "Credential-spray incident %s: ip=%s rule=%s events=%d accounts=%d",
+                    "WordPress authentication incident %s: ip=%s rule=%s events=%d accounts=%d",
+                    incident_uuid,
+                    source_ip,
+                    rule_id,
+                    len(evidence),
+                    len({row["account_key"] for row in evidence if row["account_key"]}),
+                )
+
+        if self.config.get("web_policy", {}).get("enabled"):
+            web_events = [
+                event for event in events
+                if event.get("event_type") == "web_probe"
+                and event.get("outcome") == "denied"
+                and event.get("source_ip")
+            ]
+            web_by_ip: dict[str, list[Mapping[str, Any]]] = {}
+            for event in web_events:
+                web_by_ip.setdefault(str(event["source_ip"]), []).append(event)
+            web_policy = self.config["web_policy"]
+            web_window = int(web_policy["window_seconds"])
+            for source_ip, new_rows in web_by_ip.items():
+                earliest = min(int(item["occurred_epoch"]) for item in new_rows) - web_window
+                latest = max(int(item["occurred_epoch"]) for item in new_rows) + web_window
+                rows = self.db.web_probe_events(source_ip, earliest, latest)
+                candidate = self.qualify_web_probe_segment(rows)
+                if candidate:
+                    incident_uuid = self.db.create_or_merge_incident(
+                        source_ip,
+                        "nginx-hostile-web-probing",
+                        candidate,
+                        int(web_policy["incident_merge_seconds"]),
+                    )
+                    LOG.warning(
+                        "Nginx hostile probing incident %s: ip=%s events=%d targets=%d",
+                        incident_uuid, source_ip, len(candidate),
+                        len({row["request_path"] for row in candidate if row["request_path"]}),
+                    )
+
+        if not self.config.get("sshd_policy", {}).get("enabled"):
+            return
+        ssh_events = [
+            event for event in events
+            if event.get("event_type") == "ssh_auth_failed"
+            and event.get("outcome") == "denied"
+            and event.get("source_ip")
+        ]
+        ssh_by_ip: dict[str, list[Mapping[str, Any]]] = {}
+        for event in ssh_events:
+            ssh_by_ip.setdefault(str(event["source_ip"]), []).append(event)
+        ssh_policy = self.config["sshd_policy"]
+        ssh_window = int(ssh_policy["window_seconds"])
+        for source_ip, new_rows in ssh_by_ip.items():
+            earliest = min(int(item["occurred_epoch"]) for item in new_rows) - ssh_window
+            latest = max(int(item["occurred_epoch"]) for item in new_rows) + ssh_window
+            rows = self.db.ssh_failures(source_ip, earliest, latest)
+            for rule_id, evidence in self.find_ssh_candidates(rows):
+                incident_uuid = self.db.create_or_merge_incident(
+                    source_ip,
+                    rule_id,
+                    evidence,
+                    int(ssh_policy["incident_merge_seconds"]),
+                )
+                LOG.warning(
+                    "OpenSSH authentication incident %s: ip=%s rule=%s events=%d accounts=%d",
                     incident_uuid,
                     source_ip,
                     rule_id,
@@ -1753,6 +2189,93 @@ class Collector:
                 "wordpress-single-account-bruteforce",
                 [item for item in segment if item["account_key"] == single_key],
             )
+        return None
+
+    def qualify_web_probe_segment(self, rows: Sequence[sqlite3.Row]) -> list[sqlite3.Row] | None:
+        if not rows:
+            return None
+        policy = self.config["web_policy"]
+        window = int(policy["window_seconds"])
+        threshold = int(policy["suspicious_threshold"])
+        distinct_targets = int(policy["distinct_targets"])
+        active: deque[sqlite3.Row] = deque()
+        for row in rows:
+            current = int(row["occurred_epoch"])
+            while active and int(active[0]["occurred_epoch"]) < current - window:
+                active.popleft()
+            active.append(row)
+            categories = set()
+            targets = set()
+            for item in active:
+                targets.add(str(item["request_path"] or ""))
+                try:
+                    metadata = json.loads(str(item["metadata_json"] or "{}"))
+                except json.JSONDecodeError:
+                    metadata = {}
+                categories.add(str(metadata.get("probe_category", "")))
+            high_volume = "high-volume-web-scanner" in categories
+            suspicious_server_error = False
+            for item in active:
+                try:
+                    metadata = json.loads(str(item["metadata_json"] or "{}"))
+                except json.JSONDecodeError:
+                    metadata = {}
+                status = metadata.get("http_status")
+                if metadata.get("probe_category") != "high-volume-web-scanner" and isinstance(status, int) and 500 <= status <= 599:
+                    suspicious_server_error = True
+                    break
+            if high_volume or suspicious_server_error or (
+                len(active) >= threshold and len(targets) >= distinct_targets
+            ):
+                return list(active)
+        return None
+
+    def find_ssh_candidates(self, rows: Sequence[sqlite3.Row]) -> list[tuple[str, list[sqlite3.Row]]]:
+        policy = self.config["sshd_policy"]
+        window_seconds = int(policy["window_seconds"])
+        candidates: list[tuple[str, list[sqlite3.Row]]] = []
+        segment: list[sqlite3.Row] = []
+        previous_epoch: int | None = None
+        for row in rows:
+            current = int(row["occurred_epoch"])
+            if previous_epoch is not None and current - previous_epoch > window_seconds:
+                candidate = self.qualify_ssh_segment(segment)
+                if candidate is not None:
+                    candidates.append(candidate)
+                segment = []
+            segment.append(row)
+            previous_epoch = current
+        candidate = self.qualify_ssh_segment(segment)
+        if candidate is not None:
+            candidates.append(candidate)
+        return candidates
+
+    def qualify_ssh_segment(self, segment: Sequence[sqlite3.Row]) -> tuple[str, list[sqlite3.Row]] | None:
+        if not segment:
+            return None
+        policy = self.config["sshd_policy"]
+        window_seconds = int(policy["window_seconds"])
+        threshold = int(policy["failure_threshold"])
+        distinct_required = int(policy["distinct_accounts"])
+        single_threshold = int(policy["single_account_threshold"])
+        active: deque[sqlite3.Row] = deque()
+        for row in segment:
+            current = int(row["occurred_epoch"])
+            while active and int(active[0]["occurred_epoch"]) < current - window_seconds:
+                active.popleft()
+            active.append(row)
+            accounts = {item["account_key"] for item in active if item["account_key"]}
+            if len(active) >= threshold and len(accounts) >= distinct_required:
+                return "sshd-credential-spray", list(active)
+            counts: dict[str, int] = {}
+            for item in active:
+                key = item["account_key"]
+                if key:
+                    counts[key] = counts.get(key, 0) + 1
+            if counts:
+                key = max(counts, key=counts.get)
+                if counts[key] >= single_threshold:
+                    return "sshd-single-account-bruteforce", [item for item in active if item["account_key"] == key]
         return None
 
     def retry_pending_incidents(self) -> None:
@@ -1931,7 +2454,15 @@ class Collector:
             if int(incident["last_seen_epoch"]) < cutoff_epoch:
                 return (
                     "suppressed",
-                    f"Incident predates report_not_before_utc={utc_text(parse_time(cutoff))}",
+                    f"Incident last_seen={incident['last_seen']} predates report_not_before_utc={utc_text(parse_time(cutoff))}",
+                )
+        legacy = self.config.get("legacy_reporting", {})
+        if legacy.get("suppress_matching_markers"):
+            marker = self.db.legacy_report_match(str(incident["source_ip"]), str(incident["first_seen"]))
+            if marker is not None:
+                return (
+                    "suppressed",
+                    f"Legacy reporter marker already covers {marker['source_ip']} on {marker['report_date']}",
                 )
         return None
 
@@ -2122,6 +2653,94 @@ class Collector:
                 return {}
             raise CollectorError(f"Enrichment request failed: {exc}") from exc
 
+    def send_network_report(
+        self,
+        network_cidr: str,
+        report_type: str = "network_escalation",
+    ) -> tuple[str, str, str | None]:
+        normalized = str(ipaddress.ip_network(network_cidr, strict=False))
+        if report_type == "network_escalation" and self.db.network_report_sent(normalized, report_type):
+            return "suppressed", "Network escalation report was already sent", None
+        if report_type == "network_update" and self.db.network_report_sent_today(normalized, report_type):
+            return "suppressed", "A network update was already sent today", None
+        case = self.db.conn.execute(
+            "SELECT * FROM network_cases WHERE network_cidr=?", (normalized,)
+        ).fetchone()
+        if case is None:
+            raise CollectorError(f"Network case not found: {normalized}")
+        if report_type == "network_escalation" and str(case["status"]) != "blocked":
+            raise CollectorError("Network escalation mail requires the case to be marked blocked")
+        incidents = self.db.network_case_incidents(normalized)
+        if not incidents:
+            raise CollectorError("Network case has no qualifying incidents")
+        representative = incidents[0]
+        enrichment = self.enrich(str(representative["source_ip"]))
+        recipients = self.report_recipients(enrichment)
+        if not recipients:
+            detail = "No RDAP abuse email was found for network case"
+            self.db.record_network_report(normalized, report_type, "no-contact", None, detail, None)
+            return "no-contact", detail, None
+        settings = self.config["abuse_reporting"]
+        if not settings.get("enabled"):
+            return "disabled", "Abuse reporting disabled in configuration", None
+        recipient_gate = self.report_recipient_gate(recipients)
+        if recipient_gate is not None:
+            status, detail, _ = recipient_gate
+            self.db.record_network_report(normalized, report_type, status, ", ".join(recipients), detail, None)
+            return status, detail, None
+        unique_ips = sorted({str(row["source_ip"]) for row in incidents})
+        message = EmailMessage()
+        message["From"] = str(settings["from"])
+        message["To"] = ", ".join(recipients)
+        if str(settings.get("admin_copy", "")).strip():
+            message["Bcc"] = str(settings["admin_copy"]).strip()
+        message["Date"] = email.utils.format_datetime(utc_now())
+        message_id = email.utils.make_msgid(domain=str(settings["message_id_domain"]))
+        message["Message-ID"] = message_id
+        label = " TEST" if settings.get("test_mode") else ""
+        action = "blocked" if str(case["status"]) == "blocked" else str(case["status"])
+        message["Subject"] = f"{settings['subject_prefix']}{label} Network escalation for {normalized}"
+        body = [
+            "This is an automated network-level abuse escalation from a self-hosted server operator.",
+            "",
+            f"Network CIDR: {normalized}",
+            f"Network case status: {case['status']}",
+            f"Action taken: the CIDR has been {action} by operator policy",
+            f"Distinct hostile source IPs: {case['hostile_ips']}",
+            f"Qualifying incidents: {case['incident_count']}",
+            f"Qualifying hostile events: {case['event_count']}",
+            f"Active days: {case['active_days']}",
+            f"Observed interval: {case['first_seen'] or 'unknown'} to {case['last_seen'] or 'unknown'}",
+            f"Representative hostile IPs: {', '.join(unique_ips[:20])}",
+            f"Registered network: {enrichment.get('network_cidr') or 'unknown'}",
+            f"Network name: {enrichment.get('network_name') or 'unknown'}",
+            f"ASN: {enrichment.get('asn') or 'unknown'} {enrichment.get('asn_holder') or ''}".rstrip(),
+            "",
+            "Only independently qualifying Argent Sentinel incidents are included in these totals.",
+            "Please investigate the responsible systems or customers and take appropriate action.",
+        ]
+        if settings.get("test_mode"):
+            body.extend(["", "Test mode is enabled; the provider recipient was overridden."])
+        message.set_content("\n".join(body) + "\n")
+        try:
+            result = subprocess.run(
+                [str(settings["sendmail_path"]), "-t", "-oi"],
+                input=message.as_bytes(), capture_output=True,
+                timeout=int(settings["send_timeout_seconds"]), check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            status, detail = "failed", f"sendmail failed: {exc}"
+        else:
+            if result.returncode == 0:
+                status, detail = "sent", f"Network report sent to {', '.join(recipients)}"
+            else:
+                status = "failed"
+                detail = clean_optional(result.stderr.decode("utf-8", "replace"), 1000) or f"sendmail exited {result.returncode}"
+        self.db.record_network_report(
+            normalized, report_type, status, ", ".join(recipients), detail, message_id
+        )
+        return status, detail, message_id
+
     def send_abuse_report(
         self,
         incident: sqlite3.Row,
@@ -2151,9 +2770,21 @@ class Collector:
         message_id = email.utils.make_msgid(domain=str(settings["message_id_domain"]))
         message["Message-ID"] = message_id
         test_label = " TEST" if settings.get("test_mode") else ""
+        rule_id = str(incident["rule_id"])
+        if rule_id.startswith("sshd-"):
+            activity = "Automated OpenSSH authentication attacks"
+            event_label = "Failed authentication attempts"
+            token_label = "Distinct targeted account tokens"
+        elif rule_id.startswith("nginx-"):
+            activity = "Automated hostile web probing and exploit scanning"
+            event_label = "Qualifying hostile requests"
+            token_label = "Distinct hostile probe categories"
+        else:
+            activity = "Automated WordPress credential spraying"
+            event_label = "Failed authentication attempts"
+            token_label = "Distinct targeted account tokens"
         message["Subject"] = (
-            f"{settings['subject_prefix']}{test_label} Automated WordPress credential spraying "
-            f"from {incident['source_ip']}"
+            f"{settings['subject_prefix']}{test_label} {activity} from {incident['source_ip']}"
         )
         max_ids = int(settings["max_evidence_uuids"])
         event_ids = [str(row["event_uuid"]) for row in evidence[:max_ids]]
@@ -2172,16 +2803,21 @@ class Collector:
             str(incident["incident_uuid"]),
             int(self.config["network_reporting"]["max_tuple_evidence"]),
         )
+        event_tuple_evidence = [
+            row for row in evidence
+            if row["source_port"] is not None or row["destination_port"] is not None
+        ][: int(self.config["network_reporting"]["max_tuple_evidence"])]
         body = [
             "This is an automated abuse report from a self-hosted server operator.",
             "",
             f"Report generated: {utc_text(generated)}",
             f"Source IP: {incident['source_ip']}",
-            "Activity: Automated WordPress credential spraying",
+            f"Activity: {activity}",
+            f"Rule: {rule_id}",
             f"UTC interval: {incident['first_seen']} to {incident['last_seen']}",
-            f"Failed attempts: {incident['event_count']}",
-            f"Distinct targeted accounts: {incident['distinct_accounts']}",
-            f"Affected WordPress sites: {incident['site_count']}",
+            f"{event_label}: {incident['event_count']}",
+            f"{token_label}: {incident['distinct_accounts']}",
+            f"Affected services/sites: {incident['site_count']}",
             f"Affected site IDs: {', '.join(sites) if sites else 'unknown'}",
             f"Candidate aggregation CIDR: {incident['network_cidr'] or 'unknown'}",
             f"Registered network: {incident['registered_cidr'] or 'unknown'}",
@@ -2202,7 +2838,7 @@ class Collector:
                 f"  CIDR: {network_context['network_cidr']}",
                 f"  Distinct hostile source IPs: {network_context['hostile_ips']}",
                 f"  Qualifying incidents: {network_context['incident_count']}",
-                f"  Failed authentication events: {network_context['event_count']}",
+                f"  Qualifying hostile events: {network_context['event_count']}",
                 f"  Active days: {network_context['active_days']}",
                 f"  First/last observed: {network_context['first_seen'] or 'unknown'} to {network_context['last_seen'] or 'unknown'}",
                 f"  Network case status: {network_context['status']}",
@@ -2221,8 +2857,8 @@ class Collector:
             "Evidence event UUIDs:",
             *[f"  - {event_id}" for event_id in event_ids],
         ])
-        if tuple_evidence:
-            body.extend(["", "Correlated network evidence:"])
+        if tuple_evidence or event_tuple_evidence:
+            body.extend(["", "Network evidence:"])
             for row in tuple_evidence:
                 source = f"{row['source_ip']}:{row['source_port']}" if row['source_port'] else str(row['source_ip'])
                 destination_ip = row['destination_ip'] or "unknown"
@@ -2240,11 +2876,21 @@ class Collector:
                     f"  - {row['occurred_at']} {source} -> {destination}; {protocols}; "
                     f"{request}{status_text}; correlation={row['correlation_method']}"
                 )
+            for row in event_tuple_evidence:
+                source = f"{row['source_ip']}:{row['source_port']}" if row['source_port'] else str(row['source_ip'])
+                destination_ip = row['destination_ip'] or "unknown"
+                destination = f"{destination_ip}:{row['destination_port']}" if row['destination_port'] else destination_ip
+                protocols = " / ".join(
+                    str(value) for value in (row['transport_protocol'], row['application_protocol']) if value
+                ) or "unknown"
+                body.append(
+                    f"  - {row['occurred_at']} {source} -> {destination}; {protocols}; source=service-event"
+                )
         else:
             body.extend([
                 "",
-                "Correlated network evidence: unavailable for this incident.",
-                "The application evidence below remains sufficient to identify the source IP and time window.",
+                "Network evidence: source port or destination tuple was unavailable for this incident.",
+                "The event evidence below still identifies the source IP and UTC time window.",
             ])
         if agents:
             body.extend(["", "Sanitized user-agent examples:", *[f"  - {agent}" for agent in agents]])
@@ -2318,6 +2964,28 @@ def rdap_network(payload: Mapping[str, Any]) -> str | None:
     return str(networks[0]) if len(networks) == 1 else None
 
 
+REGISTRY_ABUSE_EMAILS = {
+    "abuse@ripe.net", "abuse@arin.net", "abuse@apnic.net",
+    "abuse@lacnic.net", "abuse@afrinic.net", "cert@cert.br",
+    "search-apnic-not-arin@apnic.net",
+}
+REGISTRY_EMAIL_DOMAINS = {"ripe.net", "arin.net", "apnic.net", "lacnic.net", "afrinic.net"}
+
+
+def usable_abuse_email(address: str) -> bool:
+    value = address.strip().lower().strip("'\"<>.,;()[]")
+    if not valid_email_header(value):
+        return False
+    if value in REGISTRY_ABUSE_EMAILS:
+        return False
+    domain = value.rsplit("@", 1)[-1]
+    if domain in REGISTRY_EMAIL_DOMAINS:
+        return False
+    if value.startswith(("search-apnic-", "nobody@", "hostmaster@")):
+        return False
+    return True
+
+
 def extract_abuse_emails(payload: Mapping[str, Any]) -> set[str]:
     found: set[str] = set()
     visited: set[int] = set()
@@ -2337,7 +3005,7 @@ def extract_abuse_emails(payload: Mapping[str, Any]) -> set[str]:
                 for field in vcard[1]:
                     if isinstance(field, list) and len(field) >= 4 and str(field[0]).lower() == "email":
                         address = str(field[3]).strip().lower()
-                        if "@" in address and len(address) <= 254:
+                        if usable_abuse_email(address):
                             found.add(address)
             for child in value.values():
                 walk(child, is_abuse)
@@ -2366,6 +3034,9 @@ def status_output(collector: Collector) -> dict[str, Any]:
             "fallback_correlation_seconds": collector.config["abuse_context"]["fallback_correlation_seconds"],
         },
         "network_reporting": collector.config["network_reporting"],
+        "sshd_policy": collector.config["sshd_policy"],
+        "web_policy": collector.config["web_policy"],
+        "legacy_reporting": collector.config["legacy_reporting"],
         "crowdsec_enabled": bool(collector.config["crowdsec"]["enabled"]),
         "abuse_reporting_enabled": bool(collector.config["abuse_reporting"]["enabled"]),
         "abuse_reporting_guardrails": {
@@ -2397,6 +3068,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser("run", help="Import batches, evaluate policy, and retry actions")
     sub.add_parser("status", help="Print collector state and CIDR candidates")
     sub.add_parser("network-list", help="Print network case records")
+    network_report = sub.add_parser("network-report", help="Send a manual network escalation/update report")
+    network_report.add_argument("--cidr", required=True)
+    network_report.add_argument("--type", default="network_escalation", choices=("network_escalation", "network_update"))
     network_set = sub.add_parser("network-set", help="Set a manual network-case status")
     network_set.add_argument("--cidr", required=True)
     network_set.add_argument(
@@ -2404,6 +3078,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=("observing", "review", "escalation-review", "blocked", "closed"),
     )
     network_set.add_argument("--note", default="")
+    network_set.add_argument("--send-report", action="store_true", help="Send the provider escalation after marking blocked")
+    legacy_import = sub.add_parser("legacy-import", help="Import legacy nginx-abuse .sent markers")
+    legacy_import.add_argument("--state-dir", default="", help="Legacy marker directory")
     migrate = sub.add_parser("migrate", help="Back up and migrate the state database")
     migrate.add_argument("--backup-dir", default="", help="Optional directory for a consistent pre-migration backup")
     sub.add_parser("validate-config", help="Validate configuration and exit")
@@ -2437,7 +3114,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "backup": str(backup_path) if backup_path else None,
             }, indent=2, sort_keys=True))
             return 0
-        if args.command in {"status", "network-list", "network-set"}:
+        if args.command in {"status", "network-list", "network-set", "network-report", "legacy-import"}:
             collector = Collector(config)
             try:
                 if args.command == "status":
@@ -2445,14 +3122,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                 elif args.command == "network-list":
                     collector.db.sync_network_cases(config["policy"])
                     print(json.dumps([dict(row) for row in collector.db.network_cases(500)], indent=2, sort_keys=True))
-                else:
+                elif args.command == "network-set":
                     collector.db.set_network_case(args.cidr, args.status, args.note)
-                    print(json.dumps({
+                    result: dict[str, Any] = {
                         "network_cidr": str(ipaddress.ip_network(args.cidr, strict=False)),
                         "status": args.status,
                         "note": clean_optional(args.note, 2000),
                         "enforcement_changed": False,
-                    }, indent=2, sort_keys=True))
+                    }
+                    send_report = bool(args.send_report) or (
+                        args.status == "blocked"
+                        and bool(config["network_reporting"].get("automatic_network_email"))
+                    )
+                    if send_report:
+                        if args.status != "blocked":
+                            raise CollectorError("--send-report requires --status blocked")
+                        report_status, detail, message_id = collector.send_network_report(
+                            args.cidr, "network_escalation"
+                        )
+                        result["report"] = {
+                            "status": report_status, "detail": detail, "message_id": message_id
+                        }
+                    print(json.dumps(result, indent=2, sort_keys=True))
+                elif args.command == "network-report":
+                    status, detail, message_id = collector.send_network_report(args.cidr, args.type)
+                    print(json.dumps({"status": status, "detail": detail, "message_id": message_id}, indent=2, sort_keys=True))
+                    return 0 if status == "sent" else 1
+                else:
+                    state_dir = Path(args.state_dir or config["legacy_reporting"]["marker_state_dir"])
+                    result = collector.db.import_legacy_markers(state_dir)
+                    result["state_dir"] = str(state_dir)
+                    print(json.dumps(result, indent=2, sort_keys=True))
             finally:
                 collector.close()
             return 0
@@ -2461,7 +3161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             collector = Collector(config)
             try:
                 collector.run()
-                print(json.dumps(status_output(collector), indent=2, sort_keys=True))
+                print(json.dumps({"status": "ok", "version": APP_VERSION, "counts": collector.db.counts()}, sort_keys=True))
             finally:
                 collector.close()
         return 0

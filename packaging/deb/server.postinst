@@ -3,21 +3,19 @@ set -e
 
 CONFIG=/etc/argent-sentinel/collector.json
 EXAMPLE=/usr/share/argent-sentinel/collector.json.example
+API_CONFIG=/etc/argent-sentinel/server-api.json
+API_EXAMPLE=/usr/share/argent-sentinel/server-api.json.example
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 PACKAGE_VERSION="@PACKAGE_VERSION@"
 BACKUP=/var/backups/argent-sentinel/package-$PACKAGE_VERSION-$STAMP
 LEGACY_SERVICE_ARCHIVED=0
 
 archive_legacy_unit() {
-  unit=$1
-  path=/etc/systemd/system/$unit
+  unit=$1; path=/etc/systemd/system/$unit
   [ -f "$path" ] || return 0
   legacy=0
-  if grep -q '/usr/local/libexec/argent-sentinel/collector.py' "$path"; then
-    legacy=1
-  elif [ "$unit" = argent-sentinel-collector.timer ] && [ "$LEGACY_SERVICE_ARCHIVED" -eq 1 ] && \
-       grep -q '^Unit=argent-sentinel-collector.service$' "$path"; then
-    legacy=1
+  if grep -q '/usr/local/libexec/argent-sentinel/collector.py' "$path"; then legacy=1
+  elif [ "$unit" = argent-sentinel-collector.timer ] && [ "$LEGACY_SERVICE_ARCHIVED" -eq 1 ] && grep -q '^Unit=argent-sentinel-collector.service$' "$path"; then legacy=1
   fi
   if [ "$legacy" -eq 1 ]; then
     install -d -o root -g root -m 0700 "$BACKUP/legacy-systemd"
@@ -30,57 +28,48 @@ archive_legacy_unit() {
 }
 
 case "$1" in
-  configure)
-    install -d -o root -g root -m 0750 /etc/argent-sentinel
-    install -d -o root -g root -m 0700 /var/backups/argent-sentinel
-    install -d -o root -g root -m 0750 \
-      /var/lib/argent-sentinel/collector \
-      /var/lib/argent-sentinel/collector/processing \
-      /var/lib/argent-sentinel/collector/archive \
-      /var/lib/argent-sentinel/collector/rejected \
-      /var/lib/argent-sentinel/collector/abuse-context-processing \
-      /var/lib/argent-sentinel/collector/abuse-context-archive \
-      /var/lib/argent-sentinel/collector/abuse-context-rejected
+ configure)
+  install -d -o root -g root -m 0750 /etc/argent-sentinel /etc/argent-sentinel/nodes.d
+  install -d -o root -g root -m 0700 /etc/argent-sentinel/pki /var/backups/argent-sentinel
+  install -d -o root -g root -m 0750 \
+    /var/lib/argent-sentinel/collector /var/lib/argent-sentinel/collector/processing \
+    /var/lib/argent-sentinel/collector/archive /var/lib/argent-sentinel/collector/rejected \
+    /var/lib/argent-sentinel/collector/abuse-context-processing \
+    /var/lib/argent-sentinel/collector/abuse-context-archive \
+    /var/lib/argent-sentinel/collector/abuse-context-rejected \
+    /var/lib/argent-sentinel/server /var/lib/argent-sentinel/drop/remote
 
-    if [ ! -e "$CONFIG" ]; then
-      install -o root -g root -m 0600 "$EXAMPLE" "$CONFIG"
-      HOST_SHORT=$(hostname -s 2>/dev/null || hostname)
-      HOST_FQDN=$(hostname -f 2>/dev/null || hostname)
-      CONFIG="$CONFIG" HOST_SHORT="$HOST_SHORT" HOST_FQDN="$HOST_FQDN" python3 - <<'PY'
-import json
-import os
+  if [ ! -e "$CONFIG" ]; then
+    install -o root -g root -m 0600 "$EXAMPLE" "$CONFIG"
+    HOST_SHORT=$(hostname -s 2>/dev/null || hostname); HOST_FQDN=$(hostname -f 2>/dev/null || hostname)
+    CONFIG="$CONFIG" HOST_SHORT="$HOST_SHORT" HOST_FQDN="$HOST_FQDN" python3 - <<'PY'
+import json,os
 from pathlib import Path
-path = Path(os.environ["CONFIG"])
-config = json.loads(path.read_text(encoding="utf-8"))
-node = config.setdefault("node", {})
-node["id"] = os.environ["HOST_SHORT"]
-node["fqdn"] = os.environ["HOST_FQDN"]
-tmp = path.with_suffix(".json.tmp")
-tmp.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-tmp.chmod(0o600)
-tmp.replace(path)
+p=Path(os.environ['CONFIG']); c=json.loads(p.read_text()); c['node']['id']=os.environ['HOST_SHORT']; c['node']['fqdn']=os.environ['HOST_FQDN']
+t=p.with_suffix('.json.tmp'); t.write_text(json.dumps(c,indent=2,sort_keys=True)+'\n'); t.chmod(0o600); t.replace(p)
 PY
-      echo "Installed disabled default configuration at $CONFIG"
-    else
-      chown root:root "$CONFIG"
-      chmod 0600 "$CONFIG"
-      echo "Preserved existing $CONFIG"
-    fi
+    echo "Installed disabled default configuration at $CONFIG"
+  else
+    chown root:root "$CONFIG"; chmod 0600 "$CONFIG"; echo "Preserved existing $CONFIG"
+  fi
+  if [ ! -e "$API_CONFIG" ]; then install -o root -g root -m 0640 "$API_EXAMPLE" "$API_CONFIG"; else chown root:root "$API_CONFIG"; chmod 0640 "$API_CONFIG"; fi
 
-    archive_legacy_unit argent-sentinel-collector.service
-    archive_legacy_unit argent-sentinel-collector.timer
+  archive_legacy_unit argent-sentinel-collector.service
+  archive_legacy_unit argent-sentinel-collector.timer
 
-    /usr/bin/argent-sentinel --config "$CONFIG" validate-config
-    install -d -o root -g root -m 0700 "$BACKUP"
-    cp -a "$CONFIG" "$BACKUP/collector.json"
-    /usr/bin/argent-sentinel --config "$CONFIG" migrate --backup-dir "$BACKUP" >/dev/null
+  /usr/bin/argent-sentinel --config "$CONFIG" validate-config
+  /usr/sbin/argent-sentinel-api --config "$API_CONFIG" validate-config
+  install -d -o root -g root -m 0700 "$BACKUP"
+  cp -a "$CONFIG" "$BACKUP/collector.json"
+  cp -a "$API_CONFIG" "$BACKUP/server-api.json"
+  /usr/bin/argent-sentinel --config "$CONFIG" migrate --backup-dir "$BACKUP" >/dev/null
 
-    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
-      systemctl daemon-reload || true
-      systemctl enable argent-sentinel-collector.timer >/dev/null 2>&1 || true
-      systemctl restart argent-sentinel-collector.timer >/dev/null 2>&1 || \
-        systemctl start argent-sentinel-collector.timer >/dev/null 2>&1 || true
-    fi
-    ;;
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    systemctl enable argent-sentinel-collector.timer argent-sentinel-api.service >/dev/null 2>&1 || true
+    systemctl restart argent-sentinel-api.service >/dev/null 2>&1 || systemctl start argent-sentinel-api.service >/dev/null 2>&1 || true
+    systemctl restart argent-sentinel-collector.timer >/dev/null 2>&1 || systemctl start argent-sentinel-collector.timer >/dev/null 2>&1 || true
+  fi
+  ;;
 esac
 exit 0

@@ -1,89 +1,113 @@
 {
-  "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
-  "lock_file": "/run/argent-sentinel/collector.lock",
-  "node": {
-    "id": "nidhoggur",
-    "fqdn": "nidhoggur.argentwolf.org",
-    "central_url": "https://sentinel.argentwolf.org/"
-  },
-  "incoming_globs": [
-    "/var/lib/argent-sentinel/drop/wordpress/*/incoming/*.json"
-  ],
-  "processing_dir": "/var/lib/argent-sentinel/collector/processing",
-  "archive_dir": "/var/lib/argent-sentinel/collector/archive",
-  "rejected_dir": "/var/lib/argent-sentinel/collector/rejected",
-  "max_batch_bytes": 20971520,
   "abuse_context": {
+    "archive_dir": "/var/lib/argent-sentinel/collector/abuse-context-archive",
     "enabled": false,
+    "fallback_correlation_seconds": 2,
     "incoming_globs": [
       "/var/lib/argent-sentinel/drop/nginx/*/incoming/*.jsonl",
-      "/var/lib/argent-sentinel/drop/nginx/*/incoming/*.json"
+      "/var/lib/argent-sentinel/drop/nginx/*/incoming/*.json",
+      "/var/lib/argent-sentinel/drop/remote/*/abuse-context/incoming/*.jsonl",
+      "/var/lib/argent-sentinel/drop/remote/*/abuse-context/incoming/*.json"
     ],
-    "processing_dir": "/var/lib/argent-sentinel/collector/abuse-context-processing",
-    "archive_dir": "/var/lib/argent-sentinel/collector/abuse-context-archive",
-    "rejected_dir": "/var/lib/argent-sentinel/collector/abuse-context-rejected",
     "max_file_bytes": 20971520,
     "max_line_bytes": 65536,
-    "fallback_correlation_seconds": 2
+    "processing_dir": "/var/lib/argent-sentinel/collector/abuse-context-processing",
+    "rejected_dir": "/var/lib/argent-sentinel/collector/abuse-context-rejected"
   },
+  "abuse_reporting": {
+    "admin_copy": "",
+    "enabled": false,
+    "from": "",
+    "max_evidence_uuids": 20,
+    "max_report_age_hours": 24,
+    "max_reports_per_recipient_per_day": 10,
+    "max_reports_per_run": 3,
+    "message_id_domain": "argentwolf.org",
+    "operator_contact": "",
+    "recipient_cooldown_minutes": 15,
+    "recipient_override": "",
+    "report_not_before_utc": "",
+    "retry_backoff_minutes": 60,
+    "send_timeout_seconds": 30,
+    "sendmail_path": "/usr/sbin/sendmail",
+    "subject_prefix": "[Argent Sentinel]",
+    "test_mode": false
+  },
+  "archive_dir": "/var/lib/argent-sentinel/collector/archive",
+  "crowdsec": {
+    "command_timeout_seconds": 20,
+    "cscli_path": "/usr/bin/cscli",
+    "enabled": false
+  },
+  "enrichment": {
+    "asn_classifications": {},
+    "cache_days": 7,
+    "enabled": true,
+    "enrich_when_actions_disabled": false,
+    "rdap_url": "https://rdap.org/ip/{ip}",
+    "ripe_prefix_url": "https://stat.ripe.net/data/prefix-overview/data.json?resource={ip}",
+    "timeout_seconds": 12,
+    "user_agent": "Argent-Sentinel/0.4.0 (+self-hosted security abuse reporting)"
+  },
+  "incoming_globs": [
+    "/var/lib/argent-sentinel/drop/wordpress/*/incoming/*.json",
+    "/var/lib/argent-sentinel/drop/remote/*/events/incoming/*.json"
+  ],
+  "legacy_reporting": {
+    "marker_state_dir": "/var/lib/nginx-abuse-drafts",
+    "suppress_matching_markers": true
+  },
+  "lock_file": "/run/argent-sentinel/collector.lock",
+  "max_batch_bytes": 20971520,
   "network_reporting": {
+    "automatic_cidr_blocking": false,
+    "automatic_network_email": false,
     "enabled": true,
     "include_context_min_hostile_ips": 2,
-    "max_tuple_evidence": 20,
-    "automatic_cidr_blocking": false,
-    "automatic_network_email": false
+    "max_tuple_evidence": 20
   },
+  "node": {
+    "central_url": "https://sentinel.argentwolf.org/",
+    "fqdn": "nidhoggur.argentwolf.org",
+    "id": "nidhoggur"
+  },
+  "policy": {
+    "ban_duration": "720h",
+    "distinct_accounts": 2,
+    "failure_threshold": 5,
+    "incident_merge_seconds": 300,
+    "max_enforcement_age_days": 7,
+    "network_escalation_active_days": 3,
+    "network_escalation_distinct_ips": 5,
+    "network_review_distinct_ips": 3,
+    "network_review_window_days": 7,
+    "reason_prefix": "argent-sentinel",
+    "single_account_threshold": 10,
+    "window_seconds": 60
+  },
+  "processing_dir": "/var/lib/argent-sentinel/collector/processing",
+  "rejected_dir": "/var/lib/argent-sentinel/collector/rejected",
+  "sshd_policy": {
+    "distinct_accounts": 3,
+    "enabled": true,
+    "failure_threshold": 8,
+    "incident_merge_seconds": 300,
+    "single_account_threshold": 12,
+    "window_seconds": 120
+  },
+  "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
   "trusted_cidrs": [
     "127.0.0.0/8",
     "::1/128",
     "192.168.0.0/16"
   ],
-  "policy": {
-    "window_seconds": 60,
-    "failure_threshold": 5,
-    "distinct_accounts": 2,
-    "single_account_threshold": 10,
-    "incident_merge_seconds": 300,
-    "max_enforcement_age_days": 7,
-    "ban_duration": "720h",
-    "reason_prefix": "argent-sentinel",
-    "network_review_window_days": 7,
-    "network_review_distinct_ips": 3,
-    "network_escalation_distinct_ips": 5,
-    "network_escalation_active_days": 3
-  },
-  "crowdsec": {
-    "enabled": false,
-    "cscli_path": "/usr/bin/cscli",
-    "command_timeout_seconds": 20
-  },
-  "enrichment": {
+  "web_policy": {
+    "distinct_targets": 1,
     "enabled": true,
-    "rdap_url": "https://rdap.org/ip/{ip}",
-    "ripe_prefix_url": "https://stat.ripe.net/data/prefix-overview/data.json?resource={ip}",
-    "timeout_seconds": 12,
-    "cache_days": 7,
-    "enrich_when_actions_disabled": false,
-    "user_agent": "Argent-Sentinel/0.3.1 (+self-hosted security abuse reporting)",
-    "asn_classifications": {}
-  },
-  "abuse_reporting": {
-    "enabled": false,
-    "test_mode": false,
-    "from": "",
-    "admin_copy": "",
-    "recipient_override": "",
-    "sendmail_path": "/usr/sbin/sendmail",
-    "send_timeout_seconds": 30,
-    "subject_prefix": "[Argent Sentinel]",
-    "message_id_domain": "argentwolf.org",
-    "operator_contact": "",
-    "max_evidence_uuids": 20,
-    "max_reports_per_run": 3,
-    "max_report_age_hours": 24,
-    "recipient_cooldown_minutes": 15,
-    "max_reports_per_recipient_per_day": 10,
-    "report_not_before_utc": "",
-    "retry_backoff_minutes": 60
+    "high_volume_distinct_targets": 25,
+    "high_volume_threshold": 100,
+    "incident_merge_seconds": 1800,
+    "suspicious_threshold": 3,
+    "window_seconds": 600
   }
 }

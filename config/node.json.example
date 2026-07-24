@@ -1,0 +1,6 @@
+{
+  "node_id": "hermod",
+  "enabled": true,
+  "services": ["wordpress", "nginx", "sshd"],
+  "site_ids": ["example-org"]
+}

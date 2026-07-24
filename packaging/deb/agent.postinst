@@ -1,24 +1,36 @@
 #!/bin/sh
 set -e
-
+CONFIG=/etc/argent-sentinel/agent.json
+EXAMPLE=/usr/share/argent-sentinel/agent.json.example
 case "$1" in
-  configure)
-    if ! getent group sentinel >/dev/null 2>&1; then
-      addgroup --system sentinel >/dev/null
-    fi
-    install -d -o root -g sentinel -m 0750 \
-      /var/lib/argent-sentinel \
-      /var/lib/argent-sentinel/drop \
-      /var/lib/argent-sentinel/drop/wordpress \
-      /var/lib/argent-sentinel/drop/nginx
-    install -d -o root -g sentinel -m 2770 \
-      /var/lib/argent-sentinel/drop/nginx/abuse-context/incoming
-    install -d -o root -g root -m 0750 \
-      /var/lib/argent-sentinel/agent \
-      /var/lib/argent-sentinel/agent/pending \
-      /var/lib/argent-sentinel/agent/processing \
-      /var/lib/argent-sentinel/agent/acknowledged \
-      /var/lib/argent-sentinel/agent/rejected
-    ;;
-esac
+ configure)
+  if ! getent group sentinel >/dev/null 2>&1; then addgroup --system sentinel >/dev/null; fi
+  install -d -o root -g root -m 0750 /etc/argent-sentinel
+  install -d -o root -g root -m 0700 /etc/argent-sentinel/pki
+  install -d -o root -g sentinel -m 0750 /var/lib/argent-sentinel /var/lib/argent-sentinel/drop \
+    /var/lib/argent-sentinel/drop/wordpress /var/lib/argent-sentinel/drop/nginx
+  install -d -o root -g sentinel -m 2770 /var/lib/argent-sentinel/drop/nginx/abuse-context/incoming
+  install -d -o root -g root -m 0750 /var/lib/argent-sentinel/agent \
+    /var/lib/argent-sentinel/agent/pending /var/lib/argent-sentinel/agent/acknowledged \
+    /var/lib/argent-sentinel/agent/rejected
+  if [ ! -e "$CONFIG" ]; then
+    install -o root -g root -m 0600 "$EXAMPLE" "$CONFIG"
+    HOST_SHORT=$(hostname -s 2>/dev/null || hostname); HOST_FQDN=$(hostname -f 2>/dev/null || hostname)
+    CONFIG="$CONFIG" HOST_SHORT="$HOST_SHORT" HOST_FQDN="$HOST_FQDN" python3 - <<'PY'
+import json,os
+from pathlib import Path
+p=Path(os.environ['CONFIG']); c=json.loads(p.read_text()); c['node']={'id':os.environ['HOST_SHORT'],'fqdn':os.environ['HOST_FQDN']}
+t=p.with_suffix('.json.tmp'); t.write_text(json.dumps(c,indent=2,sort_keys=True)+'\n'); t.chmod(0o600); t.replace(p)
+PY
+  else chown root:root "$CONFIG"; chmod 0600 "$CONFIG"; fi
+  if [ ! -s /etc/argent-sentinel/agent-privacy.key ]; then
+    umask 077; openssl rand 32 > /etc/argent-sentinel/agent-privacy.key
+  fi
+  /usr/bin/argent-sentinel-agent --config "$CONFIG" validate-config
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    systemctl enable argent-sentinel-agent.timer >/dev/null 2>&1 || true
+    systemctl restart argent-sentinel-agent.timer >/dev/null 2>&1 || systemctl start argent-sentinel-agent.timer >/dev/null 2>&1 || true
+  fi
+ ;; esac
 exit 0

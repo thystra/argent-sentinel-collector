@@ -97,14 +97,27 @@ def add_doc(root: Path, package: str, source: Path, name: str | None = None) -> 
 
 
 def make_common(root: Path, version: str) -> dict[str, str]:
-    install_file(ROOT / "src/collector.py", root / "usr/lib/argent-sentinel/collector.py", 0o755)
-    install_file(ROOT / "packaging/bin/argent-sentinel", root / "usr/bin/argent-sentinel", 0o755)
-    install_file(ROOT / "config/collector.json.example", root / "usr/share/argent-sentinel/collector.json.example")
+    for source, target in (
+        ("collector.py", "collector.py"),
+        ("agent.py", "agent.py"),
+        ("server_api.py", "server_api.py"),
+    ):
+        install_file(ROOT / "src" / source, root / "usr/lib/argent-sentinel" / target, 0o755)
+    for source, target in (
+        ("argent-sentinel", "usr/bin/argent-sentinel"),
+        ("argent-sentinel-agent", "usr/bin/argent-sentinel-agent"),
+        ("argent-sentinel-api", "usr/sbin/argent-sentinel-api"),
+    ):
+        install_file(ROOT / "packaging/bin" / source, root / target, 0o755)
+    for name in ("collector.json.example", "agent.json.example", "server-api.json.example", "node.json.example", "nginx-sentinel.conf.example"):
+        install_file(ROOT / "config" / name, root / "usr/share/argent-sentinel" / name)
     install_file(ROOT / "VERSION", root / "usr/share/argent-sentinel/VERSION")
-    for source in (ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "docs-abuse-context.md", ROOT / "docs/debian-packaging.md"):
+    docs = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "docs-abuse-context.md", ROOT / "docs/debian-packaging.md"]
+    docs.extend(sorted((ROOT / "docs").glob("*.md")))
+    for source in docs:
         add_doc(root, "argent-sentinel-common", source)
     return {
-        "description": "Argent Sentinel shared collector engine and command-line interface\nContains the Python policy engine, database migrations, reporting logic,\nconfiguration example, and shared documentation.",
+        "description": "Argent Sentinel shared engines and command-line interfaces\nContains the collector, remote node agent, central ingestion API, schema\nmigrations, reporting logic, configuration examples, and documentation.",
         "depends": "python3 (>= 3.10), ca-certificates",
         "suggests": "sqlite3",
         "provides": "argent-sentinel-collector-common",
@@ -116,12 +129,16 @@ def make_agent(root: Path, version: str) -> dict[str, str]:
         ("create-wordpress-drop.sh", "argent-sentinel-create-wordpress-drop"),
         ("onboard-wordpress-site.sh", "argent-sentinel-onboard-wordpress"),
         ("stage-abuse-context-log.sh", "argent-sentinel-stage-abuse-context"),
+        ("configure-agent.sh", "argent-sentinel-configure-agent"),
+        ("create-node-csr.sh", "argent-sentinel-create-node-csr"),
     ):
         install_file(ROOT / "scripts" / source_name, root / "usr/sbin" / target_name, 0o755)
+    install_file(ROOT / "packaging/systemd/argent-sentinel-agent.service", root / "usr/lib/systemd/system/argent-sentinel-agent.service")
+    install_file(ROOT / "packaging/systemd/argent-sentinel-agent.timer", root / "usr/lib/systemd/system/argent-sentinel-agent.timer")
     add_doc(root, "argent-sentinel-agent", ROOT / "docs/debian-packaging.md")
     return {
-        "description": "Argent Sentinel local event submission and onboarding helpers\nCreates protected WordPress and Nginx spools and provides site onboarding tools.\nRemote HTTPS delivery is intentionally deferred to the v0.4 transport release.",
-        "depends": f"argent-sentinel-common (= {version}), adduser, sudo",
+        "description": "Argent Sentinel authenticated remote node agent\nStages WordPress and Nginx events, captures privacy-preserving OpenSSH failures,\nand delivers idempotent mTLS batches to sentinel.argentwolf.org.",
+        "depends": f"argent-sentinel-common (= {version}), adduser, openssl, systemd | systemd-sysv",
         "suggests": "wp-cli",
         "provides": "argent-sentinel-client",
     }
@@ -129,13 +146,19 @@ def make_agent(root: Path, version: str) -> dict[str, str]:
 
 def make_server(root: Path, version: str) -> dict[str, str]:
     install_file(ROOT / "packaging/bin/argent-sentinel-status", root / "usr/sbin/argent-sentinel-status", 0o755)
-    install_file(ROOT / "packaging/systemd/argent-sentinel-collector.service", root / "usr/lib/systemd/system/argent-sentinel-collector.service")
-    install_file(ROOT / "packaging/systemd/argent-sentinel-collector.timer", root / "usr/lib/systemd/system/argent-sentinel-collector.timer")
+    for unit in ("argent-sentinel-collector.service", "argent-sentinel-collector.timer", "argent-sentinel-api.service"):
+        install_file(ROOT / "packaging/systemd" / unit, root / "usr/lib/systemd/system" / unit)
+    for source_name, target_name in (
+        ("init-sentinel-ca.sh", "argent-sentinel-init-ca"),
+        ("sign-node-csr.sh", "argent-sentinel-sign-node-csr"),
+        ("cutover-legacy-reporting.sh", "argent-sentinel-cutover-reporting"),
+    ):
+        install_file(ROOT / "scripts" / source_name, root / "usr/sbin" / target_name, 0o755)
     add_doc(root, "argent-sentinel-server", ROOT / "docs/debian-packaging.md")
     return {
-        "description": "Argent Sentinel central collector service and policy engine\nRuns the scheduled central collector, correlates incidents, manages CrowdSec\ndecisions, enriches sources, and sends guarded abuse reports.",
-        "depends": f"argent-sentinel-common (= {version}), argent-sentinel-agent (= {version}), init-system-helpers (>= 1.18~), systemd | systemd-sysv",
-        "recommends": "crowdsec, sqlite3, default-mta | mail-transport-agent",
+        "description": "Argent Sentinel central ingestion and policy server\nRuns the mTLS ingestion API and scheduled collector, correlates WordPress,\nNginx, and OpenSSH incidents, manages CrowdSec decisions, and sends reports.",
+        "depends": f"argent-sentinel-common (= {version}), argent-sentinel-agent (= {version}), init-system-helpers (>= 1.18~), systemd | systemd-sysv, openssl",
+        "recommends": "nginx, crowdsec, sqlite3, default-mta | mail-transport-agent",
         "provides": "argent-sentinel-collector",
     }
 
@@ -159,7 +182,12 @@ PACKAGE_BUILDERS = {
 }
 
 MAINTAINER_SCRIPTS = {
-    "argent-sentinel-agent": {"postinst": ROOT / "packaging/deb/agent.postinst"},
+    "argent-sentinel-agent": {
+        "preinst": ROOT / "packaging/deb/agent.preinst",
+        "postinst": ROOT / "packaging/deb/agent.postinst",
+        "prerm": ROOT / "packaging/deb/agent.prerm",
+        "postrm": ROOT / "packaging/deb/agent.postrm",
+    },
     "argent-sentinel-server": {
         "preinst": ROOT / "packaging/deb/server.preinst",
         "postinst": ROOT / "packaging/deb/server.postinst",
@@ -218,8 +246,8 @@ def main() -> int:
     if shutil.which("dpkg-deb") is None:
         parser.error("dpkg-deb is required (install dpkg-dev/build-essential)")
     upstream = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    if upstream != "0.3.1":
-        parser.error(f"VERSION must be 0.3.1, found {upstream!r}")
+    if upstream != "0.4.0":
+        parser.error(f"VERSION must be 0.4.0, found {upstream!r}")
     if not args.revision.isdigit() or int(args.revision) < 1:
         parser.error("--revision must be a positive integer")
     full_version = f"{upstream}-{args.revision}"
@@ -227,8 +255,9 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not args.skip_tests:
-        run(sys.executable, "-m", "py_compile", str(ROOT / "src/collector.py"))
-        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_packaging.py"):
+        for source in ("collector.py", "agent.py", "server_api.py"):
+            run(sys.executable, "-m", "py_compile", str(ROOT / "src" / source))
+        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_packaging.py"):
             run(sys.executable, str(ROOT / "tests" / test), cwd=ROOT)
         for script in sorted((ROOT / "scripts").glob("*.sh")):
             run("bash", "-n", str(script))

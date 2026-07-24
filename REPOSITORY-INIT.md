@@ -1,30 +1,34 @@
-# Repository initialization
+# Repository workflow
 
-This archive is a clean source snapshot for Argent Sentinel Host Collector 0.2.2.
-It intentionally excludes live configuration, SQLite state, logs, locks, secrets,
-and a `.git` directory.
+Argent Sentinel source, tests, Debian packaging and documentation belong in the
+repository. Live configuration, SQLite state, logs, queues, certificates and
+private keys remain outside Git.
 
-Initialize a repository:
+Keep these runtime paths untracked:
+
+- `/etc/argent-sentinel/`
+- `/var/lib/argent-sentinel/`
+- `/var/backups/argent-sentinel/`
+- `/run/argent-sentinel/`
+- Nginx logs, mail queues, generated reports and PKI private keys
+
+Run the complete validation suite before committing a release:
 
 ```bash
-git init -b main
-git add .
-git commit -m "Import Argent Sentinel collector v0.2.2"
-git tag -a v0.2.2 -m "Argent Sentinel collector v0.2.2"
+python3 -m py_compile src/collector.py src/agent.py src/server_api.py packaging/build_debs.py
+python3 tests/test_collector.py
+python3 tests/test_reporting_guardrails.py
+python3 tests/test_network_context.py
+python3 tests/test_v040.py
+python3 tests/test_packaging.py
+find scripts -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+./scripts/build-debs.sh
 ```
 
-Keep the following outside Git:
+For v0.4.0, commit and tag after reviewing the patch and built packages:
 
-- `/etc/argent-sentinel/collector.json`
-- `/var/lib/argent-sentinel/collector/`
-- `/var/lib/argent-sentinel/drop/`
-- `/run/argent-sentinel/`
-- mail credentials, secrets, logs, and generated reports
-
-For a fresh installation use `sudo ./scripts/install.sh`. For an existing
-0.2.1/0.2.2 installation, review and use
-`sudo ./scripts/install-v0.2.2-reporting-guardrails.sh`.
-
-## Debian packages
-
-Build v0.3.1 packages with `./scripts/build-debs.sh`; see `docs/debian-packaging.md`.
+```bash
+git add -A
+git commit -m "Add remote transport, SSH reporting, and reporting cutover"
+git tag -a v0.4.0 -m "Argent Sentinel v0.4.0"
+```

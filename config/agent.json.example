@@ -1,0 +1,36 @@
+{
+  "enabled": false,
+  "node": {
+    "id": "nidhoggur",
+    "fqdn": "nidhoggur.argentwolf.org"
+  },
+  "central_url": "https://sentinel.argentwolf.org/",
+  "endpoint_path": "/v1/ingest",
+  "ca_file": "/etc/ssl/certs/ca-certificates.crt",
+  "cert_file": "/etc/argent-sentinel/pki/node.crt",
+  "key_file": "/etc/argent-sentinel/pki/node.key",
+  "timeout_seconds": 30,
+  "max_files_per_run": 25,
+  "max_payload_bytes": 20971520,
+  "lock_file": "/run/argent-sentinel/agent.lock",
+  "pending_dir": "/var/lib/argent-sentinel/agent/pending",
+  "acknowledged_dir": "/var/lib/argent-sentinel/agent/acknowledged",
+  "rejected_dir": "/var/lib/argent-sentinel/agent/rejected",
+  "wordpress_globs": [
+    "/var/lib/argent-sentinel/drop/wordpress/*/incoming/*.json"
+  ],
+  "abuse_context_globs": [
+    "/var/lib/argent-sentinel/drop/nginx/*/incoming/*.jsonl",
+    "/var/lib/argent-sentinel/drop/nginx/*/incoming/*.json"
+  ],
+  "sshd": {
+    "enabled": false,
+    "unit": "ssh.service",
+    "cursor_file": "/var/lib/argent-sentinel/agent/sshd.cursor",
+    "privacy_key_file": "/etc/argent-sentinel/agent-privacy.key",
+    "initial_lookback_minutes": 5,
+    "destination_ip": "",
+    "destination_port": 22,
+    "max_events_per_batch": 500
+  }
+}

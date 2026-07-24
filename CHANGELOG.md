@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0 — 2026-07-24
+
+- Added mTLS remote node delivery through `sentinel.argentwolf.org`.
+- Added an idempotent Unix-socket central ingestion API with node/site authorization.
+- Added privacy-preserving OpenSSH failure collection and report policies.
+- Ported high-confidence Nginx exploit-probe and bounded scanner classification from the legacy reporter.
+- Added legacy sent-marker import and guarded test/production cutover tooling.
+- Added source/destination tuple evidence for WordPress, Nginx, and SSH reports.
+- Added operator-gated CIDR escalation mail with duplicate suppression.
+- Extended Debian packages with agent/API services, PKI helpers, and remote configuration.
+
 ## 0.3.1 — 2026-07-24
 
 - Add reproducible Debian binary-package builds for `common`, `agent`, `server`,

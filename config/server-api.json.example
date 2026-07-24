@@ -1,0 +1,10 @@
+{
+  "socket_path": "/run/argent-sentinel/api.sock",
+  "socket_group": "www-data",
+  "socket_mode": "0660",
+  "max_request_bytes": 31457280,
+  "nodes_dir": "/etc/argent-sentinel/nodes.d",
+  "receipt_db": "/var/lib/argent-sentinel/server/ingress.sqlite3",
+  "event_drop_root": "/var/lib/argent-sentinel/drop/remote",
+  "require_proxy_verified_client": true
+}
