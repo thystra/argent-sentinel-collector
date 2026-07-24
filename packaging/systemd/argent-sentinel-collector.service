@@ -11,7 +11,8 @@ Group=root
 ExecStartPre=/usr/bin/argent-sentinel --config /etc/argent-sentinel/collector.json migrate
 ExecStart=/usr/bin/argent-sentinel --config /etc/argent-sentinel/collector.json run
 RuntimeDirectory=argent-sentinel
-RuntimeDirectoryMode=0750
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 UMask=0027
 
 NoNewPrivileges=true

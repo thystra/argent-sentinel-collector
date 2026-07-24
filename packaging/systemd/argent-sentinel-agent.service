@@ -10,7 +10,8 @@ User=root
 Group=root
 ExecStart=/usr/bin/argent-sentinel-agent --config /etc/argent-sentinel/agent.json run
 RuntimeDirectory=argent-sentinel
-RuntimeDirectoryMode=0750
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 UMask=0027
 
 NoNewPrivileges=true

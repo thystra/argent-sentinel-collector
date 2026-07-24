@@ -28,11 +28,11 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 LOG = logging.getLogger("argent-sentinel-api")
 
 DEFAULTS: dict[str, Any] = {
-    "socket_path": "/run/argent-sentinel/api.sock",
+    "socket_path": "/run/argent-sentinel-api/api.sock",
     "socket_group": "www-data",
     "socket_mode": "0660",
     "max_request_bytes": 30 * 1024 * 1024,

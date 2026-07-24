@@ -9,8 +9,9 @@ Type=simple
 User=root
 Group=root
 ExecStart=/usr/sbin/argent-sentinel-api --config /etc/argent-sentinel/server-api.json serve
-RuntimeDirectory=argent-sentinel
+RuntimeDirectory=argent-sentinel argent-sentinel-api
 RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 UMask=0027
 Restart=on-failure
 RestartSec=5s
@@ -33,6 +34,7 @@ RestrictAddressFamilies=AF_UNIX
 ReadOnlyPaths=/etc/argent-sentinel
 ReadWritePaths=/var/lib/argent-sentinel
 ReadWritePaths=/run/argent-sentinel
+ReadWritePaths=/run/argent-sentinel-api
 
 [Install]
 WantedBy=multi-user.target

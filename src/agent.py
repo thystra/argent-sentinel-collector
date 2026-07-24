@@ -34,7 +34,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 UTC = dt.timezone.utc
 LOG = logging.getLogger("argent-sentinel-agent")
 
@@ -248,6 +248,12 @@ FAILED_PASSWORD_RE = re.compile(
 )
 
 
+INVALID_USER_RE = re.compile(
+    r"Invalid user (?P<user>.+?) from (?P<ip>\S+) port (?P<port>\d+)",
+    re.IGNORECASE,
+)
+
+
 
 def privacy_token(secret: bytes, node_id: str, username: str) -> str:
     material = f"sshd\0{node_id}\0{username.casefold()}".encode("utf-8", "replace")
@@ -272,13 +278,27 @@ def parse_sshd_row(
 ) -> dict[str, Any] | None:
     message = str(row.get("MESSAGE", ""))
     match = FAILED_PASSWORD_RE.search(message)
-    if not match:
-        return None
-    username = match.group("user")
-    source_ip = match.group("ip")
-    source_port = int(match.group("port"))
-    account_class = "invalid" if match.group("invalid") else "known-or-unresolved"
-    auth_method = match.group("method").lower()
+
+    if match:
+        # OpenSSH emits a separate "Invalid user" record before some invalid
+        # accounts reach an authentication method. Count that record instead,
+        # so one connection does not become two events.
+        if match.group("invalid"):
+            return None
+        username = match.group("user")
+        source_ip = match.group("ip")
+        source_port = int(match.group("port"))
+        account_class = "known-or-unresolved"
+        auth_method = match.group("method").lower()
+    else:
+        match = INVALID_USER_RE.search(message)
+        if not match:
+            return None
+        username = match.group("user")
+        source_ip = match.group("ip")
+        source_port = int(match.group("port"))
+        account_class = "invalid"
+        auth_method = "invalid-user-preauth"
     try:
         normalized_ip = str(ipaddress.ip_address(source_ip))
     except ValueError:

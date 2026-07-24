@@ -3,7 +3,7 @@
 Argent Sentinel is a self-hosted security event collector, correlation engine,
 CrowdSec decision bridge, and guarded abuse-reporting system.
 
-Version 0.4.0 separates producers, node transport, and central policy:
+Version 0.4.1 separates producers, node transport, and central policy:
 
 ```text
 WordPress / Nginx / OpenSSH

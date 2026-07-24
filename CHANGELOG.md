@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1 — 2026-07-24
+
+- Recognize OpenSSH `Invalid user ... from ... port ...` preauthentication probes as privacy-preserving SSH failure events.
+- Avoid double-counting paired invalid-user close and failed-authentication records.
+- Give the central API a dedicated runtime socket while retaining compatibility with the v0.4.0 socket path.
+- Keep all shared runtime directories traversable by Nginx and preserved across one-shot service exits.
+- Add regression coverage for IPv6 invalid-user probes, duplicate suppression, runtime paths, and version consistency.
+
 ## 0.4.0 — 2026-07-24
 
 - Added mTLS remote node delivery through `sentinel.argentwolf.org`.

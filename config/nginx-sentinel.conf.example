@@ -26,11 +26,11 @@ server {
         proxy_set_header X-Argent-Node "";
         proxy_set_header X-Argent-Transport-UUID $http_x_argent_transport_uuid;
 
-        proxy_pass http://unix:/run/argent-sentinel/api.sock:;
+        proxy_pass http://unix:/run/argent-sentinel-api/api.sock:;
     }
 
     location = /healthz {
-        proxy_pass http://unix:/run/argent-sentinel/api.sock:;
+        proxy_pass http://unix:/run/argent-sentinel-api/api.sock:;
     }
 
     location / {

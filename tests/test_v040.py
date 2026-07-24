@@ -71,7 +71,7 @@ class V040Test(unittest.TestCase):
 
     def test_sshd_parser_hashes_username_and_keeps_network_tuple(self) -> None:
         row = {
-            "MESSAGE": "Failed password for invalid user administrator from 198.51.100.44 port 54211 ssh2",
+            "MESSAGE": "Failed publickey for alan from 198.51.100.44 port 54211 ssh2",
             "__CURSOR": "s=unit-test",
             "__REALTIME_TIMESTAMP": "1784900000000000",
         }
@@ -89,11 +89,15 @@ class V040Test(unittest.TestCase):
         self.assertEqual("203.0.113.15", event["destination_ip"])
         self.assertEqual(22, event["destination_port"])
         self.assertEqual(64, len(event["account_hash"]))
-        self.assertNotIn("administrator", json.dumps(event))
-        self.assertIsNone(agent_module.parse_sshd_row(
+        self.assertNotIn("alan", json.dumps(event))
+        invalid_event = agent_module.parse_sshd_row(
             {"MESSAGE": "Invalid user administrator from 198.51.100.44 port 54211", "__CURSOR": "x"},
             node_id="hermod", secret=b"x" * 32, destination_ip="203.0.113.15", destination_port=22,
-        ))
+        )
+        self.assertIsNotNone(invalid_event)
+        assert invalid_event is not None
+        self.assertEqual("invalid", invalid_event["metadata"]["account_class"])
+        self.assertEqual("invalid-user-preauth", invalid_event["metadata"]["auth_method"])
 
     def test_remote_ingress_is_authorized_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
