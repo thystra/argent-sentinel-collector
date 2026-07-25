@@ -39,7 +39,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.4.8"
+APP_VERSION = "0.4.9"
 SCHEMA_VERSION = 4
 
 DEFAULTS: dict[str, Any] = {
@@ -82,11 +82,11 @@ DEFAULTS: dict[str, Any] = {
     },
     "sshd_policy": {
         "enabled": True,
-        "window_seconds": 120,
-        "failure_threshold": 8,
-        "distinct_accounts": 3,
-        "single_account_threshold": 12,
-        "incident_merge_seconds": 300,
+        "window_seconds": 3600,
+        "failure_threshold": 1,
+        "distinct_accounts": 1,
+        "single_account_threshold": 1,
+        "incident_merge_seconds": 86400,
     },
     "web_policy": {
         "enabled": True,
@@ -95,7 +95,9 @@ DEFAULTS: dict[str, Any] = {
         "distinct_targets": 1,
         "high_volume_threshold": 100,
         "high_volume_distinct_targets": 25,
-        "incident_merge_seconds": 1800,
+        "incident_merge_seconds": 86400,
+        "immediate_statuses": [444],
+        "review_statuses": [429],
     },
     "legacy_reporting": {
         "marker_state_dir": "/var/lib/nginx-abuse-drafts",
@@ -103,11 +105,11 @@ DEFAULTS: dict[str, Any] = {
     },
     "trusted_cidrs": ["127.0.0.0/8", "::1/128", "192.168.0.0/16"],
     "policy": {
-        "window_seconds": 60,
+        "window_seconds": 900,
         "failure_threshold": 5,
         "distinct_accounts": 2,
         "single_account_threshold": 10,
-        "incident_merge_seconds": 300,
+        "incident_merge_seconds": 86400,
         "max_enforcement_age_days": 7,
         "ban_duration": "720h",
         "reason_prefix": "argent-sentinel",
@@ -797,6 +799,8 @@ class StateDB:
                 if is_authenticated_nextcloud_dav(raw, path, method, user_agent):
                     continue
                 category = web_probe_category(path)
+                if status == 444 and not category:
+                    category = "nginx-denied-444"
                 if category:
                     suspicious.append((item, category))
                 if isinstance(status, int) and 400 <= status <= 599 and status not in {429, 444}:
@@ -1550,7 +1554,7 @@ def normalize_batch(raw: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         if not isinstance(value, str) or not value.strip():
             raise CollectorError(f"Batch source.{key} is required")
         normalized_source[key] = value.strip()[:512]
-    if normalized_source["service"] not in {"wordpress", "sshd"}:
+    if normalized_source["service"] not in {"wordpress", "sshd", "fail2ban"}:
         raise CollectorError("Unsupported batch source service")
     raw_events = raw.get("events")
     if not isinstance(raw_events, list) or not raw_events:
@@ -2266,6 +2270,9 @@ class Collector:
         window = int(policy["window_seconds"])
         threshold = int(policy["suspicious_threshold"])
         distinct_targets = int(policy["distinct_targets"])
+        immediate_statuses = {
+            int(value) for value in policy.get("immediate_statuses", [444])
+        }
         active: deque[sqlite3.Row] = deque()
         evidence_start_epoch: int | None = None
         for row in rows:
@@ -2283,6 +2290,7 @@ class Collector:
                     metadata = {}
                 categories.add(str(metadata.get("probe_category", "")))
             high_volume = "high-volume-web-scanner" in categories
+            immediate_status = False
             suspicious_server_error = False
             for item in active:
                 try:
@@ -2290,6 +2298,8 @@ class Collector:
                 except json.JSONDecodeError:
                     metadata = {}
                 status = metadata.get("http_status")
+                if isinstance(status, int) and status in immediate_statuses:
+                    immediate_status = True
                 if (
                     metadata.get("probe_category") != "high-volume-web-scanner"
                     and isinstance(status, int)
@@ -2298,7 +2308,8 @@ class Collector:
                     suspicious_server_error = True
                     break
             if evidence_start_epoch is None and (
-                high_volume
+                immediate_status
+                or high_volume
                 or suspicious_server_error
                 or (
                     len(active) >= threshold
@@ -2344,6 +2355,8 @@ class Collector:
         distinct_required = int(policy["distinct_accounts"])
         single_threshold = int(policy["single_account_threshold"])
         active: deque[sqlite3.Row] = deque()
+        primary = False
+        single_key: str | None = None
         for row in segment:
             current = int(row["occurred_epoch"])
             while active and int(active[0]["occurred_epoch"]) < current - window_seconds:
@@ -2351,7 +2364,8 @@ class Collector:
             active.append(row)
             accounts = {item["account_key"] for item in active if item["account_key"]}
             if len(active) >= threshold and len(accounts) >= distinct_required:
-                return "sshd-credential-spray", list(active)
+                primary = True
+                break
             counts: dict[str, int] = {}
             for item in active:
                 key = item["account_key"]
@@ -2360,7 +2374,19 @@ class Collector:
             if counts:
                 key = max(counts, key=counts.get)
                 if counts[key] >= single_threshold:
-                    return "sshd-single-account-bruteforce", [item for item in active if item["account_key"] == key]
+                    single_key = key
+                    break
+        if primary:
+            return "sshd-credential-spray", list(segment)
+        if single_key is not None:
+            return (
+                "sshd-single-account-bruteforce",
+                [
+                    item
+                    for item in segment
+                    if item["account_key"] == single_key
+                ],
+            )
         return None
 
     def retry_pending_incidents(self) -> None:

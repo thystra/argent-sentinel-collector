@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Idempotently add package-required collector input globs.
+"""Migrate preserved Argent Sentinel configuration without replacing policy."""
 
 from __future__ import annotations
 
@@ -17,25 +17,11 @@ class MigrationError(RuntimeError):
     pass
 
 
-def load_object(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise MigrationError(f"Configuration file not found: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise MigrationError(f"Invalid JSON in {path}: {exc}") from exc
+def load(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
-        raise MigrationError(f"JSON root must be an object: {path}")
+        raise MigrationError(f"Configuration root must be an object: {path}")
     return value
-
-
-def list_value(owner: Mapping[str, Any], key: str, label: str) -> list[str]:
-    value = owner.get(key, [])
-    if not isinstance(value, list) or not all(
-        isinstance(item, str) and item for item in value
-    ):
-        raise MigrationError(f"{label} must be a list of non-empty strings")
-    return list(value)
 
 
 def append_missing(target: list[str], required: list[str]) -> bool:
@@ -43,6 +29,67 @@ def append_missing(target: list[str], required: list[str]) -> bool:
     for item in required:
         if item not in target:
             target.append(item)
+            changed = True
+    return changed
+
+
+def merge_missing(target: dict[str, Any], source: Mapping[str, Any]) -> bool:
+    # Existing nested configuration is operator-owned. Add only wholly absent
+    # top-level sections; release-specific nested keys are migrated explicitly.
+    changed = False
+    for key, value in source.items():
+        if key not in target:
+            target[key] = value
+            changed = True
+    return changed
+
+
+def migrate_known_defaults(config: dict[str, Any]) -> bool:
+    changed = False
+    sshd = config.get("sshd_policy")
+    if isinstance(sshd, dict):
+        old = {
+            "window_seconds": 120,
+            "failure_threshold": 8,
+            "distinct_accounts": 3,
+            "single_account_threshold": 12,
+            "incident_merge_seconds": 300,
+        }
+        if all(sshd.get(key) == value for key, value in old.items()):
+            sshd.update(
+                {
+                    "window_seconds": 3600,
+                    "failure_threshold": 1,
+                    "distinct_accounts": 1,
+                    "single_account_threshold": 1,
+                    "incident_merge_seconds": 86400,
+                }
+            )
+            changed = True
+    policy = config.get("policy")
+    if isinstance(policy, dict):
+        old = {
+            "window_seconds": 60,
+            "failure_threshold": 5,
+            "distinct_accounts": 2,
+            "single_account_threshold": 10,
+            "incident_merge_seconds": 300,
+        }
+        if all(policy.get(key) == value for key, value in old.items()):
+            policy["window_seconds"] = 900
+            policy["incident_merge_seconds"] = 86400
+            changed = True
+    web = config.get("web_policy")
+    if isinstance(web, dict):
+        for key, value in (
+            ("immediate_statuses", [444]),
+            ("review_statuses", [429]),
+        ):
+            if key not in web:
+                web[key] = value
+                changed = True
+        if web.get("incident_merge_seconds") == 1800:
+            web["incident_merge_seconds"] = 86400
             changed = True
     return changed
 
@@ -64,86 +111,61 @@ def atomic_write(path: Path, value: Mapping[str, Any], mode: int) -> None:
     os.replace(temporary, path)
 
 
-def migrate(
-    config_path: Path,
-    example_path: Path,
-    backup_path: Path | None,
-) -> dict[str, Any]:
-    config = load_object(config_path)
-    example = load_object(example_path)
+def migrate(config_path: Path, example_path: Path, backup: Path | None) -> dict[str, Any]:
+    config = load(config_path)
+    example = load(example_path)
+    changed = merge_missing(config, example)
 
-    incoming = list_value(config, "incoming_globs", "incoming_globs")
-    required_incoming = list_value(
-        example, "incoming_globs", "example incoming_globs"
-    )
+    incoming = config.get("incoming_globs")
+    required = example.get("incoming_globs")
+    if not isinstance(incoming, list) or not isinstance(required, list):
+        raise MigrationError("incoming_globs must be arrays")
+    changed = append_missing(incoming, required) or changed
 
-    context_value = config.get("abuse_context")
-    if context_value is None:
-        context: dict[str, Any] = {}
-        config["abuse_context"] = context
-    elif isinstance(context_value, dict):
-        context = context_value
-    else:
-        raise MigrationError("abuse_context must be an object")
-
+    context = config.get("abuse_context")
     example_context = example.get("abuse_context")
-    if not isinstance(example_context, dict):
-        raise MigrationError("Example abuse_context must be an object")
-
-    context_globs = list_value(
-        context,
-        "incoming_globs",
-        "abuse_context.incoming_globs",
-    )
-    required_context = list_value(
-        example_context,
-        "incoming_globs",
-        "example abuse_context.incoming_globs",
-    )
-
-    changed = append_missing(incoming, required_incoming)
+    if not isinstance(context, dict) or not isinstance(example_context, dict):
+        raise MigrationError("abuse_context must be an object")
+    context_globs = context.get("incoming_globs", [])
+    required_context = example_context.get("incoming_globs")
+    if not isinstance(context_globs, list) or not isinstance(required_context, list):
+        raise MigrationError("abuse_context.incoming_globs must be arrays")
     changed = append_missing(context_globs, required_context) or changed
-    config["incoming_globs"] = incoming
     context["incoming_globs"] = context_globs
+    changed = migrate_known_defaults(config) or changed
 
-    if backup_path is not None:
-        backup_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(backup_path.parent, 0o700)
-        shutil.copy2(config_path, backup_path)
-        os.chmod(backup_path, 0o600)
+    if backup is not None:
+        backup.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(backup.parent, 0o700)
+        shutil.copy2(config_path, backup)
+        os.chmod(backup, 0o600)
 
-    mode = stat.S_IMODE(config_path.stat().st_mode) or 0o600
     if changed:
+        mode = stat.S_IMODE(config_path.stat().st_mode) or 0o600
         atomic_write(config_path, config, mode)
 
     return {
         "status": "updated" if changed else "unchanged",
         "config": str(config_path),
-        "incoming_globs": incoming,
-        "abuse_context_incoming_globs": context_globs,
-        "backup": str(backup_path) if backup_path else None,
+        "backup": str(backup) if backup else None,
     }
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Migrate Argent Sentinel collector configuration"
-    )
+    parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--example", required=True)
     parser.add_argument("--backup")
     args = parser.parse_args()
-
     try:
         result = migrate(
             Path(args.config),
             Path(args.example),
             Path(args.backup) if args.backup else None,
         )
-    except (MigrationError, OSError) as exc:
+    except (OSError, json.JSONDecodeError, MigrationError) as exc:
         print(json.dumps({"status": "error", "error": str(exc)}))
         return 1
-
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

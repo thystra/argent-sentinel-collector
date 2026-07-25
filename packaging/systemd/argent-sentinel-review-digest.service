@@ -1,0 +1,17 @@
+[Unit]
+Description=Send Argent Sentinel daily operator review
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/argent-sentinel/collector.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/argent-sentinel-review-digest --config /etc/argent-sentinel/collector.json
+User=root
+Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/var/lib/argent-sentinel/collector
+ReadWritePaths=-/var/spool/postfix -/var/spool/exim4 -/var/spool/mqueue

@@ -1,0 +1,13 @@
+[Unit]
+Description=Collect Fail2ban ban events every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Persistent=true
+AccuracySec=10s
+RandomizedDelaySec=10s
+Unit=argent-sentinel-fail2ban-export.service
+
+[Install]
+WantedBy=timers.target

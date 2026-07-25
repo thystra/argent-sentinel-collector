@@ -48,6 +48,7 @@ archive_legacy_unit() {
 
 case "$1" in
     configure)
+        install -d -o root -g root -m 0750 /var/lib/argent-sentinel/drop/fail2ban /var/lib/argent-sentinel/drop/fail2ban/incoming
         install -d -o root -g root -m 0750             /etc/argent-sentinel             /etc/argent-sentinel/nodes.d
         install -d -o root -g root -m 0700             /etc/argent-sentinel/pki             /var/backups/argent-sentinel
         install -d -o root -g root -m 0750             /var/lib/argent-sentinel/collector             /var/lib/argent-sentinel/collector/processing             /var/lib/argent-sentinel/collector/archive             /var/lib/argent-sentinel/collector/rejected             /var/lib/argent-sentinel/collector/abuse-context-processing             /var/lib/argent-sentinel/collector/abuse-context-archive             /var/lib/argent-sentinel/collector/abuse-context-rejected             /var/lib/argent-sentinel/server             /var/lib/argent-sentinel/drop/remote
@@ -120,13 +121,17 @@ PY
         if [ -d /run/systemd/system ] &&
            command -v systemctl >/dev/null 2>&1; then
             systemctl daemon-reload || true
-            systemctl enable                 argent-sentinel-collector.timer                 argent-sentinel-api.service                 argent-sentinel-nginx-logrotate.timer                 >/dev/null 2>&1 || true
+            systemctl enable                 argent-sentinel-collector.timer                 argent-sentinel-api.service                 argent-sentinel-nginx-logrotate.timer                 argent-sentinel-fail2ban-export.timer                 argent-sentinel-review-digest.timer                 >/dev/null 2>&1 || true
             systemctl restart argent-sentinel-api.service                 >/dev/null 2>&1 ||
                 systemctl start argent-sentinel-api.service                     >/dev/null 2>&1 || true
             systemctl restart argent-sentinel-collector.timer                 >/dev/null 2>&1 ||
                 systemctl start argent-sentinel-collector.timer                     >/dev/null 2>&1 || true
             systemctl restart argent-sentinel-nginx-logrotate.timer                 >/dev/null 2>&1 ||
                 systemctl start argent-sentinel-nginx-logrotate.timer                     >/dev/null 2>&1 || true
+            systemctl restart argent-sentinel-fail2ban-export.timer                 >/dev/null 2>&1 ||
+                systemctl start argent-sentinel-fail2ban-export.timer                     >/dev/null 2>&1 || true
+            systemctl restart argent-sentinel-review-digest.timer                 >/dev/null 2>&1 ||
+                systemctl start argent-sentinel-review-digest.timer                     >/dev/null 2>&1 || true
         fi
         ;;
 esac

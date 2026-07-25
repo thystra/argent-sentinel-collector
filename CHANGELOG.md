@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.9 — 2026-07-25
+
+- Treat externally sourced OpenSSH failures as immediately reportable after
+  trusted-address checks.
+- Treat Nginx requests deliberately returned as HTTP 444 as immediate hostile
+  web incidents while keeping HTTP 429 traffic review-only.
+- Expand the WordPress correlation window to 15 minutes without lowering its
+  five-failure threshold.
+- Record local Fail2ban ban notices as immutable audit events.
+- Add a daily 07:00 local operator review digest for HTTP 429 pressure,
+  Fail2ban bans, incidents, and report failures.
+- Group distributed IPv6 crawler pressure at `/48` by default.
+- Add `ARCHITECTURE.md`, `TODO.md`, and Fail2ban/review policy documentation.
+- Record the missing WordPress WP-CLI `setup` subcommand as the next plugin
+  blocker; the dashboard remains deferred.
+- Preserve the complete SSH and Nginx evidence segment after an immediate
+  one-event trigger instead of truncating the incident to its first row.
+- Preserve existing nested operator configuration during package migration;
+  only explicitly introduced release keys are added to existing sections.
+- Record `85.203.47.0/24` and `193.37.32.0/24` as operator-review CIDR
+  investigation examples rather than automatic deny rules.
+
 ## 0.4.8 — 2026-07-24
 
 - Fix OpenSSH account-token normalization for canonical v0.4.7

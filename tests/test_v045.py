@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Argent Sentinel v0.4.8 release regression tests.
+# Argent Sentinel v0.4.9 release regression tests.
 
 from pathlib import Path
 import json
@@ -58,7 +58,7 @@ class V045Test(unittest.TestCase):
         self.assertEqual(rows, candidates[0])
         self.assertEqual(6, len(candidates[0]))
 
-    def test_unrelated_later_segment_is_not_included(self) -> None:
+    def test_unrelated_later_immediate_segment_is_separate(self) -> None:
         instance = self.make_collector()
         first = [
             self.row(1000, "/.env", "sensitive-file-probe", 444),
@@ -76,20 +76,20 @@ class V045Test(unittest.TestCase):
 
         candidates = instance.find_web_probe_candidates(first + later)
 
-        self.assertEqual([first], candidates)
+        self.assertEqual([first, later], candidates)
 
     def test_release_versions_are_consistent(self) -> None:
-        self.assertEqual("0.4.8", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.4.9", (ROOT / "VERSION").read_text().strip())
         for relative in (
             "src/collector.py",
             "src/agent.py",
             "src/server_api.py",
         ):
             source = (ROOT / relative).read_text()
-            self.assertIn('APP_VERSION = "0.4.8"', source)
+            self.assertIn('APP_VERSION = "0.4.9"', source)
 
         builder = (ROOT / "packaging/build_debs.py").read_text()
-        self.assertIn('if upstream != "0.4.8":', builder)
+        self.assertIn('if upstream != "0.4.9":', builder)
         self.assertIn('"test_v045.py"', builder)
 
 

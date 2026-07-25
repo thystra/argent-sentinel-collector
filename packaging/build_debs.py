@@ -101,12 +101,16 @@ def make_common(root: Path, version: str) -> dict[str, str]:
         ("collector.py", "collector.py"),
         ("agent.py", "agent.py"),
         ("server_api.py", "server_api.py"),
+        ("fail2ban_export.py", "fail2ban_export.py"),
+        ("review_digest.py", "review_digest.py"),
     ):
         install_file(ROOT / "src" / source, root / "usr/lib/argent-sentinel" / target, 0o755)
     for source, target in (
         ("argent-sentinel", "usr/bin/argent-sentinel"),
         ("argent-sentinel-agent", "usr/bin/argent-sentinel-agent"),
         ("argent-sentinel-api", "usr/sbin/argent-sentinel-api"),
+        ("argent-sentinel-fail2ban-export", "usr/sbin/argent-sentinel-fail2ban-export"),
+        ("argent-sentinel-review-digest", "usr/sbin/argent-sentinel-review-digest"),
         (
             "argent-sentinel-config-migrate",
             "usr/sbin/argent-sentinel-config-migrate",
@@ -116,7 +120,7 @@ def make_common(root: Path, version: str) -> dict[str, str]:
     for name in ("collector.json.example", "agent.json.example", "server-api.json.example", "node.json.example", "nginx-sentinel.conf.example"):
         install_file(ROOT / "config" / name, root / "usr/share/argent-sentinel" / name)
     install_file(ROOT / "VERSION", root / "usr/share/argent-sentinel/VERSION")
-    docs = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "docs-abuse-context.md", ROOT / "docs/debian-packaging.md"]
+    docs = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "ARCHITECTURE.md", ROOT / "TODO.md", ROOT / "docs-abuse-context.md", ROOT / "docs/debian-packaging.md"]
     docs.extend(sorted((ROOT / "docs").glob("*.md")))
     for source in docs:
         add_doc(root, "argent-sentinel-common", source)
@@ -156,6 +160,10 @@ def make_server(root: Path, version: str) -> dict[str, str]:
         "argent-sentinel-api.service",
         "argent-sentinel-nginx-logrotate.service",
         "argent-sentinel-nginx-logrotate.timer",
+        "argent-sentinel-fail2ban-export.service",
+        "argent-sentinel-fail2ban-export.timer",
+        "argent-sentinel-review-digest.service",
+        "argent-sentinel-review-digest.timer",
     ):
         install_file(
             ROOT / "packaging/systemd" / unit,
@@ -263,8 +271,8 @@ def main() -> int:
     if shutil.which("dpkg-deb") is None:
         parser.error("dpkg-deb is required (install dpkg-dev/build-essential)")
     upstream = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    if upstream != "0.4.8":
-        parser.error(f"VERSION must be 0.4.8, found {upstream!r}")
+    if upstream != "0.4.9":
+        parser.error(f"VERSION must be 0.4.9, found {upstream!r}")
     if not args.revision.isdigit() or int(args.revision) < 1:
         parser.error("--revision must be a positive integer")
     full_version = f"{upstream}-{args.revision}"
@@ -274,7 +282,7 @@ def main() -> int:
     if not args.skip_tests:
         for source in ("collector.py", "agent.py", "server_api.py"):
             run(sys.executable, "-m", "py_compile", str(ROOT / "src" / source))
-        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_v045.py", "test_v046.py", "test_v047.py", "test_v048.py", "test_packaging.py"):
+        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_v045.py", "test_v046.py", "test_v047.py", "test_v048.py", "test_v049.py", "test_packaging.py"):
             run(sys.executable, str(ROOT / "tests" / test), cwd=ROOT)
         for script in sorted((ROOT / "scripts").glob("*.sh")):
             run("bash", "-n", str(script))

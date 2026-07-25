@@ -294,3 +294,7 @@ during the same collector run.
 
 See `docs/` for packaging, remote enrollment, SSH privacy, web-probe policy,
 XARF reporting, production reporting, and legacy migration.
+
+## Architecture and roadmap
+
+See `ARCHITECTURE.md`, `TODO.md`, and `docs/fail2ban-review-policy.md`.
