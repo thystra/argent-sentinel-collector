@@ -22,7 +22,7 @@ import server_api  # noqa: E402
 
 class V050Test(unittest.TestCase):
     def test_release_versions(self) -> None:
-        self.assertEqual("0.5.0", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.0.1", (ROOT / "VERSION").read_text().strip())
         for module in (
             awstats_manager,
             collector,
@@ -32,7 +32,7 @@ class V050Test(unittest.TestCase):
             review_digest,
             server_api,
         ):
-            self.assertEqual("0.5.0", module.APP_VERSION)
+            self.assertEqual("0.5.0.1", module.APP_VERSION)
 
     def test_meta_policy_block_and_preview_allow(self) -> None:
         mapping = (
@@ -118,15 +118,13 @@ class V050Test(unittest.TestCase):
         self.assertIn("distributed-prefix-pressure", reasons)
         self.assertNotIn("sustained-path-enumeration", reasons)
 
-    def test_awstats_uses_virtual_host_filter(self) -> None:
-        format_value = awstats_manager.awstats_log_format()
-        self.assertIn("%virtualname", format_value)
+    def test_awstats_uses_per_site_normalized_stream(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            merge_program = Path(temporary) / "logresolvemerge.pl"
-            merge_program.write_text("#!/usr/bin/perl\n")
             config = {
                 **awstats_manager.DEFAULTS,
-                "log_merge_program": str(merge_program),
+                "_config_path": str(
+                    Path(temporary) / "traffic-sites.json"
+                ),
             }
             rendered = awstats_manager.render_site_config(
                 config,
@@ -135,12 +133,18 @@ class V050Test(unittest.TestCase):
                     "domain": "photos.argentwolf.org",
                     "aliases": [],
                 },
-                [Path("/var/log/nginx/access.log")],
             )
-        self.assertIn('SiteDomain="photos.argentwolf.org"', rendered)
+        self.assertIn(
+            'SiteDomain="photos.argentwolf.org"',
+            rendered,
+        )
         self.assertIn("AllowToUpdateStatsFromBrowser=0", rendered)
-        self.assertIn("%virtualname", rendered)
-
+        self.assertIn("LogFormat=1", rendered)
+        self.assertIn(
+            "stream --site photos.argentwolf.org",
+            rendered,
+        )
+        self.assertNotIn("%virtualname", rendered)
     def test_dashboard_nginx_requires_lan_and_password(self) -> None:
         config = (
             ROOT
@@ -199,6 +203,8 @@ class V050Test(unittest.TestCase):
             "config/dashboard.json.example",
             "config/dashboard-snapshot.json.example",
             "config/traffic-sites.json.example",
+            "config/nginx-site-access-log-format.conf.example",
+            "scripts/install-nginx-site-log-format.sh",
         )
         for relative in required:
             self.assertTrue((ROOT / relative).is_file(), relative)

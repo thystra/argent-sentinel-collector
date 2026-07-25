@@ -1,0 +1,16 @@
+# Complete per-site traffic log for AWStats and troubleshooting.
+#
+# Keep the filtered argent_sentinel_json log separately for Sentinel security
+# correlation. This format is deliberately text/combined-compatible so legacy
+# per-site rotations can be normalized into the same AWStats stream.
+log_format argent_site_access
+    '$remote_addr - $remote_user [$time_local] '
+    '"$request" $status $body_bytes_sent '
+    '"$http_referer" "$http_user_agent" '
+    'src_ip="$remote_addr" src_port="$remote_port" '
+    'dst_ip="$server_addr" dst_port="$server_port" '
+    'host="$host" server_name="$server_name" scheme="$scheme" '
+    'request_time="$request_time" '
+    'upstream_response_time="$upstream_response_time" '
+    'upstream_cache_status="$upstream_cache_status" '
+    'bytes_sent="$bytes_sent" request_id="$request_id"';

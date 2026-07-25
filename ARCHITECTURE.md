@@ -110,3 +110,12 @@ map permits `FacebookExternalHit` for link previews and blocks
 a public server block. Known policy-denied agents are excluded from generic
 high-volume scanner materialization, while requests for independently hostile
 paths still qualify normally.
+
+## Two-log Nginx and traffic-analysis boundary
+
+Each monitored virtual host keeps a complete `argent_site_access` file for
+traffic accounting. A second conditional `argent_sentinel_json` file carries
+only security and review telemetry. AWStats consumes normalized streams built
+from each site's own current and historical files; Sentinel consumes the
+filtered JSONL and application/plugin events. Shared hostless access records
+are never guessed into a virtual host.

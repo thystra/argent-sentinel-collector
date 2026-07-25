@@ -6,8 +6,9 @@ ConditionPathExists=/etc/argent-sentinel/dashboard.json
 
 [Service]
 Type=simple
-ExecStartPre=/usr/sbin/argent-sentinel-dashboard --config /etc/argent-sentinel/dashboard.json validate-config
-ExecStart=/usr/sbin/argent-sentinel-dashboard --config /etc/argent-sentinel/dashboard.json serve
+LoadCredential=dashboard.json:/etc/argent-sentinel/dashboard.json
+ExecStartPre=/usr/sbin/argent-sentinel-dashboard --config ${CREDENTIALS_DIRECTORY}/dashboard.json validate-config
+ExecStart=/usr/sbin/argent-sentinel-dashboard --config ${CREDENTIALS_DIRECTORY}/dashboard.json serve
 User=argent-sentinel-dashboard
 Group=argent-sentinel-dashboard
 SupplementaryGroups=www-data
@@ -26,7 +27,6 @@ LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_UNIX
 ReadOnlyPaths=/var/lib/argent-sentinel/dashboard
-ReadOnlyPaths=/etc/argent-sentinel/dashboard.json
 ReadWritePaths=/run/argent-sentinel-dashboard
 
 [Install]

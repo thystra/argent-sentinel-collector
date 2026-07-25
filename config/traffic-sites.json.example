@@ -8,10 +8,14 @@
     "/var/log/nginx/*access*.log",
     "/var/log/nginx/*.access.log",
     "/var/log/nginx/access.log.*",
-    "/var/log/nginx/*access*.log.*"
+    "/var/log/nginx/*access*.log.*",
+    "/var/log/nginx/*.access.log.*"
   ],
   "log_merge_program": "/usr/share/awstats/tools/logresolvemerge.pl",
+  "manager_program": "/usr/sbin/argent-sentinel-awstats",
   "max_discovery_bytes_per_file": 16777216,
+  "max_inspect_lines": 1000,
+  "nginx_program": "/usr/sbin/nginx",
   "sites": [],
   "static_group": "www-data",
   "static_root": "/var/lib/argent-sentinel/dashboard/awstats"

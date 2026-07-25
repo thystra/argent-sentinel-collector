@@ -1,4 +1,17 @@
 # Changelog
+## 0.5.0.1 — 2026-07-25
+- Deliver the dashboard configuration through a systemd read-only credential,
+  fixing startup when `/etc/argent-sentinel` is root-only.
+- Establish `argent_site_access` as the complete per-site Nginx format while
+  retaining filtered `argent_sentinel_json` as the security correlation feed.
+- Normalize legacy combined and current extended records into per-site AWStats
+  streams instead of passing all mixed-format logs to every site.
+- Consolidate `www` aliases, skip ambiguous shared hostless records, and make
+  sites without matching logs non-fatal.
+- Add proposed-inventory, inspection, and per-site stream commands.
+- Document the dashboard, two-log architecture, AWStats migration, and all new
+  commands in README.md.
+
 ## 0.5.0 — 2026-07-25
 - Add a read-only operator dashboard designed for
   `sentinel.argentwolf.org`.

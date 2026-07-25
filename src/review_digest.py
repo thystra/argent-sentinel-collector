@@ -19,7 +19,7 @@ import subprocess
 from typing import Any, Iterator, Mapping, Sequence
 import urllib.parse
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.5.0.1"
 UTC = dt.timezone.utc
 CRAWLER_IDENTITIES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("crawler:meta-externalagent", re.compile(r"(?:meta-externalagent|facebookexternalhit)", re.I)),

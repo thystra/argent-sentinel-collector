@@ -3,8 +3,8 @@
 Argent Sentinel is a self-hosted security event collector, correlation engine,
 CrowdSec decision bridge, and guarded abuse-reporting system.
 
-Version 0.4.7 separates producers, authenticated node transport, and central
-policy:
+Version 0.5.0.1 combines authenticated event transport, central policy,
+a read-only dashboard, and per-site traffic analytics:
 
 ```text
 WordPress / Nginx / OpenSSH
@@ -236,6 +236,112 @@ The package-owned timer rotates it hourly. Rotated files are staged by
 `/usr/sbin/argent-sentinel-stage-abuse-context` and imported on the next
 collector cycle.
 
+
+## Complete per-site traffic logs and filtered Sentinel JSONL
+
+Use two Nginx access logs for monitored public sites:
+
+```nginx
+access_log /var/log/nginx/wolfandraven.blog.access.log
+           argent_site_access;
+
+access_log /var/log/nginx/argent-sentinel-abuse-context.jsonl
+           argent_sentinel_json
+           buffer=64k
+           flush=5s
+           if=$argent_sentinel_loggable;
+```
+
+The per-site `argent_site_access` log is complete traffic accounting for
+AWStats, bandwidth/referrer analysis, and site-specific troubleshooting. The
+shared `argent_sentinel_json` file remains a filtered security/review feed for
+cross-site Sentinel correlation. Do not replace the complete per-site log with
+the filtered JSONL, and do not send all ordinary traffic into the Sentinel
+JSONL merely for AWStats.
+
+Install the packaged per-site format:
+
+```bash
+sudo argent-sentinel-install-site-log-format
+```
+
+Then change each monitored virtual host from the older `abuse_context` format
+to `argent_site_access`, retain its site-specific filename, and keep the
+conditional `argent_sentinel_json` line. Validate every Nginx change:
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+Legacy per-site rotations in standard combined format remain usable because
+the AWStats manager normalizes them. Hostless records from a shared
+`/var/log/nginx/access.log` are ambiguous and are skipped rather than assigned
+to the wrong virtual host.
+
+### AWStats site inventory and reports
+
+Create a clean proposed site inventory from configured Nginx server names and
+the extended host fields in current logs:
+
+```bash
+sudo argent-sentinel-awstats discover \
+  --write-proposed /tmp/traffic-sites.proposed.json
+
+sudo jq . /tmp/traffic-sites.proposed.json
+sudo install -o root -g root -m 0640 \
+  /tmp/traffic-sites.proposed.json \
+  /etc/argent-sentinel/traffic-sites.json
+```
+
+Bare domains and matching `www` names are consolidated into one report with a
+host alias. Each generated site entry records only the Nginx files in which
+that virtual host was observed.
+
+Inspect the resolved per-site log assignment before enabling the timer:
+
+```bash
+sudo argent-sentinel-awstats inspect
+sudo argent-sentinel-awstats render
+sudo argent-sentinel-awstats update
+```
+
+For parser troubleshooting, the normalized combined stream for one site is:
+
+```bash
+sudo argent-sentinel-awstats stream \
+  --site wolfandraven.blog |
+head
+```
+
+Enable scheduled static report generation only after `inspect` shows the
+expected files:
+
+```bash
+sudo systemctl enable --now argent-sentinel-awstats.timer
+```
+
+Sites with no unambiguous matching log are reported as `skipped`; they no
+longer cause the entire AWStats service to fail.
+
+### Dashboard commands
+
+Generate a fresh sanitized snapshot and restart the read-only service:
+
+```bash
+sudo systemctl start argent-sentinel-dashboard-snapshot.service
+sudo systemctl restart argent-sentinel-dashboard.service
+
+sudo systemctl status \
+  argent-sentinel-dashboard-snapshot.service \
+  argent-sentinel-dashboard.service \
+  --no-pager -l
+```
+
+The dashboard service receives `/etc/argent-sentinel/dashboard.json` through a
+systemd read-only credential. It does not need traversal permission on the
+root-only `/etc/argent-sentinel` directory.
+
 ## SSH collection
 
 The agent reads `journalctl -u ssh.service`, pseudonymizes account names with
@@ -301,7 +407,7 @@ See `ARCHITECTURE.md`, `TODO.md`, and `docs/fail2ban-review-policy.md`.
 
 ## Operator dashboard
 
-Version 0.5.0 adds a read-only dashboard intended for
+Version 0.5.0.1 provides a read-only dashboard intended for
 `sentinel.argentwolf.org`, a root-generated sanitized snapshot, static
 per-site AWStats reports, and an operator-controlled Nginx crawler policy.
 See `ARCHITECTURE.md` and `docs/dashboard.md`.
