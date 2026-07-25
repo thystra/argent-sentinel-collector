@@ -1,0 +1,93 @@
+# Combined Argent Sentinel ingestion API and LAN-restricted dashboard.
+# Review certificate paths and LAN ranges before activation.
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name sentinel.argentwolf.org;
+
+    ssl_certificate     /etc/letsencrypt/live/sentinel.argentwolf.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/sentinel.argentwolf.org/privkey.pem;
+
+    # Node clients still present certificates. The dashboard uses LAN
+    # restriction plus HTTP Basic authentication instead.
+    ssl_client_certificate /etc/argent-sentinel/pki/ca.crt;
+    ssl_verify_client optional;
+    ssl_verify_depth 2;
+
+    client_max_body_size 30m;
+
+    location = /v1/ingest {
+        if ($ssl_client_verify != SUCCESS) {
+            return 403;
+        }
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Argent-Client-Verify $ssl_client_verify;
+        proxy_set_header X-Argent-Client-DN $ssl_client_s_dn;
+        proxy_set_header X-Argent-Node "";
+        proxy_set_header X-Argent-Transport-UUID $http_x_argent_transport_uuid;
+        proxy_pass http://unix:/run/argent-sentinel-api/api.sock:;
+    }
+
+    location = /healthz {
+        proxy_pass http://unix:/run/argent-sentinel-api/api.sock:;
+    }
+
+    location /awstats/ {
+        satisfy all;
+        allow 127.0.0.1;
+        allow ::1;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 192.168.0.0/16;
+        allow fc00::/7;
+        deny all;
+
+        auth_basic "Argent Sentinel";
+        auth_basic_user_file /etc/nginx/argent-sentinel-dashboard.htpasswd;
+
+        alias /var/lib/argent-sentinel/dashboard/awstats/;
+        autoindex off;
+        add_header X-Frame-Options DENY always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Referrer-Policy no-referrer always;
+    }
+
+    location /awstats-icon/ {
+        satisfy all;
+        allow 127.0.0.1;
+        allow ::1;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 192.168.0.0/16;
+        allow fc00::/7;
+        deny all;
+
+        auth_basic "Argent Sentinel";
+        auth_basic_user_file /etc/nginx/argent-sentinel-dashboard.htpasswd;
+
+        alias /usr/share/awstats/icon/;
+        autoindex off;
+    }
+
+    location / {
+        satisfy all;
+        allow 127.0.0.1;
+        allow ::1;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 192.168.0.0/16;
+        allow fc00::/7;
+        deny all;
+
+        auth_basic "Argent Sentinel";
+        auth_basic_user_file /etc/nginx/argent-sentinel-dashboard.htpasswd;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://unix:/run/argent-sentinel-dashboard/dashboard.sock:;
+    }
+}

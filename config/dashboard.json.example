@@ -1,0 +1,9 @@
+{
+  "awstats_url_prefix": "/awstats/",
+  "max_json_bytes": 20971520,
+  "snapshot_file": "/var/lib/argent-sentinel/dashboard/snapshot.json",
+  "socket_group": "www-data",
+  "socket_mode": "0660",
+  "socket_path": "/run/argent-sentinel-dashboard/dashboard.sock",
+  "title": "Argent Sentinel"
+}

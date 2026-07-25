@@ -1,4 +1,21 @@
 # Changelog
+## 0.5.0 — 2026-07-25
+- Add a read-only operator dashboard designed for
+  `sentinel.argentwolf.org`.
+- Generate bounded dashboard snapshots from the collector database under the
+  existing shared lock; the unprivileged web process never opens SQLite.
+- Add LAN plus HTTP Basic authentication Nginx configuration while preserving
+  mTLS enforcement for `/v1/ingest`.
+- Add per-site static AWStats discovery, configuration, update, and report
+  generation using `%virtualname` filtering for shared extended Nginx logs.
+- Add cross-log repeated-source, crawler, incident, report, Fail2ban, and
+  network-case views.
+- Add an operator crawler policy that permits `FacebookExternalHit` and blocks
+  `Meta-ExternalAgent` with HTTP 403 responses.
+- Exclude configured policy-denied User-Agents from generic high-volume
+  scanner materialization while retaining hostile-path detection.
+- Correct 429 review classification so sustained-path enumeration requires one
+  source address; distributed crawler groups no longer receive both labels.
 ## 0.4.10.1 — 2026-07-25
 - Permit the hardened daily-review service to write only within the collector
   state directory so SQLite can manage WAL shared-memory state.

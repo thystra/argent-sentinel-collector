@@ -1,0 +1,7 @@
+# Install in the Nginx http context, normally under /etc/nginx/conf.d/.
+# FacebookExternalHit remains permitted for link previews.
+map $http_user_agent $argent_sentinel_crawler_action {
+    default                 allow;
+    ~*facebookexternalhit   allow;
+    ~*meta-externalagent    block;
+}

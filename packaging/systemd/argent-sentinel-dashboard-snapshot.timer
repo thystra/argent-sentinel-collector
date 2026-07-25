@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh Argent Sentinel dashboard every minute
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=1min
+AccuracySec=10s
+RandomizedDelaySec=5s
+Persistent=true
+Unit=argent-sentinel-dashboard-snapshot.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=Update Argent Sentinel per-site static AWStats
+After=nginx.service
+ConditionPathExists=/etc/argent-sentinel/traffic-sites.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/argent-sentinel-awstats --config /etc/argent-sentinel/traffic-sites.json update
+User=root
+Group=root
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/var/log/nginx
+ReadWritePaths=/etc/awstats
+ReadWritePaths=/var/lib/awstats
+ReadWritePaths=/var/lib/argent-sentinel/dashboard/awstats

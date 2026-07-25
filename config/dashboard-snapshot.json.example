@@ -1,0 +1,10 @@
+{
+  "awstats_root": "/var/lib/argent-sentinel/dashboard/awstats",
+  "lock_file": "/run/argent-sentinel/collector.lock",
+  "lookback_hours": 24,
+  "max_rows": 50,
+  "snapshot_file": "/var/lib/argent-sentinel/dashboard/snapshot.json",
+  "snapshot_group": "www-data",
+  "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
+  "traffic_sites_config": "/etc/argent-sentinel/traffic-sites.json"
+}

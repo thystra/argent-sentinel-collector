@@ -118,3 +118,17 @@ Required work:
 - Add operator-review recommendations for 180- and 365-day CIDR blocks without
   enabling automatic range enforcement.
 - Include active CIDR cases and proposed block durations in the 07:00 digest.
+
+## Dashboard follow-up after 0.5.0
+
+- Add reviewed dashboard write workflows for notes and dispositions without
+  granting the web worker direct database access.
+- Add authenticated, auditable generation of proposed Nginx, CrowdSec, and
+  nftables policy fragments.
+- Add longer retention aggregates for traffic cost, request time, upstream
+  response time, bytes, and cache status once the extended Nginx format records
+  those fields on every site.
+- Add verified-bot ownership checks using forward-confirmed reverse DNS or
+  provider-published ranges before granting crawler-specific exceptions.
+- Add report-delivery bounce ingestion and nonresponsive abuse-contact cases.
+- Keep CIDR recommendations in observation until enough history accumulates.

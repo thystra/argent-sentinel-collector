@@ -1,0 +1,6 @@
+# Include inside each public server{} block that should enforce the policy.
+# Known policy blocks are excluded from hostile-report materialization by
+# web_policy.policy_denied_user_agents.
+if ($argent_sentinel_crawler_action = block) {
+    return 403;
+}

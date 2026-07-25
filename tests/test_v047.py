@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Argent Sentinel v0.4.10.1 SSH/config migration regression tests.
+# Argent Sentinel v0.5.0 SSH/config migration regression tests.
 
 from __future__ import annotations
 
@@ -34,18 +34,18 @@ def load_builder():
 
 class V047Test(unittest.TestCase):
     def test_release_versions_are_consistent(self) -> None:
-        self.assertEqual("0.4.10.1", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.0", (ROOT / "VERSION").read_text().strip())
         for relative in (
             "src/collector.py",
             "src/agent.py",
             "src/server_api.py",
         ):
             self.assertIn(
-                'APP_VERSION = "0.4.10.1"',
+                'APP_VERSION = "0.5.0"',
                 (ROOT / relative).read_text(),
             )
         builder = (ROOT / "packaging/build_debs.py").read_text()
-        self.assertIn('if upstream != "0.4.10.1":', builder)
+        self.assertIn('if upstream != "0.5.0":', builder)
         self.assertIn('"test_v047.py"', builder)
 
     def test_agent_emits_canonical_account_key(self) -> None:
@@ -221,7 +221,7 @@ class V047Test(unittest.TestCase):
         builder = load_builder()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            builder.make_common(root, "0.4.10.1-1")
+            builder.make_common(root, "0.5.0-1")
             self.assertTrue(
                 (
                     root

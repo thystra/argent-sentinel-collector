@@ -19,7 +19,7 @@ import subprocess
 from typing import Any, Iterator, Mapping, Sequence
 import urllib.parse
 
-APP_VERSION = "0.4.10.1"
+APP_VERSION = "0.5.0"
 UTC = dt.timezone.utc
 CRAWLER_IDENTITIES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("crawler:meta-externalagent", re.compile(r"(?:meta-externalagent|facebookexternalhit)", re.I)),
@@ -127,7 +127,8 @@ def review_reasons(item: Mapping[str, Any], review: Mapping[str, Any]) -> list[s
     ):
         reasons.append("distributed-prefix-pressure")
     if (
-        int(item["events"]) >= int(review.get("min_429_single_ip_events", 50))
+        int(item["distinct_ips"]) == 1
+        and int(item["events"]) >= int(review.get("min_429_single_ip_events", 50))
         and int(item["distinct_paths"]) >= int(review.get("min_429_single_ip_paths", 25))
         and int(item["duration_seconds"]) >= int(review.get("min_429_single_ip_duration_seconds", 600))
     ):

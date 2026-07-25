@@ -298,3 +298,10 @@ XARF reporting, production reporting, and legacy migration.
 ## Architecture and roadmap
 
 See `ARCHITECTURE.md`, `TODO.md`, and `docs/fail2ban-review-policy.md`.
+
+## Operator dashboard
+
+Version 0.5.0 adds a read-only dashboard intended for
+`sentinel.argentwolf.org`, a root-generated sanitized snapshot, static
+per-site AWStats reports, and an operator-controlled Nginx crawler policy.
+See `ARCHITECTURE.md` and `docs/dashboard.md`.

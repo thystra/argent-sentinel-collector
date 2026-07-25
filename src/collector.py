@@ -39,7 +39,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.4.10.1"
+APP_VERSION = "0.5.0"
 SCHEMA_VERSION = 5
 
 DEFAULTS: dict[str, Any] = {
@@ -98,6 +98,7 @@ DEFAULTS: dict[str, Any] = {
         "incident_merge_seconds": 86400,
         "immediate_statuses": [444],
         "review_statuses": [429],
+        "policy_denied_user_agents": ["meta-externalagent"],
     },
     "legacy_reporting": {
         "marker_state_dir": "/var/lib/nginx-abuse-drafts",
@@ -811,6 +812,14 @@ class StateDB:
         for item in observations:
             by_ip.setdefault(str(item["source_ip"]), []).append(item)
         selected: list[tuple[Mapping[str, Any], str]] = []
+        policy_denied_user_agents = tuple(
+            str(value).strip().lower()
+            for value in policy.get(
+                "policy_denied_user_agents",
+                ["meta-externalagent"],
+            )
+            if str(value).strip()
+        )
         for source_ip, rows in by_ip.items():
             suspicious: list[tuple[Mapping[str, Any], str]] = []
             error_rows: list[Mapping[str, Any]] = []
@@ -839,6 +848,10 @@ class StateDB:
                 len(error_rows) >= int(policy["high_volume_threshold"])
                 and len(targets) >= int(policy["high_volume_distinct_targets"])
                 and not SEARCH_BOT_UA_RE.search(dominant_ua)
+                and not any(
+                    token in dominant_ua.lower()
+                    for token in policy_denied_user_agents
+                )
             )
             if high_volume:
                 already = {str(item["observation_uuid"]) for item, _ in suspicious}

@@ -83,3 +83,30 @@ fall back to the local candidate prefix otherwise. Review thresholds can
 recommend 180- or 365-day prefix blocks, but automatic CIDR enforcement remains
 disabled. An operator must review shared-network risk, evidence, exceptions,
 and the proposed expiration before changing a case to `blocked`.
+
+## v0.5 dashboard and traffic analysis
+
+The operator dashboard is deliberately separated from the collector database.
+A root-owned snapshot service takes the shared collector lock, opens SQLite in
+URI read-only/query-only mode, and atomically publishes a bounded JSON snapshot.
+The long-running dashboard service runs as `argent-sentinel-dashboard`, reads
+only that snapshot and static AWStats files, and has no enforcement or database
+write interface.
+
+Nginx hosts the dashboard on `sentinel.argentwolf.org` alongside the existing
+mTLS ingestion endpoint. Server-level client-certificate verification becomes
+optional; `/v1/ingest` explicitly requires a successfully verified node
+certificate. Dashboard and static AWStats locations require both an allowed LAN
+address and HTTP Basic authentication.
+
+AWStats is used for conventional per-site traffic reporting. Generated
+configurations include `%virtualname`, allowing shared extended Nginx logs to be
+filtered by each site's `SiteDomain` and aliases. Reports are generated as
+static HTML; browser-triggered AWStats updates and CGI exposure remain disabled.
+
+`Meta-ExternalAgent` is an explicit operator policy block. The packaged Nginx
+map permits `FacebookExternalHit` for link previews and blocks
+`Meta-ExternalAgent` with HTTP 403 when the enforcement snippet is included in
+a public server block. Known policy-denied agents are excluded from generic
+high-volume scanner materialization, while requests for independently hostile
+paths still qualify normally.

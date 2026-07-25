@@ -28,7 +28,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-APP_VERSION = "0.4.10.1"
+APP_VERSION = "0.5.0"
 LOG = logging.getLogger("argent-sentinel-api")
 
 DEFAULTS: dict[str, Any] = {

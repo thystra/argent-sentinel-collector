@@ -1,0 +1,33 @@
+[Unit]
+Description=Argent Sentinel read-only operator dashboard
+After=network.target argent-sentinel-dashboard-snapshot.service
+Requires=argent-sentinel-dashboard-snapshot.service
+ConditionPathExists=/etc/argent-sentinel/dashboard.json
+
+[Service]
+Type=simple
+ExecStartPre=/usr/sbin/argent-sentinel-dashboard --config /etc/argent-sentinel/dashboard.json validate-config
+ExecStart=/usr/sbin/argent-sentinel-dashboard --config /etc/argent-sentinel/dashboard.json serve
+User=argent-sentinel-dashboard
+Group=argent-sentinel-dashboard
+SupplementaryGroups=www-data
+RuntimeDirectory=argent-sentinel-dashboard
+RuntimeDirectoryMode=0755
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX
+ReadOnlyPaths=/var/lib/argent-sentinel/dashboard
+ReadOnlyPaths=/etc/argent-sentinel/dashboard.json
+ReadWritePaths=/run/argent-sentinel-dashboard
+
+[Install]
+WantedBy=multi-user.target

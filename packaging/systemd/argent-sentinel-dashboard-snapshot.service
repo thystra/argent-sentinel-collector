@@ -1,0 +1,22 @@
+[Unit]
+Description=Build Argent Sentinel dashboard snapshot
+After=argent-sentinel-collector.service
+ConditionPathExists=/etc/argent-sentinel/dashboard-snapshot.json
+ConditionPathExists=/var/lib/argent-sentinel/collector/state.sqlite3
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/argent-sentinel-dashboard-snapshot --config /etc/argent-sentinel/dashboard-snapshot.json
+User=root
+Group=root
+UMask=0027
+RuntimeDirectory=argent-sentinel
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/argent-sentinel/collector
+ReadWritePaths=/var/lib/argent-sentinel/dashboard
+ReadWritePaths=/run/argent-sentinel
