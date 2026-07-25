@@ -69,7 +69,7 @@ class V040Test(unittest.TestCase):
         with self.assertRaises(agent_module.AgentError):
             agent_module.validate_config(config)
 
-    def test_sshd_parser_hashes_username_and_keeps_network_tuple(self) -> None:
+    def test_sshd_parser_pseudonymizes_username_and_keeps_network_tuple(self) -> None:
         row = {
             "MESSAGE": "Failed publickey for alan from 198.51.100.44 port 54211 ssh2",
             "__CURSOR": "s=unit-test",
@@ -88,7 +88,8 @@ class V040Test(unittest.TestCase):
         self.assertEqual(54211, event["source_port"])
         self.assertEqual("203.0.113.15", event["destination_ip"])
         self.assertEqual(22, event["destination_port"])
-        self.assertEqual(64, len(event["account_hash"]))
+        self.assertEqual(64, len(event["account_key"]))
+        self.assertNotIn("account_hash", event)
         self.assertNotIn("alan", json.dumps(event))
         invalid_event = agent_module.parse_sshd_row(
             {"MESSAGE": "Invalid user administrator from 198.51.100.44 port 54211", "__CURSOR": "x"},

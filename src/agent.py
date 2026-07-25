@@ -34,7 +34,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
-APP_VERSION = "0.4.6"
+APP_VERSION = "0.4.7"
 UTC = dt.timezone.utc
 LOG = logging.getLogger("argent-sentinel-agent")
 
@@ -319,7 +319,7 @@ def parse_sshd_row(
         "destination_port": destination_port,
         "transport_protocol": "TCP",
         "application_protocol": "SSH",
-        "account_hash": privacy_token(secret, node_id, username),
+        "account_key": privacy_token(secret, node_id, username),
         "metadata": {
             "account_class": account_class,
             "auth_method": auth_method,

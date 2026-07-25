@@ -93,6 +93,12 @@ PY
             echo "Preserved existing $NGINX_LOGROTATE_CONFIG"
         fi
 
+        install -d -o root -g root -m 0700 "$BACKUP"
+        /usr/sbin/argent-sentinel-config-migrate \
+            --config "$CONFIG" \
+            --example "$EXAMPLE" \
+            --backup "$BACKUP/collector.json.pre-v047"
+
         archive_legacy_unit argent-sentinel-collector.service
         archive_legacy_unit argent-sentinel-collector.timer
         archive_legacy_unit argent-sentinel-nginx-logrotate.service

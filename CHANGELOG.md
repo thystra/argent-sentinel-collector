@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.7 — 2026-07-24
+
+- Emit canonical `account_key` values for new OpenSSH event batches.
+- Accept legacy v0.4.6 `account_hash` values while importing parked batches.
+- Append required remote event and abuse-context globs to preserved configs
+  without replacing operator reporting, policy, or node settings.
+- Run the backed-up, idempotent config migration from server `postinst`.
+- Rename collector counters from WordPress files to event batch files.
+- Expand new-system, configuration, and WordPress onboarding documentation.
+- Document the current WordPress admin-diagnostics limitation; plugin UI fixes
+  are deferred until the collector path is stable.
+
 ## 0.4.6 — 2026-07-24
 
 - Package the dedicated Nginx abuse-context logrotate service and hourly timer.

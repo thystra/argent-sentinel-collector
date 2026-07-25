@@ -39,7 +39,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.4.6"
+APP_VERSION = "0.4.7"
 SCHEMA_VERSION = 4
 
 DEFAULTS: dict[str, Any] = {
@@ -701,7 +701,7 @@ class StateDB:
                         event.get("destination_port"),
                         event.get("transport_protocol"),
                         event.get("application_protocol"),
-                        event.get("account_key"),
+                        event.get("account_key") or event.get("account_hash"),
                         event.get("user_agent"),
                         event.get("request_method"),
                         event.get("request_path"),
@@ -1760,7 +1760,7 @@ class Collector:
         self.db.sync_network_cases(self.config["policy"])
         self.retry_pending_incidents()
         LOG.info(
-            "Collector run complete: %d WordPress files, %d abuse-context files, %d tuple links",
+            "Collector run complete: %d event batch files, %d abuse-context files, %d tuple links",
             imported_files, context_files, linked,
         )
         return imported_files

@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+# Idempotently add package-required collector input globs.
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import stat
+import tempfile
+from typing import Any, Mapping
+
+
+class MigrationError(RuntimeError):
+    pass
+
+
+def load_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise MigrationError(f"Configuration file not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise MigrationError(f"Invalid JSON in {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise MigrationError(f"JSON root must be an object: {path}")
+    return value
+
+
+def list_value(owner: Mapping[str, Any], key: str, label: str) -> list[str]:
+    value = owner.get(key, [])
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item for item in value
+    ):
+        raise MigrationError(f"{label} must be a list of non-empty strings")
+    return list(value)
+
+
+def append_missing(target: list[str], required: list[str]) -> bool:
+    changed = False
+    for item in required:
+        if item not in target:
+            target.append(item)
+            changed = True
+    return changed
+
+
+def atomic_write(path: Path, value: Mapping[str, Any], mode: int) -> None:
+    payload = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{path.name}.",
+        dir=path.parent,
+        mode="w",
+        encoding="utf-8",
+        delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+
+
+def migrate(
+    config_path: Path,
+    example_path: Path,
+    backup_path: Path | None,
+) -> dict[str, Any]:
+    config = load_object(config_path)
+    example = load_object(example_path)
+
+    incoming = list_value(config, "incoming_globs", "incoming_globs")
+    required_incoming = list_value(
+        example, "incoming_globs", "example incoming_globs"
+    )
+
+    context_value = config.get("abuse_context")
+    if context_value is None:
+        context: dict[str, Any] = {}
+        config["abuse_context"] = context
+    elif isinstance(context_value, dict):
+        context = context_value
+    else:
+        raise MigrationError("abuse_context must be an object")
+
+    example_context = example.get("abuse_context")
+    if not isinstance(example_context, dict):
+        raise MigrationError("Example abuse_context must be an object")
+
+    context_globs = list_value(
+        context,
+        "incoming_globs",
+        "abuse_context.incoming_globs",
+    )
+    required_context = list_value(
+        example_context,
+        "incoming_globs",
+        "example abuse_context.incoming_globs",
+    )
+
+    changed = append_missing(incoming, required_incoming)
+    changed = append_missing(context_globs, required_context) or changed
+    config["incoming_globs"] = incoming
+    context["incoming_globs"] = context_globs
+
+    if backup_path is not None:
+        backup_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(backup_path.parent, 0o700)
+        shutil.copy2(config_path, backup_path)
+        os.chmod(backup_path, 0o600)
+
+    mode = stat.S_IMODE(config_path.stat().st_mode) or 0o600
+    if changed:
+        atomic_write(config_path, config, mode)
+
+    return {
+        "status": "updated" if changed else "unchanged",
+        "config": str(config_path),
+        "incoming_globs": incoming,
+        "abuse_context_incoming_globs": context_globs,
+        "backup": str(backup_path) if backup_path else None,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Migrate Argent Sentinel collector configuration"
+    )
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--example", required=True)
+    parser.add_argument("--backup")
+    args = parser.parse_args()
+
+    try:
+        result = migrate(
+            Path(args.config),
+            Path(args.example),
+            Path(args.backup) if args.backup else None,
+        )
+    except (MigrationError, OSError) as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}))
+        return 1
+
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
