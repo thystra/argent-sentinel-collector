@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.8 — 2026-07-24
+
+- Fix OpenSSH account-token normalization for canonical v0.4.7
+  `account_key` event payloads.
+- Continue accepting legacy v0.4.6 `account_hash` payloads.
+- Add regression coverage through `normalize_batch()` so tests exercise the
+  complete payload-normalization path rather than calling the database layer
+  directly.
+- Verify normalized SSH batches retain distinct pseudonymous accounts and can
+  satisfy the credential-spray correlation rule.
+
 ## 0.4.7 — 2026-07-24
 
 - Emit canonical `account_key` values for new OpenSSH event batches.

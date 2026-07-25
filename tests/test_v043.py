@@ -207,14 +207,14 @@ class V043Test(unittest.TestCase):
         self.assertRegex(evidence[0]["hash"], r"^sha256:[0-9a-f]{64}$")
 
     def test_release_and_collector_unit(self) -> None:
-        self.assertEqual("0.4.7", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.4.8", (ROOT / "VERSION").read_text().strip())
         for name in ("agent.py", "collector.py", "server_api.py"):
             self.assertIn(
-                'APP_VERSION = "0.4.7"',
+                'APP_VERSION = "0.4.8"',
                 (ROOT / "src" / name).read_text(),
             )
         builder = (ROOT / "packaging/build_debs.py").read_text()
-        self.assertIn('if upstream != "0.4.7":', builder)
+        self.assertIn('if upstream != "0.4.8":', builder)
         self.assertIn('"test_v043.py"', builder)
         unit = (
             ROOT / "packaging/systemd/argent-sentinel-collector.service"

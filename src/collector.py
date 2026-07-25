@@ -39,7 +39,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.4.7"
+APP_VERSION = "0.4.8"
 SCHEMA_VERSION = 4
 
 DEFAULTS: dict[str, Any] = {
@@ -1605,11 +1605,17 @@ def normalize_event(raw: Any, site_id: str, service: str = "wordpress") -> dict[
         elif isinstance(username, str) and username.strip():
             account_key = f"{site_id}:login:{username.strip().casefold()}"
     else:
-        account_hash = str(raw.get("account_hash", "")).strip().lower()
-        if account_hash:
-            if not re.fullmatch(r"[0-9a-f]{64}", account_hash):
-                raise CollectorError("Non-WordPress account_hash must be a SHA-256 hex token")
-            account_key = f"{site_id}:account:{account_hash}"
+        account_token = str(
+            raw.get("account_key")
+            or raw.get("account_hash")
+            or ""
+        ).strip().lower()
+        if account_token:
+            if not re.fullmatch(r"[0-9a-f]{64}", account_token):
+                raise CollectorError(
+                    "Non-WordPress account token must be a SHA-256 hex value"
+                )
+            account_key = f"{site_id}:account:{account_token}"
     request = raw.get("request") if isinstance(raw.get("request"), dict) else {}
     metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
     return {

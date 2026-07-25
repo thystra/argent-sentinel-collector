@@ -202,11 +202,11 @@ class V042Test(unittest.TestCase):
         self.assertIn("unit-test RDAP timeout", str(captured["_test_enrichment_error"]))
 
     def test_release_versions_are_consistent(self) -> None:
-        self.assertEqual("0.4.7", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.4.8", (ROOT / "VERSION").read_text().strip())
         for name in ("agent.py", "collector.py", "server_api.py"):
-            self.assertIn('APP_VERSION = "0.4.7"', (ROOT / "src" / name).read_text())
+            self.assertIn('APP_VERSION = "0.4.8"', (ROOT / "src" / name).read_text())
         builder = (ROOT / "packaging/build_debs.py").read_text()
-        self.assertIn('if upstream != "0.4.7":', builder)
+        self.assertIn('if upstream != "0.4.8":', builder)
         self.assertIn('"test_v042.py"', builder)
 
 
