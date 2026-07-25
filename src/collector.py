@@ -39,7 +39,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.4.4"
+APP_VERSION = "0.4.5"
 SCHEMA_VERSION = 4
 
 DEFAULTS: dict[str, Any] = {
@@ -2121,8 +2121,7 @@ class Collector:
                 earliest = min(int(item["occurred_epoch"]) for item in new_rows) - web_window
                 latest = max(int(item["occurred_epoch"]) for item in new_rows) + web_window
                 rows = self.db.web_probe_events(source_ip, earliest, latest)
-                candidate = self.qualify_web_probe_segment(rows)
-                if candidate:
+                for candidate in self.find_web_probe_candidates(rows):
                     incident_uuid = self.db.create_or_merge_incident(
                         source_ip,
                         "nginx-hostile-web-probing",
@@ -2227,7 +2226,34 @@ class Collector:
             )
         return None
 
-    def qualify_web_probe_segment(self, rows: Sequence[sqlite3.Row]) -> list[sqlite3.Row] | None:
+    def find_web_probe_candidates(
+        self,
+        rows: Sequence[sqlite3.Row],
+    ) -> list[list[sqlite3.Row]]:
+        if not rows:
+            return []
+        window = int(self.config["web_policy"]["window_seconds"])
+        candidates: list[list[sqlite3.Row]] = []
+        segment: list[sqlite3.Row] = []
+        previous_epoch: int | None = None
+        for row in rows:
+            current = int(row["occurred_epoch"])
+            if previous_epoch is not None and current - previous_epoch > window:
+                candidate = self.qualify_web_probe_segment(segment)
+                if candidate is not None:
+                    candidates.append(candidate)
+                segment = []
+            segment.append(row)
+            previous_epoch = current
+        candidate = self.qualify_web_probe_segment(segment)
+        if candidate is not None:
+            candidates.append(candidate)
+        return candidates
+
+    def qualify_web_probe_segment(
+        self,
+        rows: Sequence[sqlite3.Row],
+    ) -> list[sqlite3.Row] | None:
         if not rows:
             return None
         policy = self.config["web_policy"]
@@ -2235,6 +2261,7 @@ class Collector:
         threshold = int(policy["suspicious_threshold"])
         distinct_targets = int(policy["distinct_targets"])
         active: deque[sqlite3.Row] = deque()
+        evidence_start_epoch: int | None = None
         for row in rows:
             current = int(row["occurred_epoch"])
             while active and int(active[0]["occurred_epoch"]) < current - window:
@@ -2257,14 +2284,30 @@ class Collector:
                 except json.JSONDecodeError:
                     metadata = {}
                 status = metadata.get("http_status")
-                if metadata.get("probe_category") != "high-volume-web-scanner" and isinstance(status, int) and 500 <= status <= 599:
+                if (
+                    metadata.get("probe_category") != "high-volume-web-scanner"
+                    and isinstance(status, int)
+                    and 500 <= status <= 599
+                ):
                     suspicious_server_error = True
                     break
-            if high_volume or suspicious_server_error or (
-                len(active) >= threshold and len(targets) >= distinct_targets
+            if evidence_start_epoch is None and (
+                high_volume
+                or suspicious_server_error
+                or (
+                    len(active) >= threshold
+                    and len(targets) >= distinct_targets
+                )
             ):
-                return list(active)
-        return None
+                evidence_start_epoch = int(active[0]["occurred_epoch"])
+
+        if evidence_start_epoch is None:
+            return None
+        return [
+            row
+            for row in rows
+            if int(row["occurred_epoch"]) >= evidence_start_epoch
+        ]
 
     def find_ssh_candidates(self, rows: Sequence[sqlite3.Row]) -> list[tuple[str, list[sqlite3.Row]]]:
         policy = self.config["sshd_policy"]

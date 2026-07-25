@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.5 — 2026-07-24
+
+- Preserve complete Nginx incident evidence after a sliding window first
+  reaches the hostile-probing threshold.
+- Split web-probe candidates into contiguous segments, so a later unrelated
+  probe group is not pulled into an earlier incident.
+- Retain redirected test-mode delivery safeguards: only the configured
+  recipient override receives test reports.
+
 ## 0.4.4 — 2026-07-24
 
 - Move the redirected test-mode notice to the very top of individual abuse

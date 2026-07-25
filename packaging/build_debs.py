@@ -246,8 +246,8 @@ def main() -> int:
     if shutil.which("dpkg-deb") is None:
         parser.error("dpkg-deb is required (install dpkg-dev/build-essential)")
     upstream = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    if upstream != "0.4.4":
-        parser.error(f"VERSION must be 0.4.4, found {upstream!r}")
+    if upstream != "0.4.5":
+        parser.error(f"VERSION must be 0.4.5, found {upstream!r}")
     if not args.revision.isdigit() or int(args.revision) < 1:
         parser.error("--revision must be a positive integer")
     full_version = f"{upstream}-{args.revision}"
@@ -257,7 +257,7 @@ def main() -> int:
     if not args.skip_tests:
         for source in ("collector.py", "agent.py", "server_api.py"):
             run(sys.executable, "-m", "py_compile", str(ROOT / "src" / source))
-        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_packaging.py"):
+        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_v045.py", "test_packaging.py"):
             run(sys.executable, str(ROOT / "tests" / test), cwd=ROOT)
         for script in sorted((ROOT / "scripts").glob("*.sh")):
             run("bash", "-n", str(script))
