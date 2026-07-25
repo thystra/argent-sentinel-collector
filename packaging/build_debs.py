@@ -103,6 +103,7 @@ def make_common(root: Path, version: str) -> dict[str, str]:
         ("server_api.py", "server_api.py"),
         ("fail2ban_export.py", "fail2ban_export.py"),
         ("review_digest.py", "review_digest.py"),
+        ("nginx_429_export.py", "nginx_429_export.py"),
     ):
         install_file(ROOT / "src" / source, root / "usr/lib/argent-sentinel" / target, 0o755)
     for source, target in (
@@ -111,6 +112,7 @@ def make_common(root: Path, version: str) -> dict[str, str]:
         ("argent-sentinel-api", "usr/sbin/argent-sentinel-api"),
         ("argent-sentinel-fail2ban-export", "usr/sbin/argent-sentinel-fail2ban-export"),
         ("argent-sentinel-review-digest", "usr/sbin/argent-sentinel-review-digest"),
+        ("argent-sentinel-nginx-429-export", "usr/sbin/argent-sentinel-nginx-429-export"),
         (
             "argent-sentinel-config-migrate",
             "usr/sbin/argent-sentinel-config-migrate",
@@ -164,6 +166,8 @@ def make_server(root: Path, version: str) -> dict[str, str]:
         "argent-sentinel-fail2ban-export.timer",
         "argent-sentinel-review-digest.service",
         "argent-sentinel-review-digest.timer",
+        "argent-sentinel-nginx-429-export.service",
+        "argent-sentinel-nginx-429-export.timer",
     ):
         install_file(
             ROOT / "packaging/systemd" / unit,
@@ -271,8 +275,8 @@ def main() -> int:
     if shutil.which("dpkg-deb") is None:
         parser.error("dpkg-deb is required (install dpkg-dev/build-essential)")
     upstream = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    if upstream != "0.4.9":
-        parser.error(f"VERSION must be 0.4.9, found {upstream!r}")
+    if upstream != "0.4.10":
+        parser.error(f"VERSION must be 0.4.10, found {upstream!r}")
     if not args.revision.isdigit() or int(args.revision) < 1:
         parser.error("--revision must be a positive integer")
     full_version = f"{upstream}-{args.revision}"
@@ -280,9 +284,9 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not args.skip_tests:
-        for source in ("collector.py", "agent.py", "server_api.py"):
+        for source in ("collector.py", "agent.py", "server_api.py", "fail2ban_export.py", "review_digest.py", "nginx_429_export.py"):
             run(sys.executable, "-m", "py_compile", str(ROOT / "src" / source))
-        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_v045.py", "test_v046.py", "test_v047.py", "test_v048.py", "test_v049.py", "test_packaging.py"):
+        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_v045.py", "test_v046.py", "test_v047.py", "test_v048.py", "test_v049.py", "test_v0410.py", "test_packaging.py"):
             run(sys.executable, str(ROOT / "tests" / test), cwd=ROOT)
         for script in sorted((ROOT / "scripts").glob("*.sh")):
             run("bash", "-n", str(script))

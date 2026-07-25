@@ -1,4 +1,19 @@
 # Changelog
+## 0.4.10 — 2026-07-25
+- Open the daily review database under the collector lock using SQLite
+  query-only read-only mode under the collector lock so the hardened systemd unit can read the WAL-mode
+  database without write access to the collector directory.
+- Add a minute-level Nginx access-log tailer that exports HTTP 429 responses as
+  review-only abuse-context observations.
+- Canonicalize crawler identities and group distributed IPv6 pressure by `/48`
+  while retaining sustained single-source path enumeration as a separate
+  review signal.
+- Prefer RDAP `registered_cidr` for network-case grouping and fall back to
+  locally derived IPv4 `/24` and IPv6 `/64` candidate prefixes.
+- Add review-only 180- and 365-day CIDR block recommendations based on distinct
+  hostile addresses, incidents, and active days.
+- Include CIDR cases and suggested expiration periods in the 07:00 operator
+  digest; automatic CIDR enforcement remains disabled.
 
 ## 0.4.9 — 2026-07-25
 

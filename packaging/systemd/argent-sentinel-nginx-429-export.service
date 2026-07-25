@@ -1,0 +1,19 @@
+[Unit]
+Description=Export Nginx HTTP 429 review telemetry to Argent Sentinel
+After=nginx.service
+ConditionPathExists=/etc/argent-sentinel/collector.json
+ConditionPathIsDirectory=/var/log/nginx
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/argent-sentinel-nginx-429-export --config /etc/argent-sentinel/collector.json
+User=root
+Group=root
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/var/log/nginx
+ReadWritePaths=/var/lib/argent-sentinel/collector/nginx-429-cursors
+ReadWritePaths=/var/lib/argent-sentinel/drop/nginx/rate-review/incoming

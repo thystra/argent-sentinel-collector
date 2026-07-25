@@ -53,10 +53,14 @@
     "ipv4_prefix": 24,
     "ipv6_prefix": 48,
     "lookback_hours": 24,
+    "max_network_rows": 20,
     "max_rows": 20,
     "min_429_distinct_ips": 3,
     "min_429_duration_seconds": 300,
     "min_429_events": 10,
+    "min_429_single_ip_duration_seconds": 600,
+    "min_429_single_ip_events": 50,
+    "min_429_single_ip_paths": 25,
     "recipient": "",
     "send_timeout_seconds": 30,
     "sendmail_path": "/usr/sbin/sendmail",
@@ -70,7 +74,7 @@
     "rdap_url": "https://rdap.org/ip/{ip}",
     "ripe_prefix_url": "https://stat.ripe.net/data/prefix-overview/data.json?resource={ip}",
     "timeout_seconds": 12,
-    "user_agent": "Argent-Sentinel/0.4.9 (+self-hosted security abuse reporting)"
+    "user_agent": "Argent-Sentinel/0.4.10 (+self-hosted security abuse reporting)"
   },
   "fail2ban_ingest": {
     "cursor_file": "/var/lib/argent-sentinel/collector/fail2ban.cursor",
@@ -98,6 +102,21 @@
     "include_context_min_hostile_ips": 2,
     "max_tuple_evidence": 20
   },
+  "nginx_429_ingest": {
+    "cursor_dir": "/var/lib/argent-sentinel/collector/nginx-429-cursors",
+    "drop_dir": "/var/lib/argent-sentinel/drop/nginx/rate-review/incoming",
+    "enabled": true,
+    "initial_tail_bytes": 67108864,
+    "log_globs": [
+      "/var/log/nginx/access.log",
+      "/var/log/nginx/*access*.log",
+      "/var/log/nginx/*.access.log"
+    ],
+    "max_line_bytes": 65536,
+    "max_lines_per_file": 200000,
+    "max_observations_per_file": 2000,
+    "max_read_bytes_per_file": 67108864
+  },
   "node": {
     "central_url": "https://sentinel.argentwolf.org/",
     "fqdn": "nidhoggur.argentwolf.org",
@@ -111,8 +130,15 @@
     "max_enforcement_age_days": 7,
     "network_escalation_active_days": 3,
     "network_escalation_distinct_ips": 5,
+    "network_long_block_active_days": 1,
+    "network_long_block_days": 180,
+    "network_long_block_distinct_ips": 16,
+    "network_long_block_incidents": 20,
     "network_review_distinct_ips": 3,
     "network_review_window_days": 7,
+    "network_severe_block_days": 365,
+    "network_severe_block_distinct_ips": 48,
+    "network_severe_block_incidents": 48,
     "reason_prefix": "argent-sentinel",
     "single_account_threshold": 10,
     "window_seconds": 900

@@ -61,3 +61,25 @@ A web dashboard is intentionally deferred until collection, policy,
 deduplication, review output, and production reporting are stable. The
 dashboard should consume the same database and policy interfaces rather than
 introducing a second source of truth.
+
+## HTTP 429 review ingestion
+
+The `argent-sentinel-nginx-429-export` timer tails configured current Nginx
+access logs, parses extended combined-format entries whose final response is
+HTTP 429, and writes deterministic JSONL observations into the established
+abuse-context drop tree. The collector stores these as network observations;
+it does not materialize them as hostile web incidents.
+
+The daily review groups 429 pressure by network prefix and canonical client
+identity. Distributed crawlers are aggregated across rotating addresses and
+superficial browser-platform User-Agent variations. Sustained single-address
+path enumeration is a separate review condition. Neither condition creates an
+automatic ban.
+
+## Registered-CIDR cases
+
+Network cases use `registered_cidr` returned by enrichment when available and
+fall back to the local candidate prefix otherwise. Review thresholds can
+recommend 180- or 365-day prefix blocks, but automatic CIDR enforcement remains
+disabled. An operator must review shared-network risk, evidence, exceptions,
+and the proposed expiration before changing a case to `blocked`.

@@ -104,3 +104,17 @@ Required work:
 - 429 crawler review and disposition.
 - Daily-summary history and annotations.
 - Multi-node health and transport status.
+
+## Implemented in 0.4.10
+
+- Open the review database under a shared collector lock with SQLite query-only
+  read-only URI mode while retaining the read-only systemd database mount.
+- Tail current Nginx access logs for HTTP 429 responses and import them as
+  review-only abuse-context observations.
+- Canonicalize crawler identities across rotating addresses and User-Agent
+  platform variants.
+- Group network cases by RDAP `registered_cidr` where available, with fallback
+  candidate prefixes.
+- Add operator-review recommendations for 180- and 365-day CIDR blocks without
+  enabling automatic range enforcement.
+- Include active CIDR cases and proposed block durations in the 07:00 digest.

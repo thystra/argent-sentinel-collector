@@ -39,8 +39,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.4.9"
-SCHEMA_VERSION = 4
+APP_VERSION = "0.4.10"
+SCHEMA_VERSION = 5
 
 DEFAULTS: dict[str, Any] = {
     "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
@@ -117,6 +117,13 @@ DEFAULTS: dict[str, Any] = {
         "network_review_distinct_ips": 3,
         "network_escalation_distinct_ips": 5,
         "network_escalation_active_days": 3,
+        "network_long_block_distinct_ips": 16,
+        "network_long_block_incidents": 20,
+        "network_long_block_active_days": 1,
+        "network_long_block_days": 180,
+        "network_severe_block_distinct_ips": 48,
+        "network_severe_block_incidents": 48,
+        "network_severe_block_days": 365,
     },
     "crowdsec": {
         "enabled": False,
@@ -280,6 +287,13 @@ def validate_config(config: Mapping[str, Any]) -> None:
         "network_review_distinct_ips",
         "network_escalation_distinct_ips",
         "network_escalation_active_days",
+        "network_long_block_distinct_ips",
+        "network_long_block_incidents",
+        "network_long_block_active_days",
+        "network_long_block_days",
+        "network_severe_block_distinct_ips",
+        "network_severe_block_incidents",
+        "network_severe_block_days",
     ):
         if int(policy[name]) < 1:
             raise CollectorError(f"policy.{name} must be positive")
@@ -511,6 +525,8 @@ class StateDB:
                 ON incidents(source_ip, rule_id, last_seen_epoch);
             CREATE INDEX IF NOT EXISTS incidents_network_time
                 ON incidents(network_cidr, last_seen_epoch);
+            CREATE INDEX IF NOT EXISTS incidents_registered_network_time
+                ON incidents(registered_cidr, last_seen_epoch);
             CREATE TABLE IF NOT EXISTS incident_events (
                 incident_uuid TEXT NOT NULL REFERENCES incidents(incident_uuid),
                 event_uuid TEXT NOT NULL REFERENCES events(event_uuid),
@@ -635,6 +651,16 @@ class StateDB:
         self.ensure_column("incidents", "report_sent_epoch", "INTEGER")
         self.ensure_column("incidents", "report_recipient", "TEXT")
         self.ensure_column("incidents", "report_message_id", "TEXT")
+        self.ensure_column(
+            "network_cases", "suggested_block_days",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        self.ensure_column(
+            "network_cases", "grouping_basis",
+            "TEXT NOT NULL DEFAULT 'fallback'",
+        )
+        self.ensure_column("network_cases", "asns", "TEXT")
+        self.ensure_column("network_cases", "network_classes", "TEXT")
         self.conn.execute(
             """INSERT INTO schema_meta (key, value, updated_at)
                VALUES ('schema_version', ?, ?)
@@ -1266,24 +1292,29 @@ class StateDB:
 
     def network_context(self, network_cidr: str, policy: Mapping[str, Any]) -> dict[str, Any]:
         cutoff = int(utc_now().timestamp()) - int(policy["network_review_window_days"]) * 86400
+        effective = "COALESCE(NULLIF(registered_cidr, ''), network_cidr)"
         row = self.conn.execute(
-            """SELECT COUNT(DISTINCT source_ip) AS hostile_ips,
-                      COUNT(*) AS incident_count,
-                      COALESCE(SUM(event_count), 0) AS event_count,
-                      COUNT(DISTINCT substr(first_seen, 1, 10)) AS active_days,
-                      MIN(first_seen) AS first_seen,
-                      MAX(last_seen) AS last_seen
-               FROM incidents
-               WHERE network_cidr = ? AND last_seen_epoch >= ?""",
+            f"""SELECT COUNT(DISTINCT source_ip) AS hostile_ips,
+                       COUNT(*) AS incident_count,
+                       COALESCE(SUM(event_count), 0) AS event_count,
+                       COUNT(DISTINCT substr(first_seen, 1, 10)) AS active_days,
+                       MIN(first_seen) AS first_seen,
+                       MAX(last_seen) AS last_seen,
+                       GROUP_CONCAT(DISTINCT asn) AS asns,
+                       GROUP_CONCAT(DISTINCT network_class) AS network_classes,
+                       MAX(CASE WHEN registered_cidr IS NOT NULL
+                                     AND registered_cidr != ''
+                                THEN 1 ELSE 0 END) AS has_registered
+                FROM incidents
+                WHERE {effective} = ? AND last_seen_epoch >= ?""",
             (network_cidr, cutoff),
         ).fetchone()
         hostile_ips = int(row["hostile_ips"] or 0)
+        incident_count = int(row["incident_count"] or 0)
         active_days = int(row["active_days"] or 0)
-        status = "observing"
-        if hostile_ips >= int(policy["network_escalation_distinct_ips"]) or active_days >= int(policy["network_escalation_active_days"]):
-            status = "escalation-review"
-        elif hostile_ips >= int(policy["network_review_distinct_ips"]):
-            status = "review"
+        status, suggested_days, _ = network_case_recommendation(
+            policy, hostile_ips, incident_count, active_days,
+        )
         existing = self.conn.execute(
             "SELECT status, operator_note FROM network_cases WHERE network_cidr = ?",
             (network_cidr,),
@@ -1293,19 +1324,23 @@ class StateDB:
         return {
             "network_cidr": network_cidr,
             "hostile_ips": hostile_ips,
-            "incident_count": int(row["incident_count"] or 0),
+            "incident_count": incident_count,
             "event_count": int(row["event_count"] or 0),
             "active_days": active_days,
             "first_seen": row["first_seen"],
             "last_seen": row["last_seen"],
             "status": status,
+            "suggested_block_days": suggested_days,
+            "grouping_basis": "registered" if int(row["has_registered"] or 0) else "fallback",
+            "asns": row["asns"],
+            "network_classes": row["network_classes"],
             "operator_note": existing["operator_note"] if existing is not None else None,
         }
-
     def sync_network_cases(self, policy: Mapping[str, Any]) -> int:
         changed = 0
         candidates = self.network_candidates(policy)
         now = utc_text()
+        effective = "COALESCE(NULLIF(registered_cidr, ''), network_cidr)"
         with self.conn:
             for candidate in candidates:
                 context = self.network_context(str(candidate["network_cidr"]), policy)
@@ -1318,9 +1353,10 @@ class StateDB:
                     status = str(current["status"])
                 self.conn.execute(
                     """INSERT INTO network_cases
-                    (network_cidr, status, hostile_ips, incident_count, event_count, active_days,
-                     first_seen, last_seen, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (network_cidr, status, hostile_ips, incident_count, event_count,
+                     active_days, first_seen, last_seen, suggested_block_days,
+                     grouping_basis, asns, network_classes, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(network_cidr) DO UPDATE SET
                      status=CASE WHEN network_cases.status IN ('blocked','closed')
                                  THEN network_cases.status ELSE excluded.status END,
@@ -1330,53 +1366,66 @@ class StateDB:
                      active_days=excluded.active_days,
                      first_seen=excluded.first_seen,
                      last_seen=excluded.last_seen,
+                     suggested_block_days=excluded.suggested_block_days,
+                     grouping_basis=excluded.grouping_basis,
+                     asns=excluded.asns,
+                     network_classes=excluded.network_classes,
                      updated_at=excluded.updated_at""",
                     (
                         context["network_cidr"], status, context["hostile_ips"],
                         context["incident_count"], context["event_count"],
                         context["active_days"], context["first_seen"],
-                        context["last_seen"], now,
+                        context["last_seen"], context["suggested_block_days"],
+                        context["grouping_basis"], context["asns"],
+                        context["network_classes"], now,
                     ),
                 )
                 self.conn.execute(
-                    """INSERT OR IGNORE INTO network_case_incidents(network_cidr, incident_uuid)
-                       SELECT ?, incident_uuid FROM incidents WHERE network_cidr = ?""",
+                    f"""INSERT OR IGNORE INTO network_case_incidents(network_cidr, incident_uuid)
+                        SELECT ?, incident_uuid FROM incidents WHERE {effective} = ?""",
                     (context["network_cidr"], context["network_cidr"]),
                 )
                 changed += 1
         return changed
-
     def network_cases(self, limit: int = 100) -> list[sqlite3.Row]:
         return list(self.conn.execute(
             """SELECT * FROM network_cases
-               ORDER BY CASE status WHEN 'blocked' THEN 0 WHEN 'escalation-review' THEN 1
-                                    WHEN 'review' THEN 2 ELSE 3 END,
+               ORDER BY CASE status WHEN 'blocked' THEN 0
+                                    WHEN 'long-block-review' THEN 1
+                                    WHEN 'escalation-review' THEN 2
+                                    WHEN 'review' THEN 3 ELSE 4 END,
                         hostile_ips DESC, last_seen DESC LIMIT ?""",
             (max(1, min(500, int(limit))),),
         ))
-
     def set_network_case(self, network_cidr: str, status: str, note: str | None) -> None:
         normalized = str(ipaddress.ip_network(network_cidr, strict=False))
-        allowed = {"observing", "review", "escalation-review", "blocked", "closed"}
+        allowed = {"observing", "review", "escalation-review", "long-block-review", "blocked", "closed"}
         if status not in allowed:
             raise CollectorError(f"Unsupported network case status: {status}")
         context = self.network_context(normalized, DEFAULTS["policy"])
         with self.conn:
             self.conn.execute(
                 """INSERT INTO network_cases
-                (network_cidr, status, hostile_ips, incident_count, event_count, active_days,
-                 first_seen, last_seen, operator_note, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (network_cidr, status, hostile_ips, incident_count, event_count,
+                 active_days, first_seen, last_seen, suggested_block_days,
+                 grouping_basis, asns, network_classes, operator_note, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(network_cidr) DO UPDATE SET
-                 status=excluded.status, operator_note=excluded.operator_note,
+                 status=excluded.status,
+                 suggested_block_days=excluded.suggested_block_days,
+                 grouping_basis=excluded.grouping_basis,
+                 asns=excluded.asns,
+                 network_classes=excluded.network_classes,
+                 operator_note=excluded.operator_note,
                  updated_at=excluded.updated_at""",
                 (
                     normalized, status, context["hostile_ips"], context["incident_count"],
                     context["event_count"], context["active_days"], context["first_seen"],
-                    context["last_seen"], clean_optional(note, 2000), utc_text(),
+                    context["last_seen"], context["suggested_block_days"],
+                    context["grouping_basis"], context["asns"], context["network_classes"],
+                    clean_optional(note, 2000), utc_text(),
                 ),
             )
-
     def network_case_incidents(self, network_cidr: str) -> list[sqlite3.Row]:
         return list(self.conn.execute(
             """SELECT i.* FROM network_case_incidents nci
@@ -1485,34 +1534,61 @@ class StateDB:
     def network_candidates(self, policy: Mapping[str, Any]) -> list[dict[str, Any]]:
         cutoff = int(utc_now().timestamp()) - int(policy["network_review_window_days"]) * 86400
         review_ips = int(policy["network_review_distinct_ips"])
-        escalation_ips = int(policy["network_escalation_distinct_ips"])
-        escalation_days = int(policy["network_escalation_active_days"])
+        effective = "COALESCE(NULLIF(registered_cidr, ''), network_cidr)"
         rows = self.conn.execute(
-            """SELECT network_cidr,
-                      COUNT(DISTINCT source_ip) AS hostile_ips,
-                      COUNT(DISTINCT substr(first_seen, 1, 10)) AS active_days,
-                      MIN(first_seen) AS first_seen,
-                      MAX(last_seen) AS last_seen,
-                      GROUP_CONCAT(DISTINCT asn) AS asns,
-                      GROUP_CONCAT(DISTINCT network_class) AS network_classes
-               FROM incidents
-               WHERE network_cidr IS NOT NULL AND last_seen_epoch >= ?
-               GROUP BY network_cidr
-               HAVING COUNT(DISTINCT source_ip) >= ?
-               ORDER BY hostile_ips DESC, active_days DESC, last_seen DESC""",
+            f"""SELECT {effective} AS network_cidr,
+                       COUNT(DISTINCT source_ip) AS hostile_ips,
+                       COUNT(*) AS incident_count,
+                       COALESCE(SUM(event_count), 0) AS event_count,
+                       COUNT(DISTINCT substr(first_seen, 1, 10)) AS active_days,
+                       MIN(first_seen) AS first_seen,
+                       MAX(last_seen) AS last_seen,
+                       GROUP_CONCAT(DISTINCT asn) AS asns,
+                       GROUP_CONCAT(DISTINCT network_class) AS network_classes,
+                       MAX(CASE WHEN registered_cidr IS NOT NULL AND registered_cidr != ''
+                                THEN 1 ELSE 0 END) AS has_registered
+                FROM incidents
+                WHERE {effective} IS NOT NULL AND last_seen_epoch >= ?
+                GROUP BY {effective}
+                HAVING COUNT(DISTINCT source_ip) >= ?
+                ORDER BY hostile_ips DESC, active_days DESC, last_seen DESC""",
             (cutoff, review_ips),
         )
         result: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
-            item["recommendation"] = (
-                "escalation-review"
-                if int(row["hostile_ips"]) >= escalation_ips or int(row["active_days"]) >= escalation_days
-                else "review"
+            status, days, detail = network_case_recommendation(
+                policy, int(row["hostile_ips"]), int(row["incident_count"]), int(row["active_days"]),
             )
+            item["recommendation"] = status
+            item["suggested_block_days"] = days
+            item["recommendation_detail"] = detail
+            item["grouping_basis"] = "registered" if int(row["has_registered"] or 0) else "fallback"
             item["automatic_block"] = False
             result.append(item)
         return result
+
+def network_case_recommendation(
+    policy: Mapping[str, Any], hostile_ips: int, incident_count: int, active_days: int,
+) -> tuple[str, int, str]:
+    if (
+        hostile_ips >= int(policy["network_severe_block_distinct_ips"])
+        and incident_count >= int(policy["network_severe_block_incidents"])
+    ):
+        days = int(policy["network_severe_block_days"])
+        return "long-block-review", days, f"Severe distributed hostility; operator review required before a {days}-day block."
+    if (
+        hostile_ips >= int(policy["network_long_block_distinct_ips"])
+        and incident_count >= int(policy["network_long_block_incidents"])
+        and active_days >= int(policy["network_long_block_active_days"])
+    ):
+        days = int(policy["network_long_block_days"])
+        return "long-block-review", days, f"Distributed or sequential hostility; operator review required before a {days}-day block."
+    if hostile_ips >= int(policy["network_escalation_distinct_ips"]) or active_days >= int(policy["network_escalation_active_days"]):
+        return "escalation-review", 0, "Network escalation criteria reached."
+    if hostile_ips >= int(policy["network_review_distinct_ips"]):
+        return "review", 0, "Network review threshold reached."
+    return "observing", 0, "Below network review threshold."
 
 
 def epoch_text(epoch: int) -> str:
@@ -3960,7 +4036,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     network_set.add_argument("--cidr", required=True)
     network_set.add_argument(
         "--status", required=True,
-        choices=("observing", "review", "escalation-review", "blocked", "closed"),
+        choices=("observing", "review", "escalation-review", "long-block-review", "blocked", "closed"),
     )
     network_set.add_argument("--note", default="")
     network_set.add_argument("--send-report", action="store_true", help="Send the provider escalation after marking blocked")
