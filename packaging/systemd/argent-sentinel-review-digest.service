@@ -16,7 +16,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadOnlyPaths=/var/lib/argent-sentinel/collector
+# SQLite WAL readers may need to create or update the shared-memory file.
+# The application connection itself remains URI read-only and query-only.
+ReadWritePaths=/var/lib/argent-sentinel/collector
 ReadWritePaths=/run/argent-sentinel
 ReadWritePaths=-/var/spool/postfix -/var/lib/postfix
 ReadWritePaths=-/var/spool/exim4 -/var/spool/mqueue

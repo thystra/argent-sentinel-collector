@@ -19,7 +19,7 @@ import subprocess
 from typing import Any, Iterator, Mapping, Sequence
 import urllib.parse
 
-APP_VERSION = "0.4.10"
+APP_VERSION = "0.4.10.1"
 UTC = dt.timezone.utc
 CRAWLER_IDENTITIES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("crawler:meta-externalagent", re.compile(r"(?:meta-externalagent|facebookexternalhit)", re.I)),
@@ -145,6 +145,7 @@ def open_review_database(config: Mapping[str, Any]) -> Iterator[sqlite3.Connecti
         quoted = urllib.parse.quote(str(database_path), safe="/")
         connection = sqlite3.connect(f"file:{quoted}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=5000")
         connection.execute("PRAGMA query_only=ON")
         try:
             yield connection

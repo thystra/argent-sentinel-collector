@@ -15,7 +15,7 @@ import tempfile
 import uuid
 from typing import Any, Mapping, Sequence
 
-APP_VERSION = "0.4.10"
+APP_VERSION = "0.4.10.1"
 UTC = dt.timezone.utc
 BAN_RE = re.compile(r"\[(?P<jail>[A-Za-z0-9_.:-]+)\]\s+Ban\s+(?P<ip>\S+)")
 

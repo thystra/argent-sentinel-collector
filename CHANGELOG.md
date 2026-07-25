@@ -1,4 +1,13 @@
 # Changelog
+## 0.4.10.1 — 2026-07-25
+- Permit the hardened daily-review service to write only within the collector
+  state directory so SQLite can manage WAL shared-memory state.
+- Retain URI `mode=ro`, `PRAGMA query_only=ON`, and the shared collector lock
+  inside the review process.
+- Add a SQLite busy timeout for the review connection.
+- Correct operator validation documentation to use the actual
+  `network_observations.occurred_at` and `occurred_epoch` columns.
+
 ## 0.4.10 — 2026-07-25
 - Open the daily review database under the collector lock using SQLite
   query-only read-only mode under the collector lock so the hardened systemd unit can read the WAL-mode

@@ -20,9 +20,9 @@ import review_digest  # noqa: E402
 
 class V0410Test(unittest.TestCase):
     def test_release_versions(self) -> None:
-        self.assertEqual("0.4.10", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.4.10.1", (ROOT / "VERSION").read_text().strip())
         for module in (collector, nginx_429_export, review_digest):
-            self.assertEqual("0.4.10", module.APP_VERSION)
+            self.assertEqual("0.4.10.1", module.APP_VERSION)
 
     def test_extended_nginx_429_line_parser(self) -> None:
         line = (
@@ -156,6 +156,12 @@ class V0410Test(unittest.TestCase):
             merged["policy"]["network_severe_block_days"],
         )
 
+    def test_review_database_remains_application_read_only(self) -> None:
+        source = (ROOT / "src/review_digest.py").read_text()
+        self.assertIn("?mode=ro", source)
+        self.assertIn("PRAGMA query_only=ON", source)
+        self.assertIn("PRAGMA busy_timeout=5000", source)
+
     def test_new_systemd_assets_exist(self) -> None:
         for relative in (
             "packaging/systemd/argent-sentinel-nginx-429-export.service",
@@ -166,8 +172,18 @@ class V0410Test(unittest.TestCase):
         review_unit = (
             ROOT / "packaging/systemd/argent-sentinel-review-digest.service"
         ).read_text()
-        self.assertIn("ReadOnlyPaths=/var/lib/argent-sentinel/collector", review_unit)
-        self.assertIn("ReadWritePaths=/run/argent-sentinel", review_unit)
+        self.assertNotIn(
+            "ReadOnlyPaths=/var/lib/argent-sentinel/collector",
+            review_unit,
+        )
+        self.assertIn(
+            "ReadWritePaths=/var/lib/argent-sentinel/collector",
+            review_unit,
+        )
+        self.assertIn(
+            "ReadWritePaths=/run/argent-sentinel",
+            review_unit,
+        )
 
 
 if __name__ == "__main__":
