@@ -129,7 +129,7 @@ class V049Test(unittest.TestCase):
     def test_roadmap_contains_wordpress_failure(self) -> None:
         todo = (ROOT / "TODO.md").read_text()
         self.assertIn("'setup' is not a registered subcommand", todo)
-        self.assertIn("Future web dashboard", todo)
+        self.assertIn("Future dashboard write and control workflows", todo)
         self.assertIn("Abuse-contact delivery failures", todo)
         self.assertIn("CIDR and network-prefix escalation", todo)
         self.assertIn("dedicated envelope-sender", todo)

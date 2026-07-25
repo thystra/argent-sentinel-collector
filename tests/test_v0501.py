@@ -116,6 +116,10 @@ class V0501Test(unittest.TestCase):
         self.assertIn("LogFormat=1", rendered)
         self.assertIn(" stream --site photos.argentwolf.org |", rendered)
         self.assertNotIn("%virtualname", rendered)
+        self.assertIn("ShowPagesStats=PBEX", rendered)
+        self.assertIn("ShowRobotsStats=HBL", rendered)
+        self.assertIn("ShowHostsStats=PHBL", rendered)
+        self.assertIn("ShowHTTPErrorsStats=1", rendered)
 
     def test_dashboard_service_uses_systemd_credential(self) -> None:
         service = (
@@ -132,6 +136,27 @@ class V0501Test(unittest.TestCase):
             "ReadOnlyPaths=/etc/argent-sentinel/dashboard.json",
             service,
         )
+
+    def test_dashboard_publication_permissions_are_packaged(self) -> None:
+        postinst = (ROOT / "packaging/deb/server.postinst").read_text()
+        self.assertIn(
+            "setfacl -m g:www-data:--x /var/lib/argent-sentinel",
+            postinst,
+        )
+        builder = (ROOT / "packaging/build_debs.py").read_text()
+        self.assertIn("adduser, acl, openssl", builder)
+        snapshot_source = (ROOT / "src/dashboard_snapshot.py").read_text()
+        self.assertIn("os.chown(path.parent, -1, group_id)", snapshot_source)
+        dashboard_source = (ROOT / "src/dashboard.py").read_text()
+        self.assertIn("except PermissionError as exc:", dashboard_source)
+
+    def test_agent_notes_record_host_paths(self) -> None:
+        notes = (ROOT / "AGENTS.md").read_text()
+        self.assertIn("~/src/argent-sentinel-collector", notes)
+        self.assertIn("~/Downloads/", notes)
+        self.assertIn("/var/lib/argent-sentinel/dashboard", notes)
+        self.assertIn("/run/argent-sentinel-dashboard/", notes)
+        self.assertIn("/mnt/data/file.patch", notes)
 
     def test_two_log_formats_and_readme_commands(self) -> None:
         format_file = (

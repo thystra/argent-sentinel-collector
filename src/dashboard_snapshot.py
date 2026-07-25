@@ -433,6 +433,13 @@ def atomic_write_json(
     group_name: str,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+    try:
+        group_id = grp.getgrnam(group_name).gr_gid
+    except KeyError:
+        group_id = -1
+    if group_id >= 0:
+        os.chown(path.parent, -1, group_id)
+    os.chmod(path.parent, 0o750)
     payload = (
         json.dumps(value, indent=2, sort_keys=True, default=str)
         + "\n"
@@ -447,10 +454,6 @@ def atomic_write_json(
         handle.flush()
         os.fsync(handle.fileno())
     os.chmod(temporary, 0o640)
-    try:
-        group_id = grp.getgrnam(group_name).gr_gid
-    except KeyError:
-        group_id = -1
     if group_id >= 0:
         os.chown(temporary, 0, group_id)
     os.replace(temporary, path)

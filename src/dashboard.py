@@ -69,6 +69,10 @@ def load_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
         if path.stat().st_size > int(config["max_json_bytes"]):
             raise DashboardError("Dashboard snapshot exceeds configured size limit")
         snapshot = json.loads(path.read_text(encoding="utf-8"))
+    except PermissionError as exc:
+        raise DashboardError(
+            f"Dashboard snapshot is not readable: {path}"
+        ) from exc
     except FileNotFoundError as exc:
         raise DashboardError("Dashboard snapshot has not been generated") from exc
     except json.JSONDecodeError as exc:

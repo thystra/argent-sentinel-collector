@@ -46,6 +46,14 @@ solely because Fail2ban also banned the address.
 - Usernames, cookies, passwords, and authentication secrets are not included
   in outbound reports.
 - Test mode redirects all abuse mail to the configured override.
+- `/var/lib/argent-sentinel` remains `root:sentinel 0750` and is not listable by
+  the web tier. The `www-data` presentation group receives execute-only ACL
+  traversal on that ancestor.
+- Sanitized dashboard output is published beneath a `root:www-data 0750`
+  subtree with `root:www-data 0640` files. Nginx is not added to the broader
+  `sentinel` group.
+- The long-running dashboard worker receives `www-data` only as a supplementary
+  read group and has no collector database or enforcement write interface.
 
 ## Scheduled services
 
@@ -55,12 +63,12 @@ solely because Fail2ban also banned the address.
 - Fail2ban ban export: every minute.
 - Operator review digest: 07:00 local time daily.
 
-## Future dashboard
+## Future dashboard write workflows
 
-A web dashboard is intentionally deferred until collection, policy,
-deduplication, review output, and production reporting are stable. The
-dashboard should consume the same database and policy interfaces rather than
-introducing a second source of truth.
+The read-only dashboard is implemented. Future notes, dispositions, allowlist
+changes, and enforcement actions must use explicit authenticated and auditable
+proposal interfaces. The web worker must not gain direct database or policy
+write access and must not introduce a second source of truth.
 
 ## HTTP 429 review ingestion
 
@@ -100,9 +108,19 @@ certificate. Dashboard and static AWStats locations require both an allowed LAN
 address and HTTP Basic authentication.
 
 AWStats is used for conventional per-site traffic reporting. Generated
-configurations include `%virtualname`, allowing shared extended Nginx logs to be
-filtered by each site's `SiteDomain` and aliases. Reports are generated as
-static HTML; browser-triggered AWStats updates and CGI exposure remain disabled.
+configurations consume per-site normalized combined streams. Shared extended
+logs are host-filtered before records reach AWStats, while ambiguous hostless
+records are skipped. The generated configuration explicitly enables report
+sections used by the AWStats static-page builder so links to detail reports have
+matching files. Reports are generated as static HTML; browser-triggered AWStats
+updates and CGI exposure remain disabled.
+
+The combined Nginx host exposes `/healthz` for the ingestion API and a separate
+authenticated `/dashboard-healthz` for the dashboard. Server-level client
+certificate verification is optional so browsers can negotiate TLS, while
+`/v1/ingest` still requires successful node-certificate verification. LAN
+allowlists must account for globally routed IPv6 prefixes as well as RFC 1918
+IPv4 and IPv6 ULA space.
 
 `Meta-ExternalAgent` is an explicit operator policy block. The packaged Nginx
 map permits `FacebookExternalHit` for link previews and blocks

@@ -306,13 +306,20 @@ sudo argent-sentinel-awstats render
 sudo argent-sentinel-awstats update
 ```
 
-For parser troubleshooting, the normalized combined stream for one site is:
+For parser troubleshooting, write the normalized combined stream to a file and
+inspect the completed output:
 
 ```bash
 sudo argent-sentinel-awstats stream \
-  --site wolfandraven.blog |
-head
+  --site wolfandraven.blog \
+  > /tmp/wolfandraven.blog.combined.log
+
+head /tmp/wolfandraven.blog.combined.log
 ```
+
+Do not normally pipe the live stream directly into `head`. When `head` exits,
+the closed output pipe can produce an expected SIGPIPE (`logresolvemerge`
+status `-13`) even though the complete scheduled AWStats update is healthy.
 
 Enable scheduled static report generation only after `inspect` shows the
 expected files:
@@ -323,6 +330,27 @@ sudo systemctl enable --now argent-sentinel-awstats.timer
 
 Sites with no unambiguous matching log are reported as `skipped`; they no
 longer cause the entire AWStats service to fail.
+
+The generated site configuration explicitly enables the AWStats report sections
+used by `awstats_buildstaticpages.pl`. This ensures that links from the summary
+page have matching static files, including `urldetail` and `allrobots`.
+Regenerate and verify after an upgrade:
+
+```bash
+sudo systemctl start argent-sentinel-awstats.service
+
+find /var/lib/argent-sentinel/dashboard/awstats/wolfandraven.blog \
+  -maxdepth 1 -type f \
+  -name 'awstats.wolfandraven.blog.*.html' \
+  -printf '%f\n' | sort
+```
+
+The listing should include at least:
+
+```text
+awstats.wolfandraven.blog.urldetail.html
+awstats.wolfandraven.blog.allrobots.html
+```
 
 ### Dashboard commands
 
@@ -341,6 +369,55 @@ sudo systemctl status \
 The dashboard service receives `/etc/argent-sentinel/dashboard.json` through a
 systemd read-only credential. It does not need traversal permission on the
 root-only `/etc/argent-sentinel` directory.
+
+The publication tree uses a narrow filesystem boundary:
+
+```text
+/var/lib/argent-sentinel
+    root:sentinel 0750
+    ACL group:www-data:--x
+
+/var/lib/argent-sentinel/dashboard
+/var/lib/argent-sentinel/dashboard/awstats
+    root:www-data 0750
+
+snapshot.json and generated AWStats files
+    root:www-data 0640
+```
+
+The execute-only ACL lets the presentation group traverse the private state
+root without listing or reading the other Sentinel state directories. Do not
+add Nginx broadly to the `sentinel` group. Verify every ancestor directory:
+
+```bash
+namei -l /var/lib/argent-sentinel/dashboard/snapshot.json
+getfacl -p /var/lib/argent-sentinel
+sudo -u www-data test -r \
+  /var/lib/argent-sentinel/dashboard/snapshot.json
+```
+
+Test the dashboard directly through its Unix socket:
+
+```bash
+curl --unix-socket \
+  /run/argent-sentinel-dashboard/dashboard.sock \
+  http://localhost/healthz
+```
+
+In the combined Nginx virtual host, `/healthz` checks the ingestion API and
+`/dashboard-healthz` checks the dashboard worker. Server-level client
+verification must remain `optional`; `/v1/ingest` separately requires
+`$ssl_client_verify = SUCCESS`.
+
+The dashboard locations use `satisfy all`, so an allowed client without valid
+credentials receives HTTP 401 while a disallowed address receives HTTP 403.
+IPv6 ULA space (`fc00::/7`) does not include a residential globally routed
+prefix. Add the actual LAN IPv6 prefix, normally a `/64`, when browsers connect
+over global IPv6.
+
+Developer and deployment host conventions are recorded in `AGENTS.md`. In
+particular, browser downloads on `fafnir` are under `~/Downloads/` (plural), not
+inside the ChatGPT `/mnt/data` sandbox.
 
 ## SSH collection
 

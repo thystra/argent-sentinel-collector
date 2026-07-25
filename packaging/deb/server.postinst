@@ -60,6 +60,10 @@ case "$1" in
         if ! id argent-sentinel-dashboard >/dev/null 2>&1; then
             adduser --system --ingroup argent-sentinel-dashboard                 --home /nonexistent --no-create-home                 --shell /usr/sbin/nologin argent-sentinel-dashboard
         fi
+        install -d -o root -g sentinel -m 0750 /var/lib/argent-sentinel
+        # Keep private Sentinel state non-listable while allowing the
+        # presentation tier to traverse only to sanitized publications.
+        setfacl -m g:www-data:--x /var/lib/argent-sentinel
         install -d -o root -g root -m 0750 /var/lib/argent-sentinel/drop/fail2ban /var/lib/argent-sentinel/drop/fail2ban/incoming
         install -d -o root -g root -m 0750 /var/lib/argent-sentinel/drop/nginx /var/lib/argent-sentinel/drop/nginx/rate-review /var/lib/argent-sentinel/drop/nginx/rate-review/incoming /var/lib/argent-sentinel/collector/nginx-429-cursors
         install -d -o root -g www-data -m 0750 /var/lib/argent-sentinel/dashboard /var/lib/argent-sentinel/dashboard/awstats

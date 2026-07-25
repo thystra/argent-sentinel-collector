@@ -11,6 +11,36 @@
 - Add recidive escalation without sending duplicate provider reports.
 - Add per-rule CrowdSec/Fail2ban ban durations.
 
+## Dashboard/AWStats stabilization — 2026-07-25
+
+Current handoff state for later chats and agents:
+
+- [x] Dashboard is reachable through Basic Auth from the LAN.
+- [x] Combined Nginx host uses `ssl_verify_client optional`; `/v1/ingest`
+  independently requires successful client-certificate verification.
+- [x] LAN access rules include the globally routed IPv6 prefix; `fc00::/7`
+  alone was insufficient.
+- [x] Live filesystem access was repaired with execute-only `www-data`
+  traversal on `/var/lib/argent-sentinel` and `root:www-data` permissions on
+  the sanitized dashboard publication tree.
+- [x] Scheduled AWStats completed successfully for `wolfandraven.blog`; the
+  earlier status `-13` was associated with a diagnostic stream closed early.
+- [ ] Apply and deploy the stabilization changes from `fafnir`.
+- [ ] Package the execute-only ACL and publication directory repair so upgrades
+  do not recreate the Nginx/dashboard permission failure.
+- [ ] Convert snapshot `PermissionError` into a controlled dashboard HTTP 503
+  instead of an empty upstream response and Nginx 502.
+- [ ] Emit explicit AWStats `Show*` settings and regenerate reports so linked
+  `urldetail` and `allrobots` pages return HTTP 200.
+- [ ] Verify `/dashboard-healthz` through Nginx and the dashboard Unix socket.
+- [ ] Add a traffic-review view that separates `wp-login.php` requests by HTTP
+  status, source, network, rate, and correlated WordPress authentication result;
+  raw page hits alone are not proof of failed authentication.
+- [ ] Compare AWStats corrupted-record totals on later runs to determine whether
+  they are a fixed historical-format backlog or continue increasing.
+- [ ] Keep this dated handoff section current after each deployment or major
+  diagnostic session. Host/path conventions are in `AGENTS.md`.
+
 ## WordPress plugin next task
 
 Observed failure:
@@ -95,15 +125,16 @@ Required work:
 - Require persistent failure or a permanent status before treating a provider
   as lacking a functioning abuse mechanism.
 
-## Future web dashboard
+## Future dashboard write and control workflows
 
-- Authentication and LAN/reverse-proxy access controls.
-- Incident queue, evidence view, and report history.
-- Allowlist and trusted-network management.
-- Fail2ban/CrowdSec state and manual action controls.
-- 429 crawler review and disposition.
-- Daily-summary history and annotations.
-- Multi-node health and transport status.
+- Add reviewed notes, acknowledgements, and dispositions without granting the
+  web worker direct database access.
+- Add authenticated and auditable generation of proposed Nginx, CrowdSec, and
+  nftables policy fragments.
+- Route allowlist, trusted-network, Fail2ban, and CrowdSec changes through a
+  narrowly privileged helper with explicit confirmation and audit records.
+- Add 429 crawler disposition, daily-summary annotations, and multi-node health
+  while retaining the snapshot/read-only boundary.
 
 ## Implemented in 0.4.10
 

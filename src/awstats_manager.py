@@ -622,6 +622,26 @@ def render_site_config(
         "AllowToUpdateStatsFromBrowser=0\n"
         "DNSLookup=0\n"
         "ShowLinksOnUrl=0\n"
+        "# Explicit report sections are required by awstats_buildstaticpages.pl.\n"
+        "ShowSummary=UVPHB\n"
+        "ShowMonthStats=UVPHB\n"
+        "ShowDaysOfMonthStats=VPHB\n"
+        "ShowDaysOfWeekStats=PHB\n"
+        "ShowHoursStats=PHB\n"
+        "ShowDomainsStats=PHB\n"
+        "ShowHostsStats=PHBL\n"
+        "ShowRobotsStats=HBL\n"
+        "ShowSessionsStats=1\n"
+        "ShowPagesStats=PBEX\n"
+        "ShowFileTypesStats=HB\n"
+        "ShowOSStats=1\n"
+        "ShowBrowsersStats=1\n"
+        "ShowOriginStats=PH\n"
+        "ShowKeyphrasesStats=1\n"
+        "ShowKeywordsStats=1\n"
+        "ShowMiscStats=a\n"
+        "ShowHTTPErrorsStats=1\n"
+        'ShowFlagLinks=""\n'
         "KeepBackupOfHistoricFiles=1\n"
         "CreateDirDataIfNotExists=1\n"
         'SkipHosts=""\n'
@@ -638,6 +658,7 @@ def install_site_configs(
     config_dir.mkdir(parents=True, exist_ok=True, mode=0o755)
     data_root.mkdir(parents=True, exist_ok=True, mode=0o755)
     static_root.mkdir(parents=True, exist_ok=True, mode=0o750)
+    set_static_group(config, static_root, recursive=False)
     result: list[dict[str, Any]] = []
     for raw_site in config["sites"]:
         site = safe_site(raw_site)
@@ -660,6 +681,7 @@ def install_site_configs(
         output_dir = static_root / site_id
         data_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
         output_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+        set_static_group(config, output_dir, recursive=False)
         destination = config_dir / f"awstats.{site_id}.conf"
         temporary = destination.with_suffix(".conf.tmp")
         temporary.write_text(
@@ -687,12 +709,18 @@ def install_site_configs(
     return result
 
 
-def set_static_group(config: Mapping[str, Any], path: Path) -> None:
+def set_static_group(
+    config: Mapping[str, Any],
+    path: Path,
+    *,
+    recursive: bool = True,
+) -> None:
     try:
         group_id = grp.getgrnam(str(config["static_group"])).gr_gid
     except KeyError:
         return
-    for item in [path, *path.rglob("*")]:
+    items = [path, *path.rglob("*")] if recursive else [path]
+    for item in items:
         try:
             os.chown(item, -1, group_id)
             if item.is_dir():

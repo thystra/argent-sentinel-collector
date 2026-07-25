@@ -128,7 +128,7 @@ def make_common(root: Path, version: str) -> dict[str, str]:
     for name in ("collector.json.example", "agent.json.example", "server-api.json.example", "node.json.example", "nginx-sentinel.conf.example", "dashboard.json.example", "dashboard-snapshot.json.example", "traffic-sites.json.example", "nginx-site-access-log-format.conf.example", "nginx-crawler-map.conf.example", "nginx-crawler-enforcement.conf.example", "nginx-sentinel-dashboard.conf.example"):
         install_file(ROOT / "config" / name, root / "usr/share/argent-sentinel" / name)
     install_file(ROOT / "VERSION", root / "usr/share/argent-sentinel/VERSION")
-    docs = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "ARCHITECTURE.md", ROOT / "TODO.md", ROOT / "docs-abuse-context.md", ROOT / "docs/debian-packaging.md"]
+    docs = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "ARCHITECTURE.md", ROOT / "TODO.md", ROOT / "AGENTS.md", ROOT / "docs-abuse-context.md", ROOT / "docs/debian-packaging.md"]
     docs.extend(sorted((ROOT / "docs").glob("*.md")))
     for source in docs:
         add_doc(root, "argent-sentinel-common", source)
@@ -200,7 +200,7 @@ def make_server(root: Path, version: str) -> dict[str, str]:
     add_doc(root, "argent-sentinel-server", ROOT / "docs/debian-packaging.md")
     return {
         "description": "Argent Sentinel central ingestion and policy server\nRuns the mTLS ingestion API and scheduled collector, correlates WordPress,\nNginx, and OpenSSH incidents, manages CrowdSec decisions, and sends reports.",
-        "depends": f"argent-sentinel-common (= {version}), argent-sentinel-agent (= {version}), init-system-helpers (>= 1.18~), systemd | systemd-sysv, adduser, openssl, logrotate",
+        "depends": f"argent-sentinel-common (= {version}), argent-sentinel-agent (= {version}), init-system-helpers (>= 1.18~), systemd | systemd-sysv, adduser, acl, openssl, logrotate",
         "recommends": "nginx, awstats, crowdsec, sqlite3, default-mta | mail-transport-agent",
         "provides": "argent-sentinel-collector",
     }
