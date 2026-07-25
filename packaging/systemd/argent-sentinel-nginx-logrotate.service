@@ -1,0 +1,9 @@
+[Unit]
+Description=Rotate and stage Argent Sentinel Nginx abuse-context log
+After=nginx.service
+ConditionPathExists=/etc/logrotate.d/argent-sentinel-nginx
+ConditionPathExists=/var/log/nginx/argent-sentinel-abuse-context.jsonl
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/logrotate /etc/logrotate.d/argent-sentinel-nginx

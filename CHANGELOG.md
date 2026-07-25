@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.6 — 2026-07-24
+
+- Package the dedicated Nginx abuse-context logrotate service and hourly timer.
+- Install a default logrotate rule when one is not already configured.
+- Preserve an existing operator-managed logrotate rule during upgrades.
+- Archive recognized temporary local Nginx logrotate units so package-owned
+  units become authoritative.
+- Enable and start the Nginx logrotate timer from the server package postinst.
+- Use logrotate's standard shared state so hourly and system-wide runs cannot
+  independently rotate the same active file.
+- Stop and disable the timer during package removal.
+- Add packaging regression tests that materialize the server package root and
+  verify the new units and default rule are installed.
+
 ## 0.4.5 — 2026-07-24
 
 - Preserve complete Nginx incident evidence after a sliding window first

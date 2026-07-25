@@ -1,8 +1,15 @@
 #!/bin/sh
+
 set -e
-if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || true; fi
-if [ "$1" = purge ]; then
-  rm -f /etc/argent-sentinel/collector.json /etc/argent-sentinel/server-api.json
-  # Enrollment records and CA private material are intentionally retained.
+
+if [ -d /run/systemd/system ] &&
+   command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
 fi
+
+if [ "$1" = purge ]; then
+    rm -f         /etc/argent-sentinel/collector.json         /etc/argent-sentinel/server-api.json         /etc/logrotate.d/argent-sentinel-nginx         /var/lib/logrotate/status-argent-sentinel-nginx
+    # Enrollment records and CA private material are intentionally retained.
+fi
+
 exit 0

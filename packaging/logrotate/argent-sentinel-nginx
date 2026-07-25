@@ -1,0 +1,38 @@
+/var/log/nginx/argent-sentinel-abuse-context.jsonl {
+    hourly
+    rotate 48
+    missingok
+    notifempty
+    create 0640 www-data adm
+    dateext
+    dateformat -%Y%m%dT%H%M%SZ
+    compress
+    delaycompress
+    sharedscripts
+
+    postrotate
+        if [ -s /run/nginx.pid ]; then
+            kill -USR1 "$(cat /run/nginx.pid)"
+        fi
+    endscript
+
+    lastaction
+        # Give Nginx workers time to reopen and flush the rotated file.
+        sleep 2
+
+        newest="$(
+            find /var/log/nginx \
+              -maxdepth 1 \
+              -type f \
+              -name 'argent-sentinel-abuse-context.jsonl-*' \
+              -printf '%T@ %p\n' |
+            sort -nr |
+            head -n 1 |
+            cut -d' ' -f2-
+        )"
+
+        if [ -n "$newest" ] && [ -s "$newest" ]; then
+            /usr/sbin/argent-sentinel-stage-abuse-context "$newest"
+        fi
+    endscript
+}

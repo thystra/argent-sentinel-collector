@@ -13,9 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PackagingTest(unittest.TestCase):
     def test_release_version_is_consistent(self) -> None:
-        self.assertEqual("0.4.5", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.4.6", (ROOT / "VERSION").read_text().strip())
         source = (ROOT / "src/collector.py").read_text()
-        self.assertIn('APP_VERSION = "0.4.5"', source)
+        self.assertIn('APP_VERSION = "0.4.6"', source)
         self.assertIn("Argent-Sentinel/{APP_VERSION}", source)
 
     def test_packaging_assets_exist(self) -> None:
@@ -30,6 +30,9 @@ class PackagingTest(unittest.TestCase):
             "packaging/systemd/argent-sentinel-api.service",
             "packaging/systemd/argent-sentinel-collector.service",
             "packaging/systemd/argent-sentinel-collector.timer",
+            "packaging/systemd/argent-sentinel-nginx-logrotate.service",
+            "packaging/systemd/argent-sentinel-nginx-logrotate.timer",
+            "packaging/logrotate/argent-sentinel-nginx",
             "packaging/deb/agent.preinst",
             "packaging/deb/agent.postinst",
             "packaging/deb/agent.prerm",
