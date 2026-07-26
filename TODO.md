@@ -219,3 +219,22 @@ Required work:
 - [ ] Verify XARF generation, MIME filename/content type, and attachment bytes.
 - [ ] Verify retry/resend paths retain the XARF attachment.
 - [ ] Add regression coverage proving SSH reports include `xarf.json`.
+
+## PHP-FPM unrestricted-pool detection — 2026-07-26
+
+- [x] Treat a missing pool-level open_basedir as a security-hardening failure.
+- [x] Stop non-interactive onboarding by default before WordPress configuration.
+- [x] Require explicit interactive confirmation or `--no-open-basedir-action continue`.
+- [x] Preserve `--open-basedir-mode ignore` as an expert opt-out.
+- [x] Explain that open_basedir is defense in depth, not a complete sandbox.
+- [x] Print a reviewed example pool directive without silently inventing site requirements.
+- [x] Add helper-policy and integration regression tests.
+- [ ] Audit the earlier per-user PHP pool creation script and add a secure open_basedir template.
+- [ ] Backfill restrictions to existing unrestricted per-user pools after review.
+
+## Abuse-report attachment follow-up — 2026-07-26
+
+- [ ] Fix OpenSSH/sshd abuse-report emails that omit the expected `xarf.json` attachment.
+- [ ] Verify XARF generation, MIME filename/content type, and attachment bytes.
+- [ ] Verify retry/resend paths retain the XARF attachment.
+- [ ] Add regression coverage proving SSH reports include `xarf.json`.

@@ -538,3 +538,13 @@ once, at the end of successful onboarding. This activates the PHP user's new
 `sentinel` supplementary group and any accepted pool-level `open_basedir`
 change before the operator returns to the WordPress web UI. Use
 `--no-restart-php-fpm` only when a controlled restart will immediately follow.
+
+## Unrestricted PHP-FPM pools
+
+A matching per-site PHP-FPM pool with no active pool-level `open_basedir` is
+reported as a security-hardening failure. Interactive onboarding requires
+confirmation; non-interactive onboarding stops before plugin configuration.
+Use `--no-open-basedir-action continue` only after reviewing inherited/global
+restrictions or deliberately accepting the broader filesystem reach.
+`open_basedir` remains defense in depth rather than a complete security
+boundary.

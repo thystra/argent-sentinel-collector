@@ -12,6 +12,7 @@ Usage:
     [--plugin-zip ZIP] \
     [--wp-cli PATH] \
     [--open-basedir-mode prompt|append|warn|ignore] \
+    [--no-open-basedir-action stop|continue] \
     [--restart-php-fpm | --no-restart-php-fpm]
 
 Creates the protected WordPress event drop, checks the matching PHP-FPM pool,
@@ -23,6 +24,12 @@ open_basedir modes:
   append  Append automatically after backup and PHP-FPM validation.
   warn    Print the exact required change without modifying configuration.
   ignore  Skip open_basedir inspection.
+
+No active pool-level open_basedir:
+  This is reported as a security-hardening failure. Interactive prompt mode
+  asks whether to continue. Non-interactive execution stops by default.
+  Use --no-open-basedir-action continue only after reviewing inherited/global
+  PHP-FPM restrictions or accepting the broader filesystem exposure.
 
 PHP-FPM restart behavior:
   The matching PHP-FPM service is restarted automatically at the end so
@@ -103,6 +110,60 @@ for raw in path.read_text(encoding="utf-8").splitlines():
         last = value
 print(last)
 PY
+}
+
+handle_missing_pool_open_basedir() {
+    local pool=$1
+    local drop=$2
+    local mode=$3
+    local action=$4
+    local answer
+
+    cat >&2 <<EOF
+SECURITY WARNING: This PHP-FPM pool has no active pool-level open_basedir restriction.
+
+Pool:
+  $pool
+Argent Sentinel drop:
+  $drop
+
+The connector can operate, but this PHP-FPM worker is not constrained to the
+site and explicitly allowed runtime paths by a pool-level open_basedir value.
+This weakens per-site filesystem isolation. open_basedir is defense in depth,
+not a complete security boundary, but its absence is unexpected in this
+per-user pool model.
+EOF
+
+    if [[ $action == continue ]]; then
+        echo "Continuing because --no-open-basedir-action continue was supplied." >&2
+        return 0
+    fi
+
+    if [[ $mode == ignore ]]; then
+        echo "Continuing because --open-basedir-mode ignore was supplied." >&2
+        return 0
+    fi
+
+    if [[ $mode == prompt && -t 0 ]]; then
+        read -r -p "Continue onboarding without a pool-level open_basedir restriction? [y/N] " answer
+        if [[ $answer =~ ^[Yy]([Ee][Ss])?$ ]]; then
+            echo "Continuing without a pool-level open_basedir restriction by operator confirmation." >&2
+            return 0
+        fi
+    fi
+
+    cat >&2 <<EOF
+Onboarding stopped before WordPress configuration.
+
+Add a reviewed pool-level setting such as:
+  php_admin_value[open_basedir] = <site-path>:/tmp/:/usr/share/php/:/usr/share/zoneinfo/:/etc/ssl/certs/:/dev/urandom:$drop
+
+Preserve every path required by the site. Validate the PHP-FPM configuration,
+restart the matching service, and rerun onboarding. To deliberately proceed
+without this defense-in-depth restriction, use:
+  --no-open-basedir-action continue
+EOF
+    return 4
 }
 
 append_pool_open_basedir() {
@@ -237,6 +298,7 @@ inspect_open_basedir() {
     local php_user=$1
     local drop=$2
     local mode=$3
+    local no_open_basedir_action=$4
     local php_root=${ARGENT_SENTINEL_PHP_ETC_ROOT:-/etc/php}
     local backup_root=${ARGENT_SENTINEL_BACKUP_ROOT:-/var/backups/argent-sentinel/php-fpm}
     local pool value answer backup version service
@@ -258,12 +320,11 @@ EOF
     for pool in "${pools[@]}"; do
         value=$(read_pool_open_basedir "$pool")
         if [[ -z $value ]]; then
-            cat <<EOF
-PHP-FPM pool has no active pool-level open_basedir restriction:
-  $pool
-No edit was made. If the pool inherits a global restriction, add:
-  $drop
-EOF
+            handle_missing_pool_open_basedir \
+                "$pool" \
+                "$drop" \
+                "$mode" \
+                "$no_open_basedir_action"
             continue
         fi
         if open_basedir_contains "$value" "$drop"; then
@@ -326,6 +387,7 @@ EOF
 main() {
     local wordpress_path="" site_id="" node_id="" php_user=""
     local plugin_zip="" wp_cli="wp" open_basedir_mode="prompt"
+    local no_open_basedir_action="stop"
     local restart_php_fpm=1
 
     while [[ $# -gt 0 ]]; do
@@ -365,6 +427,11 @@ main() {
                 open_basedir_mode="$2"
                 shift 2
                 ;;
+            --no-open-basedir-action)
+                [[ $# -ge 2 ]] || { echo "--no-open-basedir-action requires a value" >&2; exit 2; }
+                no_open_basedir_action="$2"
+                shift 2
+                ;;
             --restart-php-fpm)
                 restart_php_fpm=1
                 shift
@@ -390,6 +457,7 @@ main() {
     [[ -n $wordpress_path && -n $site_id && -n $node_id && -n $php_user ]] || { usage >&2; exit 2; }
     [[ $site_id =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]] || { echo "Unsafe site ID: $site_id" >&2; exit 2; }
     [[ $open_basedir_mode =~ ^(prompt|append|warn|ignore)$ ]] || { echo "Invalid --open-basedir-mode: $open_basedir_mode" >&2; exit 2; }
+    [[ $no_open_basedir_action =~ ^(stop|continue)$ ]] || { echo "Invalid --no-open-basedir-action: $no_open_basedir_action" >&2; exit 2; }
     id "$php_user" >/dev/null 2>&1 || { echo "Unknown PHP-FPM user: $php_user" >&2; exit 2; }
     [[ -f "$wordpress_path/wp-config.php" ]] || { echo "No wp-config.php under $wordpress_path" >&2; exit 2; }
     command -v "$wp_cli" >/dev/null 2>&1 || { echo "WP-CLI not found: $wp_cli" >&2; exit 2; }
@@ -404,7 +472,7 @@ main() {
     install -d -o root -g sentinel -m 0750 "$site_dir"
     install -d -o root -g sentinel -m 2770 "$drop"
 
-    inspect_open_basedir "$php_user" "$drop" "$open_basedir_mode"
+    inspect_open_basedir "$php_user" "$drop" "$open_basedir_mode" "$no_open_basedir_action"
 
     local -a wp=(sudo -u "$php_user" -- "$wp_cli" --path="$wordpress_path")
     if [[ -n $plugin_zip ]]; then

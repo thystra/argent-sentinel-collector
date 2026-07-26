@@ -34,7 +34,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
-APP_VERSION = "0.5.0.4"
+APP_VERSION = "0.5.0.5"
 UTC = dt.timezone.utc
 LOG = logging.getLogger("argent-sentinel-agent")
 

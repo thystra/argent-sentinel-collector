@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Argent Sentinel v0.5.0.4 SSH normalization regression tests.
+# Argent Sentinel v0.5.0.5 SSH normalization regression tests.
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ class V048Test(unittest.TestCase):
                 "site_id": "sshd-nidhoggur",
                 "site_url": "ssh://nidhoggur.example:22/",
                 "service": "sshd",
-                "plugin_version": "0.5.0.4",
+                "plugin_version": "0.5.0.5",
             },
             "events": [
                 {

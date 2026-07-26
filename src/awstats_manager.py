@@ -15,7 +15,7 @@ import subprocess
 import sys
 from typing import Any, Iterable, Mapping, Sequence
 
-APP_VERSION = "0.5.0.4"
+APP_VERSION = "0.5.0.5"
 
 DEFAULTS: dict[str, Any] = {
     "log_globs": [

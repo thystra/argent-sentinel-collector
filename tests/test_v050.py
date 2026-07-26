@@ -22,7 +22,7 @@ import server_api  # noqa: E402
 
 class V050Test(unittest.TestCase):
     def test_release_versions(self) -> None:
-        self.assertEqual("0.5.0.4", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.0.5", (ROOT / "VERSION").read_text().strip())
         for module in (
             awstats_manager,
             collector,
@@ -32,7 +32,7 @@ class V050Test(unittest.TestCase):
             review_digest,
             server_api,
         ):
-            self.assertEqual("0.5.0.4", module.APP_VERSION)
+            self.assertEqual("0.5.0.5", module.APP_VERSION)
 
     def test_meta_policy_block_and_preview_allow(self) -> None:
         mapping = (

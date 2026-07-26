@@ -1,3 +1,9 @@
+## 0.5.0.5
+
+- Treat unrestricted per-site PHP-FPM pools as a security-hardening failure.
+- Stop unattended onboarding unless the operator explicitly accepts no open_basedir.
+- Add clear interactive warnings and regression coverage.
+
 ## 0.5.0.4
 
 - Restart matching PHP-FPM services automatically after successful WordPress onboarding.
