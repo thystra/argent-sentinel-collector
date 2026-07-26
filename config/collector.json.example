@@ -122,6 +122,15 @@
     "fqdn": "nidhoggur.argentwolf.org",
     "id": "nidhoggur"
   },
+  "persistent_wordpress_policy": {
+    "abuse_reporting_enabled": false,
+    "distinct_accounts": 2,
+    "enabled": true,
+    "failure_threshold": 6,
+    "incident_merge_seconds": 86400,
+    "single_account_threshold": 12,
+    "window_seconds": 86400
+  },
   "policy": {
     "ban_duration": "720h",
     "distinct_accounts": 2,

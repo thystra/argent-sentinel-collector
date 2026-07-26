@@ -163,3 +163,21 @@ Required work:
   provider-published ranges before granting crawler-specific exceptions.
 - Add report-delivery bounce ingestion and nonresponsive abuse-contact cases.
 - Keep CIDR recommendations in observation until enough history accumulates.
+
+## Implemented in 0.5.0.2 — slow-burn WordPress policy
+
+- [x] Add a site-scoped 24-hour WordPress credential-spray policy.
+- [x] Trigger at six failures against two accounts.
+- [x] Add a twelve-failure single-account persistent rule.
+- [x] Exclude evidence already linked to stronger short-window WordPress rules.
+- [x] Merge repeat evidence without creating an incident on every run.
+- [x] Apply normal CrowdSec decision handling.
+- [x] Suppress provider reporting by default with an explicit review detail.
+- [x] Add schema migration 6 with nullable incident `site_id`.
+- [x] Add threshold, site isolation, duplicate-evidence, merge, trusted-source,
+  enforcement, reporting, and disablement tests.
+- [x] Render SSH/sshd report tuples with `scheme=ssh`, not the HTTP fallback.
+- [x] Add regression coverage for SSH connection details and normalized evidence.
+- [ ] Review production incident volume before enabling persistent-policy
+  provider reporting.
+- [ ] Complete the existing Allaboard Acres WordPress onboarding TODO.

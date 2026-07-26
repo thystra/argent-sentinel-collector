@@ -19,7 +19,7 @@ import urllib.parse
 
 import review_digest
 
-APP_VERSION = "0.5.0.1"
+APP_VERSION = "0.5.0.2"
 UTC = dt.timezone.utc
 
 DEFAULTS: dict[str, Any] = {

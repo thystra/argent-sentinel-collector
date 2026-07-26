@@ -3,7 +3,7 @@
 Argent Sentinel is a self-hosted security event collector, correlation engine,
 CrowdSec decision bridge, and guarded abuse-reporting system.
 
-Version 0.5.0.1 combines authenticated event transport, central policy,
+Version 0.5.0.2 combines authenticated event transport, central policy,
 a read-only dashboard, and per-site traffic analytics:
 
 ```text
@@ -419,6 +419,39 @@ Developer and deployment host conventions are recorded in `AGENTS.md`. In
 particular, browser downloads on `fafnir` are under `~/Downloads/` (plural), not
 inside the ChatGPT `/mnt/data` sandbox.
 
+## Slow-burn WordPress credential policy
+
+The short-window WordPress rules remain the primary burst detector. A separate
+site-scoped policy detects confirmed failures deliberately spread across a day:
+
+```json
+"persistent_wordpress_policy": {
+  "enabled": true,
+  "window_seconds": 86400,
+  "failure_threshold": 6,
+  "distinct_accounts": 2,
+  "single_account_threshold": 12,
+  "incident_merge_seconds": 86400,
+  "abuse_reporting_enabled": false
+}
+```
+
+The rules are `wordpress-persistent-credential-spray` and
+`wordpress-persistent-single-account-bruteforce`. They use only WordPress
+`login_failed` / `denied` events, exclude evidence already assigned to the
+stronger 15-minute WordPress rules, and never combine evidence from separate
+sites. CrowdSec decisions follow the normal policy. Provider abuse reports are
+created as `suppressed` with the detail
+`Persistent WordPress policy reporting disabled pending production review` until the operator enables reporting for newly created
+persistent incidents.
+
+The collector evaluates the current rolling window on every run, including
+after an upgrade, so recent stored evidence can qualify without waiting for a
+new event batch. Existing Nginx login rate limiting remains an independent
+resource-protection layer.
+
+Abuse-report connection formatting is service aware: OpenSSH events use `scheme=ssh` in both human-readable connection details and sanitized normalized evidence, while web events retain `http` or `https`.
+
 ## SSH collection
 
 The agent reads `journalctl -u ssh.service`, pseudonymizes account names with
@@ -484,7 +517,7 @@ See `ARCHITECTURE.md`, `TODO.md`, and `docs/fail2ban-review-policy.md`.
 
 ## Operator dashboard
 
-Version 0.5.0.1 provides a read-only dashboard intended for
+Version 0.5.0.2 provides a read-only dashboard intended for
 `sentinel.argentwolf.org`, a root-generated sanitized snapshot, static
 per-site AWStats reports, and an operator-controlled Nginx crawler policy.
 See `ARCHITECTURE.md` and `docs/dashboard.md`.

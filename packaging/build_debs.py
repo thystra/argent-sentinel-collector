@@ -289,8 +289,8 @@ def main() -> int:
     if shutil.which("dpkg-deb") is None:
         parser.error("dpkg-deb is required (install dpkg-dev/build-essential)")
     upstream = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    if upstream != "0.5.0.1":
-        parser.error(f"VERSION must be 0.5.0.1, found {upstream!r}")
+    if upstream != "0.5.0.2":
+        parser.error(f"VERSION must be 0.5.0.2, found {upstream!r}")
     if not args.revision.isdigit() or int(args.revision) < 1:
         parser.error("--revision must be a positive integer")
     full_version = f"{upstream}-{args.revision}"

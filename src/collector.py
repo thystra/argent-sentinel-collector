@@ -39,8 +39,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.5.0.1"
-SCHEMA_VERSION = 5
+APP_VERSION = "0.5.0.2"
+SCHEMA_VERSION = 6
 
 DEFAULTS: dict[str, Any] = {
     "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
@@ -99,6 +99,15 @@ DEFAULTS: dict[str, Any] = {
         "immediate_statuses": [444],
         "review_statuses": [429],
         "policy_denied_user_agents": ["meta-externalagent"],
+    },
+    "persistent_wordpress_policy": {
+        "enabled": True,
+        "window_seconds": 86400,
+        "failure_threshold": 6,
+        "distinct_accounts": 2,
+        "single_account_threshold": 12,
+        "incident_merge_seconds": 86400,
+        "abuse_reporting_enabled": False,
     },
     "legacy_reporting": {
         "marker_state_dir": "/var/lib/nginx-abuse-drafts",
@@ -334,6 +343,23 @@ def validate_config(config: Mapping[str, Any]) -> None:
     ):
         if int(web_policy.get(name, 0)) < 1:
             raise CollectorError(f"web_policy.{name} must be positive")
+    persistent_wordpress = config.get("persistent_wordpress_policy", {})
+    for name in (
+        "window_seconds",
+        "failure_threshold",
+        "distinct_accounts",
+        "single_account_threshold",
+        "incident_merge_seconds",
+    ):
+        if int(persistent_wordpress.get(name, 0)) < 1:
+            raise CollectorError(
+                f"persistent_wordpress_policy.{name} must be positive"
+            )
+    for name in ("enabled", "abuse_reporting_enabled"):
+        if not isinstance(persistent_wordpress.get(name), bool):
+            raise CollectorError(
+                f"persistent_wordpress_policy.{name} must be boolean"
+            )
     reporting = config["abuse_reporting"]
     if reporting.get("enabled") and not valid_email_header(str(reporting.get("from", ""))):
         raise CollectorError("abuse_reporting.from must contain a valid email address")
@@ -503,6 +529,7 @@ class StateDB:
                 incident_uuid TEXT PRIMARY KEY,
                 source_ip TEXT NOT NULL,
                 rule_id TEXT NOT NULL,
+                site_id TEXT,
                 first_seen_epoch INTEGER NOT NULL,
                 last_seen_epoch INTEGER NOT NULL,
                 first_seen TEXT NOT NULL,
@@ -647,11 +674,16 @@ class StateDB:
         self.ensure_column("events", "application_protocol", "TEXT")
         self.ensure_column("events", "request_method", "TEXT")
         self.ensure_column("events", "request_id", "TEXT")
+        self.ensure_column("incidents", "site_id", "TEXT")
         self.ensure_column("incidents", "registered_cidr", "TEXT")
         self.ensure_column("incidents", "next_report_after_epoch", "INTEGER NOT NULL DEFAULT 0")
         self.ensure_column("incidents", "report_sent_epoch", "INTEGER")
         self.ensure_column("incidents", "report_recipient", "TEXT")
         self.ensure_column("incidents", "report_message_id", "TEXT")
+        self.conn.execute(
+            """CREATE INDEX IF NOT EXISTS incidents_ip_rule_site_time
+               ON incidents(source_ip, rule_id, site_id, last_seen_epoch)"""
+        )
         self.ensure_column(
             "network_cases", "suggested_block_days",
             "INTEGER NOT NULL DEFAULT 0",
@@ -764,6 +796,73 @@ class StateDB:
             )
         )
 
+    def persistent_wordpress_sources(
+        self,
+        start_epoch: int,
+        end_epoch: int,
+    ) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """SELECT e.site_id, e.source_ip,
+                          COUNT(*) AS failures,
+                          COUNT(DISTINCT e.account_key) AS accounts,
+                          MAX(e.occurred_epoch) AS last_epoch
+                   FROM events e
+                   WHERE e.service = 'wordpress'
+                     AND e.event_type = 'login_failed'
+                     AND e.outcome = 'denied'
+                     AND e.source_ip IS NOT NULL
+                     AND e.occurred_epoch BETWEEN ? AND ?
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM incident_events ie
+                         JOIN incidents i
+                           ON i.incident_uuid = ie.incident_uuid
+                         WHERE ie.event_uuid = e.event_uuid
+                           AND i.rule_id IN (
+                               'wordpress-credential-spray',
+                               'wordpress-single-account-bruteforce'
+                           )
+                     )
+                   GROUP BY e.site_id, e.source_ip
+                   ORDER BY e.site_id, e.source_ip""",
+                (start_epoch, end_epoch),
+            )
+        )
+    def persistent_login_failures(
+        self,
+        source_ip: str,
+        site_id: str,
+        start_epoch: int,
+        end_epoch: int,
+    ) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """SELECT e.event_uuid, e.occurred_epoch, e.occurred_at,
+                          e.site_id, e.account_key, e.user_agent,
+                          e.request_method, e.request_path, e.request_id
+                   FROM events e
+                   WHERE e.source_ip = ?
+                     AND e.site_id = ?
+                     AND e.service = 'wordpress'
+                     AND e.event_type = 'login_failed'
+                     AND e.outcome = 'denied'
+                     AND e.occurred_epoch BETWEEN ? AND ?
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM incident_events ie
+                         JOIN incidents i
+                           ON i.incident_uuid = ie.incident_uuid
+                         WHERE ie.event_uuid = e.event_uuid
+                           AND i.rule_id IN (
+                               'wordpress-credential-spray',
+                               'wordpress-single-account-bruteforce'
+                           )
+                     )
+                   ORDER BY e.occurred_epoch ASC, e.event_uuid ASC""",
+                (source_ip, site_id, start_epoch, end_epoch),
+            )
+        )
     def ssh_failures(self, source_ip: str, start_epoch: int, end_epoch: int) -> list[sqlite3.Row]:
         return list(
             self.conn.execute(
@@ -958,25 +1057,49 @@ class StateDB:
             (source_ip, *dates),
         ).fetchone()
 
-    def recent_incident(self, source_ip: str, rule_id: str) -> sqlite3.Row | None:
+    def recent_incident(
+        self,
+        source_ip: str,
+        rule_id: str,
+        site_id: str | None = None,
+    ) -> sqlite3.Row | None:
+        if site_id is None:
+            return self.conn.execute(
+                """SELECT * FROM incidents
+                   WHERE source_ip = ?
+                     AND rule_id = ?
+                     AND site_id IS NULL
+                   ORDER BY last_seen_epoch DESC LIMIT 1""",
+                (source_ip, rule_id),
+            ).fetchone()
         return self.conn.execute(
             """SELECT * FROM incidents
-               WHERE source_ip = ? AND rule_id = ?
+               WHERE source_ip = ?
+                 AND rule_id = ?
+                 AND site_id = ?
                ORDER BY last_seen_epoch DESC LIMIT 1""",
-            (source_ip, rule_id),
+            (source_ip, rule_id, site_id),
         ).fetchone()
-
     def create_or_merge_incident(
         self,
         source_ip: str,
         rule_id: str,
         rows: Sequence[sqlite3.Row],
         merge_seconds: int,
+        *,
+        site_id: str | None = None,
+        initial_report_status: str = "pending",
+        initial_report_detail: str | None = None,
     ) -> str:
+        if not rows:
+            raise CollectorError("Cannot create an incident without evidence")
         first_epoch = min(int(row["occurred_epoch"]) for row in rows)
         last_epoch = max(int(row["occurred_epoch"]) for row in rows)
-        recent = self.recent_incident(source_ip, rule_id)
-        if recent is not None and first_epoch <= int(recent["last_seen_epoch"]) + merge_seconds:
+        recent = self.recent_incident(source_ip, rule_id, site_id)
+        if (
+            recent is not None
+            and first_epoch <= int(recent["last_seen_epoch"]) + merge_seconds
+        ):
             incident_uuid = str(recent["incident_uuid"])
         else:
             incident_uuid = str(uuid.uuid4())
@@ -985,19 +1108,25 @@ class StateDB:
             with self.conn:
                 self.conn.execute(
                     """INSERT INTO incidents
-                    (incident_uuid, source_ip, rule_id, first_seen_epoch, last_seen_epoch,
-                     first_seen, last_seen, event_count, distinct_accounts, site_count,
-                     network_cidr, decision_status, report_status, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, 'pending', 'pending', ?, ?)""",
+                    (incident_uuid, source_ip, rule_id, site_id,
+                     first_seen_epoch, last_seen_epoch, first_seen, last_seen,
+                     event_count, distinct_accounts, site_count,
+                     network_cidr, decision_status, report_status, report_detail,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?,
+                            'pending', ?, ?, ?, ?)""",
                     (
                         incident_uuid,
                         source_ip,
                         rule_id,
+                        site_id,
                         first_epoch,
                         last_epoch,
                         epoch_text(first_epoch),
                         epoch_text(last_epoch),
                         network,
+                        initial_report_status,
+                        initial_report_detail,
                         now,
                         now,
                     ),
@@ -1005,7 +1134,8 @@ class StateDB:
         with self.conn:
             for row in rows:
                 self.conn.execute(
-                    "INSERT OR IGNORE INTO incident_events (incident_uuid, event_uuid) VALUES (?, ?)",
+                    "INSERT OR IGNORE INTO incident_events "
+                    "(incident_uuid, event_uuid) VALUES (?, ?)",
                     (incident_uuid, row["event_uuid"]),
                 )
             stats = self.conn.execute(
@@ -1014,14 +1144,17 @@ class StateDB:
                           COUNT(*) AS event_count,
                           COUNT(DISTINCT e.account_key) AS distinct_accounts,
                           COUNT(DISTINCT e.site_id) AS site_count
-                   FROM incident_events ie JOIN events e ON e.event_uuid = ie.event_uuid
+                   FROM incident_events ie
+                   JOIN events e ON e.event_uuid = ie.event_uuid
                    WHERE ie.incident_uuid = ?""",
                 (incident_uuid,),
             ).fetchone()
             self.conn.execute(
                 """UPDATE incidents SET
-                    first_seen_epoch = ?, last_seen_epoch = ?, first_seen = ?, last_seen = ?,
-                    event_count = ?, distinct_accounts = ?, site_count = ?, updated_at = ?
+                    first_seen_epoch = ?, last_seen_epoch = ?,
+                    first_seen = ?, last_seen = ?,
+                    event_count = ?, distinct_accounts = ?, site_count = ?,
+                    updated_at = ?
                    WHERE incident_uuid = ?""",
                 (
                     stats["first_epoch"],
@@ -1036,7 +1169,6 @@ class StateDB:
                 ),
             )
         return incident_uuid
-
     def pending_incidents(self, retry_dry_run: bool, retry_disabled_reports: bool) -> list[sqlite3.Row]:
         decision_states = ["pending", "failed"]
         report_states = ["pending", "failed", "deferred"]
@@ -1533,7 +1665,7 @@ class StateDB:
         limit = max(1, min(100, int(limit)))
         return list(
             self.conn.execute(
-                """SELECT incident_uuid, source_ip, rule_id, first_seen, last_seen,
+                """SELECT incident_uuid, source_ip, rule_id, site_id, first_seen, last_seen,
                           event_count, distinct_accounts, site_count, network_cidr,
                           registered_cidr, asn, asn_holder, network_class,
                           decision_status, decision_detail, report_status, report_detail,
@@ -1713,6 +1845,8 @@ def normalize_event(raw: Any, site_id: str, service: str = "wordpress") -> dict[
     metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
     return {
         "event_uuid": event_uuid,
+        "site_id": site_id,
+        "service": service,
         "occurred_epoch": int(occurred.timestamp()),
         "occurred_at": utc_text(occurred),
         "recorded_at": recorded,
@@ -1852,6 +1986,7 @@ class Collector:
             except Exception as exc:  # continue processing independent batches
                 LOG.exception("Rejecting batch %s: %s", path, exc)
                 self.reject_file(claimed or path, str(exc))
+        self.evaluate_persistent_wordpress_recent()
         context_files = self.import_abuse_context_files()
         linked = self.db.correlate_network_observations(
             int(self.config["abuse_context"]["fallback_correlation_seconds"])
@@ -2173,6 +2308,69 @@ class Collector:
         error_path.write_text(clean_optional(error, 2000) or "Unknown error", encoding="utf-8")
         os.chmod(error_path, 0o640)
 
+    def evaluate_persistent_wordpress_recent(
+        self,
+        now_epoch: int | None = None,
+    ) -> int:
+        policy = self.config.get("persistent_wordpress_policy", {})
+        if not policy.get("enabled"):
+            return 0
+        end_epoch = int(
+            now_epoch if now_epoch is not None else utc_now().timestamp()
+        )
+        start_epoch = end_epoch - int(policy["window_seconds"])
+        changed_incidents: set[str] = set()
+        report_enabled = bool(policy.get("abuse_reporting_enabled"))
+        report_status = "pending" if report_enabled else "suppressed"
+        report_detail = None if report_enabled else (
+            'Persistent WordPress policy reporting disabled pending production review'
+        )
+        for source in self.db.persistent_wordpress_sources(
+            start_epoch,
+            end_epoch,
+        ):
+            source_ip = str(source["source_ip"])
+            site_id = str(source["site_id"])
+            try:
+                if self.trusted_ip(source_ip):
+                    continue
+            except ValueError:
+                continue
+            rows = self.db.persistent_login_failures(
+                source_ip,
+                site_id,
+                start_epoch,
+                end_epoch,
+            )
+            candidate = self.qualify_persistent_wordpress(rows)
+            if candidate is None:
+                continue
+            rule_id, evidence = candidate
+            prior = self.db.recent_incident(source_ip, rule_id, site_id)
+            prior_count = int(prior["event_count"]) if prior is not None else -1
+            incident_uuid = self.db.create_or_merge_incident(
+                source_ip,
+                rule_id,
+                evidence,
+                int(policy["incident_merge_seconds"]),
+                site_id=site_id,
+                initial_report_status=report_status,
+                initial_report_detail=report_detail,
+            )
+            incident = self.db.incident(incident_uuid)
+            if prior is None or int(incident["event_count"]) != prior_count:
+                changed_incidents.add(incident_uuid)
+                LOG.warning(
+                    "Persistent WordPress authentication incident %s: "
+                    "site=%s ip=%s rule=%s events=%d accounts=%d",
+                    incident_uuid,
+                    site_id,
+                    source_ip,
+                    rule_id,
+                    int(incident["event_count"]),
+                    int(incident["distinct_accounts"]),
+                )
+        return len(changed_incidents)
     def evaluate_new_events(self, events: Sequence[Mapping[str, Any]]) -> None:
         wordpress_events = [
             event for event in events
@@ -2266,6 +2464,41 @@ class Collector:
                     len({row["account_key"] for row in evidence if row["account_key"]}),
                 )
 
+    def qualify_persistent_wordpress(
+        self,
+        rows: Sequence[sqlite3.Row],
+    ) -> tuple[str, list[sqlite3.Row]] | None:
+        if not rows:
+            return None
+        policy = self.config["persistent_wordpress_policy"]
+        accounts = {
+            str(row["account_key"])
+            for row in rows
+            if row["account_key"]
+        }
+        if (
+            len(rows) >= int(policy["failure_threshold"])
+            and len(accounts) >= int(policy["distinct_accounts"])
+        ):
+            return "wordpress-persistent-credential-spray", list(rows)
+        per_account: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            if row["account_key"]:
+                per_account.setdefault(
+                    str(row["account_key"]),
+                    [],
+                ).append(row)
+        if per_account:
+            evidence = max(
+                per_account.values(),
+                key=len,
+            )
+            if len(evidence) >= int(policy["single_account_threshold"]):
+                return (
+                    "wordpress-persistent-single-account-bruteforce",
+                    evidence,
+                )
+        return None
     def find_candidates(self, rows: Sequence[sqlite3.Row]) -> list[tuple[str, list[sqlite3.Row]]]:
         policy = self.config["policy"]
         window_seconds = int(policy["window_seconds"])
@@ -3185,11 +3418,33 @@ class Collector:
             destination_port = self._report_value(row, "destination_port")
             tls_protocol = self._report_value(row, "tls_protocol")
             application_protocol = self._report_value(row, "application_protocol")
-            scheme = "https" if (
+            service = str(
+                self._report_value(row, "service") or ""
+            ).strip().lower()
+            normalized_application = str(
+                application_protocol or ""
+            ).strip().lower()
+            if (
+                service == "sshd"
+                or normalized_application.startswith("ssh")
+            ):
+                scheme = "ssh"
+            elif (
                 tls_protocol
                 or destination_port == 443
-                or str(application_protocol or "").upper().startswith("HTTPS")
-            ) else "http"
+                or normalized_application.startswith("https")
+            ):
+                scheme = "https"
+            elif (
+                service in {"nginx", "wordpress"}
+                or normalized_application.startswith("http")
+                or self._report_value(row, "request_method")
+                or self._report_value(row, "request_uri")
+                or self._report_value(row, "request_path")
+            ):
+                scheme = "http"
+            else:
+                scheme = normalized_application or None
             request_uri = (
                 self._report_value(row, "request_uri")
                 if network

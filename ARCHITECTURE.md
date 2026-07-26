@@ -23,6 +23,15 @@ Fail2ban remains the fast local enforcement layer. Argent Sentinel records its
 ban notices as audit events but does not duplicate a native SSH or Nginx report
 solely because Fail2ban also banned the address.
 
+## Slow-burn WordPress correlation
+
+Persistent WordPress correlation is site scoped. It evaluates a rolling
+24-hour window of confirmed failed logins, excludes trusted sources and event
+evidence already linked to a stronger short-window WordPress incident, and
+stores the site ID on the incident. Persistent incidents enter the normal
+CrowdSec decision workflow. Provider reporting is suppressed by default during
+the initial production review.
+
 ## Policy classes
 
 - OpenSSH: trusted source addresses are excluded; external failed

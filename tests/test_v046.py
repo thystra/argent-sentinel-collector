@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Argent Sentinel v0.5.0.1 packaging regression tests.
+# Argent Sentinel v0.5.0.2 packaging regression tests.
 
 from pathlib import Path
 import importlib.util
@@ -24,24 +24,24 @@ def load_builder():
 
 class V046Test(unittest.TestCase):
     def test_release_versions_are_consistent(self) -> None:
-        self.assertEqual("0.5.0.1", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.0.2", (ROOT / "VERSION").read_text().strip())
         for relative in (
             "src/collector.py",
             "src/agent.py",
             "src/server_api.py",
         ):
             source = (ROOT / relative).read_text()
-            self.assertIn('APP_VERSION = "0.5.0.1"', source)
+            self.assertIn('APP_VERSION = "0.5.0.2"', source)
 
         builder = (ROOT / "packaging/build_debs.py").read_text()
-        self.assertIn('if upstream != "0.5.0.1":', builder)
+        self.assertIn('if upstream != "0.5.0.2":', builder)
         self.assertIn('"test_v046.py"', builder)
 
     def test_server_package_root_contains_timer_assets(self) -> None:
         builder = load_builder()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            metadata = builder.make_server(root, "0.5.0.1-1")
+            metadata = builder.make_server(root, "0.5.0.2-1")
 
             self.assertTrue(
                 (
