@@ -39,7 +39,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.5.0.5"
+APP_VERSION = "0.5.1.0"
 SCHEMA_VERSION = 6
 
 DEFAULTS: dict[str, Any] = {
@@ -149,6 +149,19 @@ DEFAULTS: dict[str, Any] = {
         "enrich_when_actions_disabled": False,
         "user_agent": f"Argent-Sentinel/{APP_VERSION} (+self-hosted security abuse reporting)",
         "asn_classifications": {},
+    },
+    "report_batching": {
+        "enabled": False,
+        "grace_minutes": 5,
+        "max_candidate_incidents": 1000,
+        "max_incidents_per_message": 50,
+        "max_messages_per_run": 10,
+        "ban_only": {
+            "asns": [32934],
+            "cidrs": ["2a03:2880::/32"],
+            "user_agent_tokens": ["meta-externalagent"],
+            "allow_user_agent_only": False,
+        },
     },
     "abuse_reporting": {
         "enabled": False,
@@ -360,6 +373,48 @@ def validate_config(config: Mapping[str, Any]) -> None:
             raise CollectorError(
                 f"persistent_wordpress_policy.{name} must be boolean"
             )
+    batching = config["report_batching"]
+    if not isinstance(batching.get("enabled"), bool):
+        raise CollectorError(
+            "report_batching.enabled must be boolean"
+        )
+    for name in (
+        "grace_minutes",
+        "max_candidate_incidents",
+        "max_incidents_per_message",
+        "max_messages_per_run",
+    ):
+        if int(batching.get(name, 0)) < 1:
+            raise CollectorError(
+                f"report_batching.{name} must be positive"
+            )
+    ban_only = batching.get("ban_only", {})
+    for name in (
+        "asns",
+        "cidrs",
+        "user_agent_tokens",
+    ):
+        if not isinstance(ban_only.get(name, []), list):
+            raise CollectorError(
+                f"report_batching.ban_only.{name} must be a list"
+            )
+    if not isinstance(
+        ban_only.get("allow_user_agent_only", False),
+        bool,
+    ):
+        raise CollectorError(
+            "report_batching.ban_only.allow_user_agent_only "
+            "must be boolean"
+        )
+    for value in ban_only.get("asns", []):
+        if int(value) < 1:
+            raise CollectorError(
+                "report_batching.ban_only.asns values "
+                "must be positive"
+            )
+    for value in ban_only.get("cidrs", []):
+        ipaddress.ip_network(str(value), strict=False)
+
     reporting = config["abuse_reporting"]
     if reporting.get("enabled") and not valid_email_header(str(reporting.get("from", ""))):
         raise CollectorError("abuse_reporting.from must contain a valid email address")
@@ -1169,7 +1224,12 @@ class StateDB:
                 ),
             )
         return incident_uuid
-    def pending_incidents(self, retry_dry_run: bool, retry_disabled_reports: bool) -> list[sqlite3.Row]:
+    def pending_incidents(
+        self,
+        retry_dry_run: bool,
+        retry_disabled_reports: bool,
+        include_reports: bool = True,
+    ) -> list[sqlite3.Row]:
         decision_states = ["pending", "failed"]
         report_states = ["pending", "failed", "deferred"]
         if retry_dry_run:
@@ -1179,19 +1239,23 @@ class StateDB:
         decision_marks = ",".join("?" for _ in decision_states)
         report_marks = ",".join("?" for _ in report_states)
         now_epoch = int(utc_now().timestamp())
-        query = f"""SELECT * FROM incidents
-                    WHERE decision_status IN ({decision_marks})
-                       OR (
-                           report_status IN ({report_marks})
-                           AND COALESCE(next_report_after_epoch, 0) <= ?
-                       )
-                    ORDER BY created_at ASC"""
-        return list(
-            self.conn.execute(
-                query,
-                tuple(decision_states + report_states + [now_epoch]),
+        if include_reports:
+            query = f"""SELECT * FROM incidents
+                        WHERE decision_status IN ({decision_marks})
+                           OR (
+                                report_status IN ({report_marks})
+                                AND COALESCE(next_report_after_epoch, 0) <= ?
+                            )
+                        ORDER BY created_at ASC"""
+            parameters = tuple(
+                decision_states + report_states + [now_epoch]
             )
-        )
+        else:
+            query = f"""SELECT * FROM incidents
+                        WHERE decision_status IN ({decision_marks})
+                        ORDER BY created_at ASC"""
+            parameters = tuple(decision_states)
+        return list(self.conn.execute(query, parameters))
 
     def incident(self, incident_uuid: str) -> sqlite3.Row:
         row = self.conn.execute(
@@ -1273,7 +1337,10 @@ class StateDB:
         since_epoch: int,
     ) -> tuple[int, int | None, int | None]:
         row = self.conn.execute(
-            """SELECT COUNT(*) AS sent_count,
+            """SELECT COUNT(DISTINCT COALESCE(
+                           message_id,
+                           'attempt:' || attempt_id
+                       )) AS sent_count,
                       MAX(attempted_epoch) AS last_sent_epoch,
                       MIN(attempted_epoch) AS oldest_sent_epoch
                FROM report_attempts
@@ -1281,11 +1348,23 @@ class StateDB:
                  AND test_mode = ?
                  AND status = 'sent'
                  AND attempted_epoch >= ?""",
-            (recipient.strip().lower(), 1 if test_mode else 0, int(since_epoch)),
+            (
+                recipient.strip().lower(),
+                1 if test_mode else 0,
+                int(since_epoch),
+            ),
         ).fetchone()
         count = int(row["sent_count"] or 0)
-        last_epoch = int(row["last_sent_epoch"]) if row["last_sent_epoch"] is not None else None
-        oldest_epoch = int(row["oldest_sent_epoch"]) if row["oldest_sent_epoch"] is not None else None
+        last_epoch = (
+            int(row["last_sent_epoch"])
+            if row["last_sent_epoch"] is not None
+            else None
+        )
+        oldest_epoch = (
+            int(row["oldest_sent_epoch"])
+            if row["oldest_sent_epoch"] is not None
+            else None
+        )
         return count, last_epoch, oldest_epoch
 
     def incident_sites(self, incident_uuid: str) -> list[str]:
@@ -2720,6 +2799,9 @@ class Collector:
         for incident in self.db.pending_incidents(
             retry_dry_run=bool(self.config["crowdsec"].get("enabled")),
             retry_disabled_reports=reporting_enabled,
+            include_reports=not bool(
+                self.config["report_batching"].get("enabled")
+            ),
         ):
             incident_uuid = str(incident["incident_uuid"])
             decision_states = {"pending", "failed"}
@@ -2734,6 +2816,10 @@ class Collector:
                 )
 
             incident = self.db.incident(incident_uuid)
+            if self.config["report_batching"].get("enabled"):
+                # Enforcement is immediate; provider communication is handled by the hourly
+                # CIDR report-batch service. Leave report_status queued.
+                continue
             report_states = {"pending", "failed", "deferred"}
             if reporting_enabled:
                 report_states.update({"disabled", "no-contact"})
@@ -3570,48 +3656,19 @@ class Collector:
             pieces.append(f'status="{connection["http_status"]}"')
         return " ".join(pieces)
 
-    def _xarf_attachment(
-        self,
-        incident: Any,
-        enrichment: Mapping[str, Any],
-        activity: str,
-        connections: Sequence[Mapping[str, Any]],
-        sites: Sequence[str],
-        generated: dt.datetime,
-        evidence_lines: Sequence[str],
-        public_targets: Sequence[str],
-    ) -> dict[str, Any]:
-        """Build a XARF v4.2 connection/vulnerability_scan report."""
-        settings = self.config["abuse_reporting"]
-        source_ip = str(self._report_value(incident, "source_ip", "unknown"))
+    def _xarf_attachment(self, incident: Any, enrichment: Mapping[str, Any], activity: str, connections: Sequence[Mapping[str, Any]], sites: Sequence[str], generated: dt.datetime, evidence_lines: Sequence[str], public_targets: Sequence[str]) -> dict[str, Any]:
+        """Build a rule-aware XARF v4.2 connection report."""
+        settings = self.config['abuse_reporting']
+        source_ip = str(self._report_value(incident, 'source_ip', 'unknown'))
         representative = connections[0] if connections else {}
-
-        from_name, from_address = email.utils.parseaddr(
-            str(settings.get("from", ""))
-        )
-        operator_name, operator_address = email.utils.parseaddr(
-            str(settings.get("operator_contact", ""))
-        )
+        from_name, from_address = email.utils.parseaddr(str(settings.get('from', '')))
+        operator_name, operator_address = email.utils.parseaddr(str(settings.get('operator_contact', '')))
         reporter_contact = operator_address or from_address
-        reporter_domain = (
-            clean_optional(settings.get("reporter_org_domain"), 255)
-            or clean_optional(settings.get("message_id_domain"), 255)
-            or ""
-        )
-        reporter_org = (
-            clean_optional(settings.get("reporter_org"), 200)
-            or reporter_domain
-            or str(self.config.get("node", {}).get("fqdn", ""))
-            or "Server operator"
-        )
+        reporter_domain = clean_optional(settings.get('reporter_org_domain'), 255) or clean_optional(settings.get('message_id_domain'), 255) or ''
+        reporter_org = clean_optional(settings.get('reporter_org'), 200) or reporter_domain or str(self.config.get('node', {}).get('fqdn', '')) or 'Server operator'
         if not reporter_contact:
-            reporter_contact = f"postmaster@{reporter_domain}"
-
-        reporter = {
-            "org": reporter_org,
-            "contact": reporter_contact,
-            "domain": reporter_domain,
-        }
+            reporter_contact = f'postmaster@{reporter_domain}'
+        reporter = {'org': reporter_org, 'contact': reporter_contact, 'domain': reporter_domain}
 
         def valid_port(value: Any) -> int | None:
             try:
@@ -3621,532 +3678,221 @@ class Collector:
             return port if 1 <= port <= 65535 else None
 
         def evidence_item(description: str, payload_text: str, content_type: str) -> dict[str, Any]:
-            raw = payload_text.encode("utf-8")
-            return {
-                "content_type": content_type,
-                "description": description,
-                "payload": base64.b64encode(raw).decode("ascii"),
-                "hash": f"sha256:{hashlib.sha256(raw).hexdigest()}",
-                "size": len(raw),
-            }
-
-        max_lines = int(settings.get("xarf_max_evidence_lines", 20))
+            raw = payload_text.encode('utf-8')
+            return {'content_type': content_type, 'description': description, 'payload': base64.b64encode(raw).decode('ascii'), 'hash': f'sha256:{hashlib.sha256(raw).hexdigest()}', 'size': len(raw)}
+        max_lines = int(settings.get('xarf_max_evidence_lines', 20))
         normalized_lines = list(evidence_lines[:max_lines])
-
         connection_tuples: list[dict[str, Any]] = []
         for item in connections:
-            connection_tuples.append({
-                "timestamp": item.get("occurred_at"),
-                "source_ip": item.get("source_ip"),
-                "source_port": valid_port(item.get("source_port")),
-                "destination_ip": item.get("public_destination_ip"),
-                "observed_destination_ip": item.get("observed_destination_ip"),
-                "destination_port": valid_port(item.get("destination_port")),
-                "destination_fqdn": item.get("host"),
-                "transport_protocol": clean_optional(
-                    item.get("transport_protocol"), 32
-                ),
-                "application_protocol": clean_optional(
-                    item.get("application_protocol"), 64
-                ),
-                "tls_protocol": clean_optional(item.get("tls_protocol"), 64),
-                "scheme": clean_optional(item.get("scheme"), 16),
-                "request_method": clean_optional(item.get("request_method"), 16),
-                "request_uri": clean_optional(item.get("request_uri"), 2048),
-                "http_status": item.get("http_status"),
-                "probe_category": clean_optional(item.get("probe_category"), 128),
-                "user_agent": clean_optional(item.get("user_agent"), 1024),
-            })
-
-        tuple_json = json.dumps(
-            connection_tuples,
-            indent=2,
-            sort_keys=True,
-            ensure_ascii=False,
-        )
-        evidence: list[dict[str, Any]] = [
-            evidence_item(
-                "Correlated HTTP connection tuples and request evidence",
-                tuple_json,
-                "application/json",
-            )
-        ]
+            connection_tuples.append({'timestamp': item.get('occurred_at'), 'source_ip': item.get('source_ip'), 'source_port': valid_port(item.get('source_port')), 'destination_ip': item.get('public_destination_ip'), 'observed_destination_ip': item.get('observed_destination_ip'), 'destination_port': valid_port(item.get('destination_port')), 'destination_fqdn': item.get('host'), 'transport_protocol': clean_optional(item.get('transport_protocol'), 32), 'application_protocol': clean_optional(item.get('application_protocol'), 64), 'tls_protocol': clean_optional(item.get('tls_protocol'), 64), 'scheme': clean_optional(item.get('scheme'), 16), 'request_method': clean_optional(item.get('request_method'), 16), 'request_uri': clean_optional(item.get('request_uri'), 2048), 'http_status': item.get('http_status'), 'probe_category': clean_optional(item.get('probe_category'), 128), 'user_agent': clean_optional(item.get('user_agent'), 1024)})
+        tuple_json = json.dumps(connection_tuples, indent=2, sort_keys=True, ensure_ascii=False)
+        evidence: list[dict[str, Any]] = [evidence_item('Correlated HTTP connection tuples and request evidence', tuple_json, 'application/json')]
         if normalized_lines:
-            evidence.insert(
-                0,
-                evidence_item(
-                    "Sanitized normalized request evidence",
-                    "\n".join(normalized_lines),
-                    "text/plain",
-                ),
-            )
-
-        source_port = valid_port(representative.get("source_port"))
-        destination_ip = clean_optional(
-            representative.get("public_destination_ip"), 128
-        )
-        destination_fqdn = clean_optional(representative.get("host"), 255)
-
-        targeted_ports = sorted({
-            port
-            for item in connections
-            if (port := valid_port(item.get("destination_port"))) is not None
-        })
-        targeted_services = self._report_unique([
-            item.get("scheme") for item in connections
-        ])
-        protocols = self._report_unique([
-            str(item.get("transport_protocol") or "").lower()
-            for item in connections
-        ])
-        protocol = protocols[0] if len(protocols) == 1 else "mixed"
-        if protocol not in {"tcp", "udp", "icmp", "mixed"}:
-            protocol = "tcp"
-
-        request_paths = self._report_unique([
-            item.get("request_uri") for item in connections
-        ])
-        methods = self._report_unique([
-            str(item.get("request_method") or "").upper()
-            for item in connections
-        ])
-        response_codes = sorted({
-            int(item["http_status"])
-            for item in connections
-            if isinstance(item.get("http_status"), int)
-        })
-        probe_categories = self._report_unique([
-            item.get("probe_category") for item in connections
-        ])
-        user_agents = self._report_unique([
-            item.get("user_agent") for item in connections
-        ])
-
-        first_seen = clean_optional(
-            self._report_value(incident, "first_seen"), 64
-        ) or utc_text(generated)
-        last_seen = clean_optional(
-            self._report_value(incident, "last_seen"), 64
-        ) or first_seen
-        incident_uuid = str(
-            self._report_value(incident, "incident_uuid", uuid.uuid4())
-        )
-
-        report: dict[str, Any] = {
-            "xarf_version": str(settings.get("xarf_version", "4.2.0")),
-            "report_id": incident_uuid,
-            "timestamp": first_seen,
-            "reporter": reporter,
-            "sender": dict(reporter),
-            "source_identifier": source_ip,
-            "category": "connection",
-            "type": "vulnerability_scan",
-            "evidence_source": "automated_filter",
-            "scan_type": "web_vuln_scan",
-            "protocol": protocol,
-            "first_seen": first_seen,
-            "last_seen": last_seen,
-            "total_requests": max(
-                int(self._report_value(incident, "event_count", 0) or 0),
-                len(connections),
-                1,
-            ),
-            "evidence": evidence,
-            "confidence": 1.0,
-            "description": activity,
-            "tags": [
-                "scan:web_vuln_scan",
-                "source:nginx",
-                "rule:nginx_hostile_web_probing",
-            ],
-            "affected_sites": list(sites),
-            "destination_fqdns": list(
-                self._report_unique([item.get("host") for item in connections])
-            ),
-            "public_target_ips": list(public_targets),
-            "observed_destination_ips": self._report_unique([
-                item.get("observed_destination_ip") for item in connections
-            ]),
-            "registered_network": (
-                self._report_value(incident, "registered_cidr")
-                or enrichment.get("network_cidr")
-            ),
-            "network_name": enrichment.get("network_name"),
-            "asn": self._report_value(incident, "asn") or enrichment.get("asn"),
-            "asn_holder": (
-                self._report_value(incident, "asn_holder")
-                or enrichment.get("asn_holder")
-            ),
-            "probe_categories": probe_categories,
-            "probed_resources": request_paths,
-            "http_methods": methods,
-            "response_codes": response_codes,
-            "connection_tuples": connection_tuples,
-        }
+            evidence.insert(0, evidence_item('Sanitized normalized request evidence', '\n'.join(normalized_lines), 'text/plain'))
+        source_port = valid_port(representative.get('source_port'))
+        destination_ip = clean_optional(representative.get('public_destination_ip'), 128)
+        destination_fqdn = clean_optional(representative.get('host'), 255)
+        targeted_ports = sorted({port for item in connections if (port := valid_port(item.get('destination_port'))) is not None})
+        targeted_services = self._report_unique([item.get('scheme') for item in connections])
+        protocols = self._report_unique([str(item.get('transport_protocol') or '').lower() for item in connections])
+        protocol = protocols[0] if len(protocols) == 1 else 'mixed'
+        if protocol not in {'tcp', 'udp', 'icmp', 'mixed'}:
+            protocol = 'tcp'
+        request_paths = self._report_unique([item.get('request_uri') for item in connections])
+        methods = self._report_unique([str(item.get('request_method') or '').upper() for item in connections])
+        response_codes = sorted({int(item['http_status']) for item in connections if isinstance(item.get('http_status'), int)})
+        probe_categories = self._report_unique([item.get('probe_category') for item in connections])
+        user_agents = self._report_unique([item.get('user_agent') for item in connections])
+        first_seen = clean_optional(self._report_value(incident, 'first_seen'), 64) or utc_text(generated)
+        last_seen = clean_optional(self._report_value(incident, 'last_seen'), 64) or first_seen
+        incident_uuid = str(self._report_value(incident, 'incident_uuid', uuid.uuid4()))
+        rule_id = str(self._report_value(incident, 'rule_id', ''))
+        if rule_id.startswith('sshd-'):
+            report_type = 'login_attack'
+            scan_type = 'credential_attack'
+            service = 'ssh'
+            tags = ['attack:login', 'service:ssh', f'rule:{rule_id}']
+            tuple_description = 'Correlated SSH connection tuples and sanitized authentication evidence'
+            normalized_description = 'Sanitized normalized SSH authentication evidence'
+        elif rule_id.startswith('wordpress-'):
+            report_type = 'login_attack'
+            scan_type = 'credential_attack'
+            service = 'wordpress'
+            tags = ['attack:login', 'service:wordpress', f'rule:{rule_id}']
+            tuple_description = 'Correlated WordPress connection tuples and sanitized authentication evidence'
+            normalized_description = 'Sanitized normalized WordPress authentication evidence'
+        else:
+            report_type = 'vulnerability_scan'
+            scan_type = 'web_vuln_scan'
+            service = 'http'
+            tags = ['scan:web_vuln_scan', 'source:nginx', f"rule:{rule_id or 'nginx-hostile-web-probing'}"]
+            tuple_description = 'Correlated HTTP connection tuples and request evidence'
+            normalized_description = 'Sanitized normalized request evidence'
+        if evidence:
+            evidence[-1]['description'] = tuple_description
+            if normalized_lines:
+                evidence[0]['description'] = normalized_description
+        report: dict[str, Any] = {'xarf_version': str(settings.get('xarf_version', '4.2.0')), 'report_id': incident_uuid, 'timestamp': first_seen, 'reporter': reporter, 'sender': dict(reporter), 'source_identifier': source_ip, 'category': 'connection', 'type': report_type, 'evidence_source': 'automated_filter', 'scan_type': scan_type, 'service': service, 'protocol': protocol, 'first_seen': first_seen, 'last_seen': last_seen, 'total_requests': max(int(self._report_value(incident, 'event_count', 0) or 0), len(connections), 1), 'evidence': evidence, 'confidence': 1.0, 'description': activity, 'tags': tags, 'affected_sites': list(sites), 'destination_fqdns': list(self._report_unique([item.get('host') for item in connections])), 'public_target_ips': list(public_targets), 'observed_destination_ips': self._report_unique([item.get('observed_destination_ip') for item in connections]), 'registered_network': self._report_value(incident, 'registered_cidr') or enrichment.get('network_cidr'), 'network_name': enrichment.get('network_name'), 'asn': self._report_value(incident, 'asn') or enrichment.get('asn'), 'asn_holder': self._report_value(incident, 'asn_holder') or enrichment.get('asn_holder'), 'probe_categories': probe_categories, 'probed_resources': request_paths, 'http_methods': methods, 'response_codes': response_codes, 'connection_tuples': connection_tuples}
         if source_port is not None:
-            report["source_port"] = source_port
+            report['source_port'] = source_port
         if destination_ip:
-            report["destination_ip"] = destination_ip
+            report['destination_ip'] = destination_ip
         if destination_fqdn:
-            report["destination_fqdn"] = destination_fqdn
+            report['destination_fqdn'] = destination_fqdn
         if targeted_ports:
-            report["targeted_ports"] = targeted_ports
+            report['targeted_ports'] = targeted_ports
         if targeted_services:
-            report["targeted_services"] = targeted_services
+            report['targeted_services'] = targeted_services
         if user_agents:
-            report["user_agent"] = user_agents[0]
+            report['user_agent'] = user_agents[0]
         return report
 
-    def send_abuse_report(
-        self,
-        incident: sqlite3.Row,
-        enrichment: Mapping[str, Any],
-        recipients: Sequence[str],
-    ) -> tuple[str, str, str | None]:
-        settings = self.config["abuse_reporting"]
-        if not settings.get("enabled"):
-            return "disabled", "Abuse reporting disabled in configuration", None
+    def send_abuse_report(self, incident: sqlite3.Row, enrichment: Mapping[str, Any], recipients: Sequence[str]) -> tuple[str, str, str | None]:
+        settings = self.config['abuse_reporting']
+        if not settings.get('enabled'):
+            return ('disabled', 'Abuse reporting disabled in configuration', None)
         if not recipients:
-            return "no-contact", "No valid abuse-report recipient was supplied", None
-
-        test_mode = bool(settings.get("test_mode"))
-        protection, protection_detail = self.source_protection_status(
-            str(incident["source_ip"])
-        )
-        production_disposition = (
-            f"Source protection check passed: {protection_detail}"
-        )
-        if protection == "protected":
+            return ('no-contact', 'No valid abuse-report recipient was supplied', None)
+        test_mode = bool(settings.get('test_mode'))
+        protection, protection_detail = self.source_protection_status(str(incident['source_ip']))
+        production_disposition = f'Source protection check passed: {protection_detail}'
+        if protection == 'protected':
             if not test_mode:
-                return "suppressed", protection_detail, None
-            production_disposition = (
-                f"Report would normally be suppressed: {protection_detail}"
-            )
-        elif protection == "error":
+                return ('suppressed', protection_detail, None)
+            production_disposition = f'Report would normally be suppressed: {protection_detail}'
+        elif protection == 'error':
             if not test_mode:
-                return "failed", f"Abuse report withheld: {protection_detail}", None
-            production_disposition = (
-                "Report would normally be withheld because source protection "
-                f"could not be verified: {protection_detail}"
-            )
-
-        evidence = self.db.incident_evidence(str(incident["incident_uuid"]))
-        sites = self.db.incident_sites(str(incident["incident_uuid"]))
-        network_evidence = self.db.incident_network_evidence(
-            str(incident["incident_uuid"]),
-            int(self.config["network_reporting"]["max_tuple_evidence"]),
-        )
+                return ('failed', f'Abuse report withheld: {protection_detail}', None)
+            production_disposition = f'Report would normally be withheld because source protection could not be verified: {protection_detail}'
+        evidence = self.db.incident_evidence(str(incident['incident_uuid']))
+        sites = self.db.incident_sites(str(incident['incident_uuid']))
+        network_evidence = self.db.incident_network_evidence(str(incident['incident_uuid']), int(self.config['network_reporting']['max_tuple_evidence']))
         hosts = self._report_target_hosts(evidence, network_evidence)
-        observed_destinations = [
-            self._report_value(row, "destination_ip")
-            for row in [*network_evidence, *evidence]
-            if self._report_value(row, "destination_ip")
-        ]
-        resolution, public_targets = self._resolve_public_targets(
-            hosts, observed_destinations
-        )
-        connections = self._report_connections(
-            incident, evidence, network_evidence, resolution, public_targets
-        )
-
+        observed_destinations = [self._report_value(row, 'destination_ip') for row in [*network_evidence, *evidence] if self._report_value(row, 'destination_ip')]
+        resolution, public_targets = self._resolve_public_targets(hosts, observed_destinations)
+        connections = self._report_connections(incident, evidence, network_evidence, resolution, public_targets)
         message = EmailMessage()
-        message["From"] = str(settings["from"])
-        message["To"] = ", ".join(recipients)
-        if not test_mode and str(settings.get("admin_copy", "")).strip():
-            message["Bcc"] = str(settings["admin_copy"]).strip()
-
+        message['From'] = str(settings['from'])
+        message['To'] = ', '.join(recipients)
+        if not test_mode and str(settings.get('admin_copy', '')).strip():
+            message['Bcc'] = str(settings['admin_copy']).strip()
         generated = utc_now()
-        message["Date"] = email.utils.format_datetime(generated)
-        message_id = email.utils.make_msgid(
-            domain=str(settings["message_id_domain"])
-        )
-        message["Message-ID"] = message_id
-        test_label = " TEST" if test_mode else ""
-        rule_id = str(incident["rule_id"])
-        if rule_id.startswith("sshd-"):
-            activity = "Automated OpenSSH authentication attacks"
-        elif rule_id.startswith("nginx-"):
-            activity = "Automated hostile web probing and exploit scanning"
+        message['Date'] = email.utils.format_datetime(generated)
+        message_id = email.utils.make_msgid(domain=str(settings['message_id_domain']))
+        message['Message-ID'] = message_id
+        test_label = ' TEST' if test_mode else ''
+        rule_id = str(incident['rule_id'])
+        if rule_id.startswith('sshd-'):
+            activity = 'Automated OpenSSH authentication attacks'
+        elif rule_id.startswith('nginx-'):
+            activity = 'Automated hostile web probing and exploit scanning'
         else:
-            activity = "Automated WordPress credential spraying"
-        message["Subject"] = (
-            f"{settings['subject_prefix']}{test_label} {activity} "
-            f"from {incident['source_ip']}"
-        )
-
-        source_ip = str(incident["source_ip"])
+            activity = 'Automated WordPress credential spraying'
+        message['Subject'] = f"{settings['subject_prefix']}{test_label} {activity} from {incident['source_ip']}"
+        source_ip = str(incident['source_ip'])
         reverse_dns = self._source_reverse_dns(source_ip)
         metadata_rows = [self._report_metadata(row) for row in evidence]
-        statuses = self._count_values([
-            item.get("http_status") for item in connections
-            if item.get("http_status") is not None
-        ])
-        categories = self._count_values([
-            metadata.get("probe_category") for metadata in metadata_rows
-        ])
-        targets = self._count_values([
-            item.get("request_uri") for item in connections
-        ])
-        agents = self._count_values([
-            item.get("user_agent") or "-" for item in connections
-        ])
-        total_requests = max(
-            int(incident["event_count"]),
-            len(connections),
-        )
-        count_4xx = sum(
-            1 for item in connections
-            if isinstance(item.get("http_status"), int)
-            and 400 <= int(item["http_status"]) <= 499
-        )
-        count_5xx = sum(
-            1 for item in connections
-            if isinstance(item.get("http_status"), int)
-            and 500 <= int(item["http_status"]) <= 599
-        )
-
+        statuses = self._count_values([item.get('http_status') for item in connections if item.get('http_status') is not None])
+        categories = self._count_values([metadata.get('probe_category') for metadata in metadata_rows])
+        targets = self._count_values([item.get('request_uri') for item in connections])
+        agents = self._count_values([item.get('user_agent') or '-' for item in connections])
+        total_requests = max(int(incident['event_count']), len(connections))
+        count_4xx = sum((1 for item in connections if isinstance(item.get('http_status'), int) and 400 <= int(item['http_status']) <= 499))
+        count_5xx = sum((1 for item in connections if isinstance(item.get('http_status'), int) and 500 <= int(item['http_status']) <= 599))
         body: list[str] = []
         if test_mode:
-            body.extend([
-                "*** TEST MODE ***",
-                "This report was sent only to the configured recipient override.",
-                "No provider abuse contact or administrative Bcc recipient received it.",
-                f"Production disposition: {production_disposition}",
-            ])
-            enrichment_error = clean_optional(
-                enrichment.get("_test_enrichment_error"), 1000
-            )
+            body.extend(['*** TEST MODE ***', 'This report was sent only to the configured recipient override.', 'No provider abuse contact or administrative Bcc recipient received it.', f'Production disposition: {production_disposition}'])
+            enrichment_error = clean_optional(enrichment.get('_test_enrichment_error'), 1000)
             if enrichment_error:
-                body.append(f"Enrichment note: {enrichment_error}")
-            body.extend(["*** TEST MODE ***", ""])
-        body.extend(["Hello,", ""])
-
-        if rule_id.startswith("nginx-"):
-            opening = (
-                "I operate the affected web service(s) listed below. The source IP "
-                "generated automated exploit-scanning traffic against my server, "
-                "including requests for WordPress backdoor paths, plugin/theme PHP "
-                "probes, sensitive configuration files, command-style REST probes, "
-                "and/or other hostile web requests."
-            )
-        elif rule_id.startswith("sshd-"):
-            opening = (
-                "I operate the affected SSH service listed below. The source IP "
-                "generated automated authentication attacks against my server."
-            )
+                body.append(f'Enrichment note: {enrichment_error}')
+            body.extend(['*** TEST MODE ***', ''])
+        body.extend(['Hello,', ''])
+        if rule_id.startswith('nginx-'):
+            opening = 'I operate the affected web service(s) listed below. The source IP generated automated exploit-scanning traffic against my server, including requests for WordPress backdoor paths, plugin/theme PHP probes, sensitive configuration files, command-style REST probes, and/or other hostile web requests.'
+        elif rule_id.startswith('sshd-'):
+            opening = 'I operate the affected SSH service listed below. The source IP generated automated authentication attacks against my server.'
         else:
-            opening = (
-                "I operate the affected WordPress service(s) listed below. The "
-                "source IP generated automated credential attacks against my server."
-            )
-
-        attach_xarf = bool(
-            settings.get("attach_xarf", True)
-            and rule_id.startswith("nginx-")
-        )
-        body.extend([
-            opening,
-            "",
-            "Please investigate this host/customer and take appropriate action.",
-            "",
-            f"Source IP: {source_ip}",
-            f"Affected site(s): {', '.join(hosts or sites) if (hosts or sites) else 'unknown'}",
-            f"Observed timeframe (UTC): {incident['first_seen']} through {incident['last_seen']}",
-            f"Reverse DNS: {reverse_dns}",
-            "",
-            "Connection details:",
-        ])
+            opening = 'I operate the affected WordPress service(s) listed below. The source IP generated automated credential attacks against my server.'
+        attach_xarf = bool(settings.get('attach_xarf', True))
+        body.extend([opening, '', 'Please investigate this host/customer and take appropriate action.', '', f'Source IP: {source_ip}', f"Affected site(s): {(', '.join(hosts or sites) if hosts or sites else 'unknown')}", f"Observed timeframe (UTC): {incident['first_seen']} through {incident['last_seen']}", f'Reverse DNS: {reverse_dns}', '', 'Connection details:'])
         if connections:
             for count, connection in enumerate(connections, 1):
-                source = self._format_endpoint(
-                    connection.get("source_ip"), connection.get("source_port")
-                )
-                destination = self._format_endpoint(
-                    connection.get("public_destination_ip"),
-                    connection.get("destination_port"),
-                )
-                details = [f"src={source}", f"dst={destination}"]
-                observed = connection.get("observed_destination_ip")
-                if observed and observed != connection.get("public_destination_ip"):
-                    details.append(
-                        "observed_dst="
-                        + self._format_endpoint(
-                            observed, connection.get("destination_port")
-                        )
-                    )
-                if connection.get("host"):
+                source = self._format_endpoint(connection.get('source_ip'), connection.get('source_port'))
+                destination = self._format_endpoint(connection.get('public_destination_ip'), connection.get('destination_port'))
+                details = [f'src={source}', f'dst={destination}']
+                observed = connection.get('observed_destination_ip')
+                if observed and observed != connection.get('public_destination_ip'):
+                    details.append('observed_dst=' + self._format_endpoint(observed, connection.get('destination_port')))
+                if connection.get('host'):
                     details.append(f"host={connection['host']}")
-                if connection.get("scheme"):
+                if connection.get('scheme'):
                     details.append(f"scheme={connection['scheme']}")
-                if connection.get("transport_protocol"):
-                    details.append(
-                        f"transport={connection['transport_protocol']}"
-                    )
-                body.append(f"  {count:>3}  " + " ".join(details))
+                if connection.get('transport_protocol'):
+                    details.append(f"transport={connection['transport_protocol']}")
+                body.append(f'  {count:>3}  ' + ' '.join(details))
         else:
-            body.append("  (source/destination tuple unavailable)")
-
-        body.extend(["", "Public target IP resolution:"])
+            body.append('  (source/destination tuple unavailable)')
+        body.extend(['', 'Public target IP resolution:'])
         if resolution:
-            for host in sorted(key for key in resolution if not key.startswith("(")):
+            for host in sorted((key for key in resolution if not key.startswith('('))):
                 record = resolution[host]
-                body.append(f"  {host}")
-                body.append(
-                    "    A:    "
-                    + (", ".join(record.get("A", [])) or "(none)")
-                )
-                body.append(
-                    "    AAAA: "
-                    + (", ".join(record.get("AAAA", [])) or "(none)")
-                )
+                body.append(f'  {host}')
+                body.append('    A:    ' + (', '.join(record.get('A', [])) or '(none)'))
+                body.append('    AAAA: ' + (', '.join(record.get('AAAA', [])) or '(none)'))
         elif public_targets:
-            body.append("  Configured target IPs: " + ", ".join(public_targets))
+            body.append('  Configured target IPs: ' + ', '.join(public_targets))
         else:
-            body.append("  (no public target IP could be determined)")
-
-        body.extend([
-            "",
-            "Summary:",
-            f"  Total matched/related requests: {total_requests}",
-            f"  Suspicious requests:           {incident['event_count']}",
-            f"  5xx responses:                 {count_5xx}",
-            f"  4xx responses:                 {count_4xx}",
-            f"  Distinct request targets:      {len(targets)}",
-            "",
-            "Status counts:",
-        ])
-        body.extend(
-            [f"  {status}: {count}" for status, count in statuses]
-            or ["  (unavailable)"]
-        )
-        body.extend(["", "Suspicious categories:"])
-        body.extend(
-            [f"  {category}: {count}" for category, count in categories]
-            or ["  (unavailable)"]
-        )
-        body.extend(["", "Top request targets:"])
-        body.extend(
-            [f"  {count:>5}  {target}" for target, count in targets[:20]]
-            or ["  (unavailable)"]
-        )
-        body.extend(["", "User-Agent strings:"])
-        body.extend(
-            [f"  {count:>5}  {agent}" for agent, count in agents[:20]]
-            or ["  (unavailable)"]
-        )
-
-        network_name = (
-            clean_optional(enrichment.get("network_name"), 255) or "unknown"
-        )
-        asn = incident["asn"] or enrichment.get("asn") or "unknown"
-        asn_holder = (
-            clean_optional(
-                incident["asn_holder"] or enrichment.get("asn_holder"), 255
-            )
-            or "unknown"
-        )
-        body.extend([
-            "",
-            "ASN / network lookup:",
-            f"  AS:              {asn}",
-            f"  Registered CIDR: {incident['registered_cidr'] or enrichment.get('network_cidr') or 'unknown'}",
-            f"  Network name:    {network_name}",
-            f"  AS holder:       {asn_holder}",
-            "",
-            "WHOIS/RDAP abuse contact evidence:",
-            f"  Abuse email(s):  {', '.join(enrichment.get('abuse_emails', [])) or '(none found)'}",
-        ])
-        raw_enrichment = enrichment.get("raw")
+            body.append('  (no public target IP could be determined)')
+        body.extend(['', 'Summary:', f'  Total matched/related requests: {total_requests}', f"  Suspicious requests:           {incident['event_count']}", f'  5xx responses:                 {count_5xx}', f'  4xx responses:                 {count_4xx}', f'  Distinct request targets:      {len(targets)}', '', 'Status counts:'])
+        body.extend([f'  {status}: {count}' for status, count in statuses] or ['  (unavailable)'])
+        body.extend(['', 'Suspicious categories:'])
+        body.extend([f'  {category}: {count}' for category, count in categories] or ['  (unavailable)'])
+        body.extend(['', 'Top request targets:'])
+        body.extend([f'  {count:>5}  {target}' for target, count in targets[:20]] or ['  (unavailable)'])
+        body.extend(['', 'User-Agent strings:'])
+        body.extend([f'  {count:>5}  {agent}' for agent, count in agents[:20]] or ['  (unavailable)'])
+        network_name = clean_optional(enrichment.get('network_name'), 255) or 'unknown'
+        asn = incident['asn'] or enrichment.get('asn') or 'unknown'
+        asn_holder = clean_optional(incident['asn_holder'] or enrichment.get('asn_holder'), 255) or 'unknown'
+        body.extend(['', 'ASN / network lookup:', f'  AS:              {asn}', f"  Registered CIDR: {incident['registered_cidr'] or enrichment.get('network_cidr') or 'unknown'}", f'  Network name:    {network_name}', f'  AS holder:       {asn_holder}', '', 'WHOIS/RDAP abuse contact evidence:', f"  Abuse email(s):  {', '.join(enrichment.get('abuse_emails', [])) or '(none found)'}"])
+        raw_enrichment = enrichment.get('raw')
         if isinstance(raw_enrichment, Mapping):
-            rdap = raw_enrichment.get("rdap")
+            rdap = raw_enrichment.get('rdap')
             if isinstance(rdap, Mapping):
-                body.append(
-                    f"  Registry handle: {clean_optional(rdap.get('handle'), 255) or 'unknown'}"
-                )
-                remarks = rdap.get("remarks")
+                body.append(f"  Registry handle: {clean_optional(rdap.get('handle'), 255) or 'unknown'}")
+                remarks = rdap.get('remarks')
                 if isinstance(remarks, list):
                     descriptions: list[str] = []
                     for remark in remarks:
                         if not isinstance(remark, Mapping):
                             continue
-                        value = remark.get("description")
+                        value = remark.get('description')
                         if isinstance(value, list):
-                            descriptions.extend(
-                                item for item in (
-                                    clean_optional(part, 500) for part in value
-                                ) if item
-                            )
+                            descriptions.extend((item for item in (clean_optional(part, 500) for part in value) if item))
                     for description in descriptions[:5]:
-                        body.append(f"  Comment: {description}")
-
-        evidence_lines = [
-            self._normalized_evidence_line(item) for item in connections
-        ]
-        body.extend([
-            "",
-            "Sanitized request evidence (normalized from stored event data):",
-            *evidence_lines[: int(settings.get("xarf_max_evidence_lines", 20))],
-            "",
-            "No passwords, cookies, email addresses, or targeted usernames are "
-            "included in this report.",
-        ])
+                        body.append(f'  Comment: {description}')
+        evidence_lines = [self._normalized_evidence_line(item) for item in connections]
+        body.extend(['', 'Sanitized request evidence (normalized from stored event data):', *evidence_lines[:int(settings.get('xarf_max_evidence_lines', 20))], '', 'No passwords, cookies, email addresses, or targeted usernames are included in this report.'])
         if attach_xarf:
-            body.append(
-                "A machine-readable XARF JSON report is attached as xarf.json."
-            )
-        operator_contact = clean_optional(
-            settings.get("operator_contact"), 254
-        )
+            body.append('A machine-readable XARF JSON report is attached as xarf.json.')
+        operator_contact = clean_optional(settings.get('operator_contact'), 254)
         if operator_contact:
-            body.append(f"Operator contact: {operator_contact}")
-
-        message.set_content("\n".join(body) + "\n")
-
+            body.append(f'Operator contact: {operator_contact}')
+        message.set_content('\n'.join(body) + '\n')
         if attach_xarf:
-            xarf = self._xarf_attachment(
-                incident,
-                enrichment,
-                activity,
-                connections,
-                hosts or sites,
-                generated,
-                evidence_lines,
-                public_targets,
-            )
-            message.add_attachment(
-                json.dumps(
-                    xarf,
-                    indent=2,
-                    sort_keys=True,
-                    ensure_ascii=False,
-                ).encode("utf-8"),
-                maintype="application",
-                subtype="json",
-                filename="xarf.json",
-            )
-
+            xarf = self._xarf_attachment(incident, enrichment, activity, connections, hosts or sites, generated, evidence_lines, public_targets)
+            message.add_attachment(json.dumps(xarf, indent=2, sort_keys=True, ensure_ascii=False).encode('utf-8'), maintype='application', subtype='json', filename='xarf.json')
         try:
-            result = subprocess.run(
-                [str(settings["sendmail_path"]), "-t", "-oi"],
-                input=message.as_bytes(),
-                capture_output=True,
-                timeout=int(settings["send_timeout_seconds"]),
-                check=False,
-            )
+            result = subprocess.run([str(settings['sendmail_path']), '-t', '-oi'], input=message.as_bytes(), capture_output=True, timeout=int(settings['send_timeout_seconds']), check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return "failed", f"sendmail failed: {exc}", message_id
+            return ('failed', f'sendmail failed: {exc}', message_id)
         if result.returncode != 0:
-            detail = (
-                clean_optional(
-                    result.stderr.decode("utf-8", "replace"), 1000
-                )
-                or f"sendmail exited {result.returncode}"
-            )
-            return "failed", detail, message_id
+            detail = clean_optional(result.stderr.decode('utf-8', 'replace'), 1000) or f'sendmail exited {result.returncode}'
+            return ('failed', detail, message_id)
         detail = f"Report sent to {', '.join(recipients)}"
         if test_mode:
-            detail += f"; test bypass: {production_disposition}"
-        return "sent", detail, message_id
+            detail += f'; test bypass: {production_disposition}'
+        return ('sent', detail, message_id)
 
 
 def stat_is_regular(mode: int) -> bool:
@@ -4263,6 +4009,7 @@ def status_output(collector: Collector) -> dict[str, Any]:
             "fallback_correlation_seconds": collector.config["abuse_context"]["fallback_correlation_seconds"],
         },
         "network_reporting": collector.config["network_reporting"],
+        "report_batching": collector.config["report_batching"],
         "sshd_policy": collector.config["sshd_policy"],
         "web_policy": collector.config["web_policy"],
         "legacy_reporting": collector.config["legacy_reporting"],

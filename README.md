@@ -548,3 +548,34 @@ Use `--no-open-basedir-action continue` only after reviewing inherited/global
 restrictions or deliberately accepting the broader filesystem reach.
 `open_basedir` remains defense in depth rather than a complete security
 boundary.
+
+## Hourly CIDR report batching
+
+When `report_batching.enabled` is true, the minute collector continues to
+import and correlate events and submit immediate per-source enforcement
+decisions, but leaves provider reports queued. The packaged
+`argent-sentinel-report-batch.timer` sends CIDR-grouped summaries at five
+minutes past each hour.
+
+Each group is separated by CIDR, activity family, and recipient set. A
+multi-incident message carries one XARF JSON attachment per incident.
+Recipient limits count distinct outbound Message-ID values rather than incident
+rows.
+
+The default ban-only policy includes Meta AS32934 and `2a03:2880::/32`.
+`meta-externalagent` is retained as a supplemental token, but User-Agent-only
+suppression is disabled by default.
+
+See `docs/hourly-report-batching.md`.
+
+## WordPress collector inventory
+
+```bash
+argent-sentinel-wordpress-sites \
+  --expect 'example.org=example-org' \
+  --format table
+```
+
+`seen` means the database contains an imported batch or WordPress event.
+`provisioned-no-import` means the protected drop exists but no batch has yet
+arrived.

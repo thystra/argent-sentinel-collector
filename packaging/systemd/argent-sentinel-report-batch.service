@@ -1,0 +1,41 @@
+# Source: /home/alan/src/argent-sentinel-collector/packaging/systemd/argent-sentinel-report-batch.service
+# Installed: /usr/lib/systemd/system/argent-sentinel-report-batch.service
+[Unit]
+Description=Argent Sentinel hourly CIDR abuse-report batcher
+After=network-online.target crowdsec.service argent-sentinel-collector.service
+Wants=network-online.target
+ConditionPathExists=/etc/argent-sentinel/collector.json
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStartPre=/usr/bin/argent-sentinel --config /etc/argent-sentinel/collector.json migrate
+ExecStart=/usr/sbin/argent-sentinel-report-batch --config /etc/argent-sentinel/collector.json
+RuntimeDirectory=argent-sentinel
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+AmbientCapabilities=
+ReadWritePaths=/var/lib/argent-sentinel
+ReadWritePaths=/run/argent-sentinel
+ReadWritePaths=-/var/spool/postfix
+ReadWritePaths=-/var/lib/postfix
+
+# EOF: /home/alan/src/argent-sentinel-collector/packaging/systemd/argent-sentinel-report-batch.service

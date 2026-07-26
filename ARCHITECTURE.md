@@ -146,3 +146,23 @@ only security and review telemetry. AWStats consumes normalized streams built
 from each site's own current and historical files; Sentinel consumes the
 filtered JSONL and application/plugin events. Shared hostless access records
 are never guessed into a virtual host.
+
+## Enforcement and provider-report separation
+
+The central collector has two independent cadences:
+
+- **Minute path:** import, validate, correlate, and submit per-source CrowdSec
+  decisions.
+- **Hourly path:** select report-eligible incidents after a grace period,
+  enrich them, apply ban-only communication policy, group by CIDR/activity/
+  recipient set, and deliver provider summaries.
+
+This preserves fast containment while reducing outbound-message
+amplification. The same collector process lock serializes both paths.
+
+Provider-rate accounting uses distinct message IDs. One hourly email can be
+linked to many incident rows without consuming the recipient limit once per
+incident.
+
+XARF remains incident-scoped: a grouped email contains multiple independent
+XARF documents rather than a nonstandard multi-source XARF object.

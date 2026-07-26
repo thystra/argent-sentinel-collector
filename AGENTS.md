@@ -122,3 +122,25 @@ After implementation or deployment decisions, review and update:
 - `TODO.md` for dated current state, completed tasks, unresolved defects, and
   exact next steps
 - this file for stable host/path/environment conventions
+
+## Cross-project profile
+
+- Read `AGENTS-PROFILE.md` alongside this project handoff.
+- `AGENTS-PROFILE.md` contains reusable communication, command, generated-file,
+  release, and general host-layout preferences.
+- Keep project-specific versions, live paths, security policy, and deployment
+  state in this `AGENTS.md`.
+- New generated files should include their full source path near the top and a
+  commented EOF marker when the format supports comments.
+
+## Current reporting checkpoint
+
+- Version 0.5.1.0 separates immediate per-IP enforcement from hourly provider
+  email.
+- Provider messages are grouped by CIDR, activity family, and recipient set.
+- The Meta/Facebook ban-only policy suppresses provider email for configured
+  ASN/CIDR matches while preserving local decisions.
+- User-Agent-only suppression remains disabled by default because the header
+  is attacker controlled.
+- `argent-sentinel-wordpress-sites` distinguishes collector-visible,
+  provisioned-no-import, and missing WordPress sites.

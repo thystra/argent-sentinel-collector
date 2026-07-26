@@ -14,6 +14,19 @@
     "processing_dir": "/var/lib/argent-sentinel/collector/abuse-context-processing",
     "rejected_dir": "/var/lib/argent-sentinel/collector/abuse-context-rejected"
   },
+  "report_batching": {
+    "enabled": false,
+    "grace_minutes": 5,
+    "max_candidate_incidents": 1000,
+    "max_incidents_per_message": 50,
+    "max_messages_per_run": 10,
+    "ban_only": {
+      "asns": [32934],
+      "cidrs": ["2a03:2880::/32"],
+      "user_agent_tokens": ["meta-externalagent"],
+      "allow_user_agent_only": false
+    }
+  },
   "abuse_reporting": {
     "admin_copy": "",
     "attach_xarf": true,

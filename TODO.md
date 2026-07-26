@@ -238,3 +238,27 @@ Required work:
 - [ ] Verify XARF generation, MIME filename/content type, and attachment bytes.
 - [ ] Verify retry/resend paths retain the XARF attachment.
 - [ ] Add regression coverage proving SSH reports include `xarf.json`.
+
+## Implemented in 0.5.1.0 — hourly CIDR reporting checkpoint
+
+- [x] Preserve immediate per-IP CrowdSec enforcement.
+- [x] Queue provider communication when hourly batching is enabled.
+- [x] Add the hourly report-batch service and timer.
+- [x] Group reports by CIDR, activity family, and recipient set.
+- [x] Split large groups by a configurable maximum incidents per message.
+- [x] Count distinct outbound Message-ID values for recipient limits.
+- [x] Add Meta/Facebook ban-only suppression using ASN and CIDR ownership.
+- [x] Keep User-Agent-only suppression disabled by default.
+- [x] Attach XARF to OpenSSH and WordPress authentication reports.
+- [x] Use XARF `login_attack` for authentication incidents.
+- [x] Add a WordPress collector inventory command.
+- [x] Add `AGENTS-PROFILE.md` and reference it from project agent notes.
+- [x] Clean `dist/deb` before release packaging.
+- [ ] Validate a controlled hourly batch in redirected test mode.
+- [ ] Validate production batching after the test message structure is
+  reviewed.
+- [ ] Confirm all four WordPress sites reach `seen`; generate one controlled
+  failed login for any site that remains `provisioned-no-import`.
+- [ ] Add dashboard visibility for queued hourly groups and ban-only
+  suppressions.
+- [ ] Evaluate provider-specific minimum batch sizes and longer cooldowns.

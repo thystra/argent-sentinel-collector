@@ -1,0 +1,16 @@
+# Source: /home/alan/src/argent-sentinel-collector/packaging/systemd/argent-sentinel-report-batch.timer
+# Installed: /usr/lib/systemd/system/argent-sentinel-report-batch.timer
+[Unit]
+Description=Send Argent Sentinel CIDR abuse-report batches hourly
+
+[Timer]
+OnCalendar=*-*-* *:05:00
+AccuracySec=30s
+RandomizedDelaySec=30s
+Persistent=true
+Unit=argent-sentinel-report-batch.service
+
+[Install]
+WantedBy=timers.target
+
+# EOF: /home/alan/src/argent-sentinel-collector/packaging/systemd/argent-sentinel-report-batch.timer

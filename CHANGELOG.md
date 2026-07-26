@@ -1,3 +1,10 @@
+## 0.5.1.0
+
+- Separate immediate enforcement from hourly CIDR provider reporting.
+- Add Meta/Facebook ban-only report suppression.
+- Add SSH and WordPress XARF login-attack attachments.
+- Add WordPress collector inventory and reusable agent profile documentation.
+
 ## 0.5.0.5
 
 - Treat unrestricted per-site PHP-FPM pools as a security-hardening failure.

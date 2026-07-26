@@ -1,0 +1,6 @@
+#!/bin/sh
+# Source: /home/alan/src/argent-sentinel-collector/packaging/bin/argent-sentinel-report-batch
+# Installed: /usr/sbin/argent-sentinel-report-batch
+set -eu
+exec /usr/bin/python3 /usr/lib/argent-sentinel/report_batcher.py "$@"
+# EOF: /home/alan/src/argent-sentinel-collector/packaging/bin/argent-sentinel-report-batch

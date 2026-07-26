@@ -159,11 +159,13 @@ PY
         if [ -d /run/systemd/system ] &&
            command -v systemctl >/dev/null 2>&1; then
             systemctl daemon-reload || true
-            systemctl enable                 argent-sentinel-collector.timer                 argent-sentinel-api.service                 argent-sentinel-nginx-logrotate.timer                 argent-sentinel-fail2ban-export.timer                 argent-sentinel-review-digest.timer                 argent-sentinel-nginx-429-export.timer                 argent-sentinel-dashboard-snapshot.timer                 argent-sentinel-awstats.timer                 argent-sentinel-dashboard.service                 >/dev/null 2>&1 || true
+            systemctl enable                 argent-sentinel-collector.timer                 argent-sentinel-report-batch.timer                 argent-sentinel-api.service                 argent-sentinel-nginx-logrotate.timer                 argent-sentinel-fail2ban-export.timer                 argent-sentinel-review-digest.timer                 argent-sentinel-nginx-429-export.timer                 argent-sentinel-dashboard-snapshot.timer                 argent-sentinel-awstats.timer                 argent-sentinel-dashboard.service                 >/dev/null 2>&1 || true
             systemctl restart argent-sentinel-api.service                 >/dev/null 2>&1 ||
                 systemctl start argent-sentinel-api.service                     >/dev/null 2>&1 || true
             systemctl restart argent-sentinel-collector.timer                 >/dev/null 2>&1 ||
                 systemctl start argent-sentinel-collector.timer                     >/dev/null 2>&1 || true
+            systemctl restart argent-sentinel-report-batch.timer                 >/dev/null 2>&1 ||
+                systemctl start argent-sentinel-report-batch.timer                     >/dev/null 2>&1 || true
             systemctl restart argent-sentinel-nginx-logrotate.timer                 >/dev/null 2>&1 ||
                 systemctl start argent-sentinel-nginx-logrotate.timer                     >/dev/null 2>&1 || true
             systemctl restart argent-sentinel-fail2ban-export.timer                 >/dev/null 2>&1 ||

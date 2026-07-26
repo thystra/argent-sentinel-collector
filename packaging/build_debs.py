@@ -99,6 +99,8 @@ def add_doc(root: Path, package: str, source: Path, name: str | None = None) -> 
 def make_common(root: Path, version: str) -> dict[str, str]:
     for source, target in (
         ("collector.py", "collector.py"),
+        ("report_batcher.py", "report_batcher.py"),
+        ("wordpress_sites.py", "wordpress_sites.py"),
         ("agent.py", "agent.py"),
         ("server_api.py", "server_api.py"),
         ("fail2ban_export.py", "fail2ban_export.py"),
@@ -111,6 +113,14 @@ def make_common(root: Path, version: str) -> dict[str, str]:
         install_file(ROOT / "src" / source, root / "usr/lib/argent-sentinel" / target, 0o755)
     for source, target in (
         ("argent-sentinel", "usr/bin/argent-sentinel"),
+        (
+            "argent-sentinel-report-batch",
+            "usr/sbin/argent-sentinel-report-batch",
+        ),
+        (
+            "argent-sentinel-wordpress-sites",
+            "usr/sbin/argent-sentinel-wordpress-sites",
+        ),
         ("argent-sentinel-agent", "usr/bin/argent-sentinel-agent"),
         ("argent-sentinel-api", "usr/sbin/argent-sentinel-api"),
         ("argent-sentinel-fail2ban-export", "usr/sbin/argent-sentinel-fail2ban-export"),
@@ -128,7 +138,7 @@ def make_common(root: Path, version: str) -> dict[str, str]:
     for name in ("collector.json.example", "agent.json.example", "server-api.json.example", "node.json.example", "nginx-sentinel.conf.example", "dashboard.json.example", "dashboard-snapshot.json.example", "traffic-sites.json.example", "nginx-site-access-log-format.conf.example", "nginx-crawler-map.conf.example", "nginx-crawler-enforcement.conf.example", "nginx-sentinel-dashboard.conf.example"):
         install_file(ROOT / "config" / name, root / "usr/share/argent-sentinel" / name)
     install_file(ROOT / "VERSION", root / "usr/share/argent-sentinel/VERSION")
-    docs = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "ARCHITECTURE.md", ROOT / "TODO.md", ROOT / "AGENTS.md", ROOT / "docs-abuse-context.md", ROOT / "docs/debian-packaging.md"]
+    docs = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "ARCHITECTURE.md", ROOT / "TODO.md", ROOT / "AGENTS.md", ROOT / "AGENTS-PROFILE.md", ROOT / "docs-abuse-context.md", ROOT / "docs/debian-packaging.md"]
     docs.extend(sorted((ROOT / "docs").glob("*.md")))
     for source in docs:
         add_doc(root, "argent-sentinel-common", source)
@@ -165,6 +175,8 @@ def make_server(root: Path, version: str) -> dict[str, str]:
     for unit in (
         "argent-sentinel-collector.service",
         "argent-sentinel-collector.timer",
+        "argent-sentinel-report-batch.service",
+        "argent-sentinel-report-batch.timer",
         "argent-sentinel-api.service",
         "argent-sentinel-nginx-logrotate.service",
         "argent-sentinel-nginx-logrotate.timer",
@@ -289,8 +301,8 @@ def main() -> int:
     if shutil.which("dpkg-deb") is None:
         parser.error("dpkg-deb is required (install dpkg-dev/build-essential)")
     upstream = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    if upstream != "0.5.0.5":
-        parser.error(f"VERSION must be 0.5.0.5, found {upstream!r}")
+    if upstream != "0.5.1.0":
+        parser.error(f"VERSION must be 0.5.1.0, found {upstream!r}")
     if not args.revision.isdigit() or int(args.revision) < 1:
         parser.error("--revision must be a positive integer")
     full_version = f"{upstream}-{args.revision}"
@@ -298,9 +310,9 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not args.skip_tests:
-        for source in ("collector.py", "agent.py", "server_api.py", "fail2ban_export.py", "review_digest.py", "nginx_429_export.py", "dashboard.py", "dashboard_snapshot.py", "awstats_manager.py"):
+        for source in ("collector.py", "report_batcher.py", "wordpress_sites.py", "agent.py", "server_api.py", "fail2ban_export.py", "review_digest.py", "nginx_429_export.py", "dashboard.py", "dashboard_snapshot.py", "awstats_manager.py"):
             run(sys.executable, "-m", "py_compile", str(ROOT / "src" / source))
-        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_v045.py", "test_v046.py", "test_v047.py", "test_v048.py", "test_v049.py", "test_v0410.py", "test_v050.py", "test_v0501.py", "test_v0503.py", "test_v0504.py", "test_v0505.py", "test_packaging.py"):
+        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_v045.py", "test_v046.py", "test_v047.py", "test_v048.py", "test_v049.py", "test_v0410.py", "test_v050.py", "test_v0501.py", "test_v0503.py", "test_v0504.py", "test_v0505.py", "test_v0510.py", "test_packaging.py"):
             run(sys.executable, str(ROOT / "tests" / test), cwd=ROOT)
         for script in sorted((ROOT / "scripts").glob("*.sh")):
             run("bash", "-n", str(script))
