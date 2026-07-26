@@ -1,3 +1,8 @@
+## 0.5.0.3
+
+- Add PHP-FPM open_basedir inspection and optional safe append to WordPress onboarding.
+- Correct WordPress site-parent permissions and verify WP-CLI setup discovery.
+
 # Changelog
 ## 0.5.0.1 — 2026-07-25
 - Deliver the dashboard configuration through a systemd read-only credential,

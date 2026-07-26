@@ -181,3 +181,22 @@ Required work:
 - [ ] Review production incident volume before enabling persistent-policy
   provider reporting.
 - [ ] Complete the existing Allaboard Acres WordPress onboarding TODO.
+
+## WordPress onboarding follow-up — 2026-07-26
+
+- [x] Make the helper inspect matching PHP-FPM pools.
+- [x] Warn when pool-level open_basedir excludes the protected drop.
+- [x] Offer an interactive append, plus explicit append/warn/ignore modes.
+- [x] Back up the pool file and validate PHP-FPM after an automatic edit.
+- [x] Add an optional matching PHP-FPM restart.
+- [x] Create the site parent as root:sentinel 0750 and incoming as 2770.
+- [x] Inspect WP-CLI command discovery before invoking setup.
+- [ ] Validate the revised helper through a clean second-site onboarding.
+
+## Abuse-report attachment follow-up — 2026-07-26
+
+- [ ] Fix OpenSSH/sshd abuse-report emails that omit the expected `xarf.json`
+  attachment.
+- [ ] Verify XARF generation, MIME filename/content type, and attachment bytes.
+- [ ] Verify retry/resend paths retain the XARF attachment.
+- [ ] Add regression coverage proving SSH reports include `xarf.json`.

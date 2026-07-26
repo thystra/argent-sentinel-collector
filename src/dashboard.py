@@ -17,7 +17,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Mapping
 
-APP_VERSION = "0.5.0.2"
+APP_VERSION = "0.5.0.3"
 LOG = logging.getLogger("argent-sentinel-dashboard")
 
 DEFAULTS: dict[str, Any] = {

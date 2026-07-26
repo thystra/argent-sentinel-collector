@@ -521,3 +521,12 @@ Version 0.5.0.2 provides a read-only dashboard intended for
 `sentinel.argentwolf.org`, a root-generated sanitized snapshot, static
 per-site AWStats reports, and an operator-controlled Nginx crawler policy.
 See `ARCHITECTURE.md` and `docs/dashboard.md`.
+
+## PHP-FPM open_basedir onboarding
+
+`argent-sentinel-onboard-wordpress` inspects PHP-FPM pools matching the supplied
+PHP user. When an active pool-level `open_basedir` excludes the protected event
+drop, the helper prompts to append it. Automation can choose
+`--open-basedir-mode append`, `warn`, or `ignore`. Automatic edits receive a
+timestamped backup and PHP-FPM configuration validation. Use
+`--restart-php-fpm` to restart a modified pool immediately.

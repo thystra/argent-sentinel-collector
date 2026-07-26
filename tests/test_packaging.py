@@ -13,9 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PackagingTest(unittest.TestCase):
     def test_release_version_is_consistent(self) -> None:
-        self.assertEqual("0.5.0.2", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.0.3", (ROOT / "VERSION").read_text().strip())
         source = (ROOT / "src/collector.py").read_text()
-        self.assertIn('APP_VERSION = "0.5.0.2"', source)
+        self.assertIn('APP_VERSION = "0.5.0.3"', source)
         self.assertIn("Argent-Sentinel/{APP_VERSION}", source)
 
     def test_packaging_assets_exist(self) -> None:
