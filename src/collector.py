@@ -39,7 +39,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.5.0.3"
+APP_VERSION = "0.5.0.4"
 SCHEMA_VERSION = 6
 
 DEFAULTS: dict[str, Any] = {

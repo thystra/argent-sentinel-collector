@@ -200,3 +200,22 @@ Required work:
 - [ ] Verify XARF generation, MIME filename/content type, and attachment bytes.
 - [ ] Verify retry/resend paths retain the XARF attachment.
 - [ ] Add regression coverage proving SSH reports include `xarf.json`.
+
+## WordPress onboarding completion — 2026-07-26
+
+- [x] Restart matching PHP-FPM services automatically after successful onboarding.
+- [x] Delay restart until spool, open_basedir, plugin setup, status, and test export succeed.
+- [x] Verify the restarted service is active.
+- [x] Deduplicate restarts when several pools for the same user use one PHP version.
+- [x] Retain `--restart-php-fpm` as an explicit compatibility option.
+- [x] Add `--no-restart-php-fpm` for controlled maintenance windows.
+- [x] Add service-discovery, restart, help, and missing-pool regression tests.
+- [ ] Validate the automatic restart through a clean third-site web-UI onboarding.
+
+## Abuse-report attachment follow-up — 2026-07-26
+
+- [ ] Fix OpenSSH/sshd abuse-report emails that omit the expected `xarf.json`
+  attachment.
+- [ ] Verify XARF generation, MIME filename/content type, and attachment bytes.
+- [ ] Verify retry/resend paths retain the XARF attachment.
+- [ ] Add regression coverage proving SSH reports include `xarf.json`.

@@ -12,7 +12,7 @@ Usage:
     [--plugin-zip ZIP] \
     [--wp-cli PATH] \
     [--open-basedir-mode prompt|append|warn|ignore] \
-    [--restart-php-fpm]
+    [--restart-php-fpm | --no-restart-php-fpm]
 
 Creates the protected WordPress event drop, checks the matching PHP-FPM pool,
 optionally appends the drop path to a pool-level open_basedir setting, and
@@ -23,6 +23,11 @@ open_basedir modes:
   append  Append automatically after backup and PHP-FPM validation.
   warn    Print the exact required change without modifying configuration.
   ignore  Skip open_basedir inspection.
+
+PHP-FPM restart behavior:
+  The matching PHP-FPM service is restarted automatically at the end so
+  new sentinel group membership and any pool edit take effect. Use
+  --no-restart-php-fpm only when a controlled restart will follow.
 EOF
 }
 
@@ -178,6 +183,46 @@ php_version_for_pool() {
     awk -F/ '{for (i=1; i<=NF; i++) if ($i=="php") {print $(i+1); exit}}' <<< "$pool"
 }
 
+php_fpm_services_for_user() {
+    local php_user=$1
+    local php_root=${2:-/etc/php}
+    local pool version service
+    local -A seen=()
+
+    while IFS= read -r pool; do
+        [[ -n $pool ]] || continue
+        version=$(php_version_for_pool "$pool")
+        [[ -n $version ]] || continue
+        service="php${version}-fpm"
+        if [[ -z ${seen[$service]+x} ]]; then
+            seen[$service]=1
+            printf '%s\n' "$service"
+        fi
+    done < <(find_php_fpm_pools "$php_user" "$php_root")
+}
+
+restart_php_fpm_for_user() {
+    local php_user=$1
+    local php_root=${ARGENT_SENTINEL_PHP_ETC_ROOT:-/etc/php}
+    local service
+    local -a services=()
+
+    mapfile -t services < <(php_fpm_services_for_user "$php_user" "$php_root")
+    if (( ${#services[@]} == 0 )); then
+        cat >&2 <<EOF
+WARNING: No matching PHP-FPM service could be identified for user '$php_user'.
+Restart the applicable pool manually so sentinel group membership takes effect.
+EOF
+        return 0
+    fi
+
+    for service in "${services[@]}"; do
+        systemctl restart "$service"
+        systemctl is-active --quiet "$service"
+        printf 'Restarted and verified %s.\n' "$service"
+    done
+}
+
 validate_php_fpm_version() {
     local version=$1
     local binary="php-fpm${version}"
@@ -192,12 +237,10 @@ inspect_open_basedir() {
     local php_user=$1
     local drop=$2
     local mode=$3
-    local restart=$4
     local php_root=${ARGENT_SENTINEL_PHP_ETC_ROOT:-/etc/php}
     local backup_root=${ARGENT_SENTINEL_BACKUP_ROOT:-/var/backups/argent-sentinel/php-fpm}
     local pool value answer backup version service
     local -a pools=()
-    local -a restart_services=()
 
     [[ $mode != ignore ]] || return 0
     mapfile -t pools < <(find_php_fpm_pools "$php_user" "$php_root")
@@ -269,8 +312,6 @@ EOF
                 return 1
             fi
             printf 'Updated PHP-FPM pool; backup: %s\n' "$backup"
-            service="php${version}-fpm"
-            restart_services+=("$service")
         else
             cat >&2 <<EOF
 No change made. Append ':$drop' to the active open_basedir value in:
@@ -280,25 +321,12 @@ EOF
         fi
     done
 
-    if (( ${#restart_services[@]} > 0 )); then
-        mapfile -t restart_services < <(
-            printf '%s\n' "${restart_services[@]}" | awk '!seen[$0]++'
-        )
-        for service in "${restart_services[@]}"; do
-            if [[ $restart == 1 ]]; then
-                systemctl restart "$service"
-                printf 'Restarted %s.\n' "$service"
-            else
-                printf 'Restart required: systemctl restart %s\n' "$service"
-            fi
-        done
-    fi
 }
 
 main() {
     local wordpress_path="" site_id="" node_id="" php_user=""
     local plugin_zip="" wp_cli="wp" open_basedir_mode="prompt"
-    local restart_php_fpm=0
+    local restart_php_fpm=1
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -341,6 +369,10 @@ main() {
                 restart_php_fpm=1
                 shift
                 ;;
+            --no-restart-php-fpm)
+                restart_php_fpm=0
+                shift
+                ;;
             -h|--help)
                 usage
                 exit 0
@@ -372,7 +404,7 @@ main() {
     install -d -o root -g sentinel -m 0750 "$site_dir"
     install -d -o root -g sentinel -m 2770 "$drop"
 
-    inspect_open_basedir "$php_user" "$drop" "$open_basedir_mode" "$restart_php_fpm"
+    inspect_open_basedir "$php_user" "$drop" "$open_basedir_mode"
 
     local -a wp=(sudo -u "$php_user" -- "$wp_cli" --path="$wordpress_path")
     if [[ -n $plugin_zip ]]; then
@@ -397,12 +429,16 @@ main() {
     "${wp[@]}" argent-sentinel status --format=json
     "${wp[@]}" argent-sentinel export --format=json
 
+    if [[ $restart_php_fpm == 1 ]]; then
+        restart_php_fpm_for_user "$php_user"
+    else
+        echo "PHP-FPM restart skipped by --no-restart-php-fpm."
+        echo "Restart the matching service before relying on the WordPress web UI."
+    fi
+
     echo
     printf 'Provisioned %s on node %s.\n' "$site_id" "$node_id"
     printf 'Drop directory: %s\n' "$drop"
-    if [[ $restart_php_fpm == 0 ]]; then
-        echo "Restart the matching PHP-FPM pool so its new group membership and configuration take effect."
-    fi
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

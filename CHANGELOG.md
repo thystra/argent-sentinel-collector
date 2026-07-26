@@ -1,3 +1,9 @@
+## 0.5.0.4
+
+- Restart matching PHP-FPM services automatically after successful WordPress onboarding.
+- Add an explicit `--no-restart-php-fpm` maintenance-window opt-out.
+- Deduplicate and verify restarts across matching pools.
+
 ## 0.5.0.3
 
 - Add PHP-FPM open_basedir inspection and optional safe append to WordPress onboarding.

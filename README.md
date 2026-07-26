@@ -530,3 +530,11 @@ drop, the helper prompts to append it. Automation can choose
 `--open-basedir-mode append`, `warn`, or `ignore`. Automatic edits receive a
 timestamped backup and PHP-FPM configuration validation. Use
 `--restart-php-fpm` to restart a modified pool immediately.
+
+## Automatic PHP-FPM restart after onboarding
+
+`argent-sentinel-onboard-wordpress` restarts every matching PHP-FPM service
+once, at the end of successful onboarding. This activates the PHP user's new
+`sentinel` supplementary group and any accepted pool-level `open_basedir`
+change before the operator returns to the WordPress web UI. Use
+`--no-restart-php-fpm` only when a controlled restart will immediately follow.
