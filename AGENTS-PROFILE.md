@@ -68,6 +68,7 @@ other secrets here.
   and central security/reporting workloads.
 - Production changes should be explicit, reversible, and followed by service,
   log, and path verification.
+- root login via ssh is not permitted; login commands should use alan@ instead
 
 ### `heimdall`
 
