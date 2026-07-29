@@ -94,3 +94,15 @@ spools, reports and PKI material. Purging removes package-created configuration
 where safe, but deliberately does not delete the private Sentinel CA or node
 private keys. Remove those manually only after confirming they are no longer
 needed.
+
+## 0.5.1.1-2 upgrade serialization
+
+The server package stops the collector timer before configuration and database
+migration. It allows an active oneshot collector up to 30 seconds to finish,
+then stops the service if necessary. Successful package configuration restores
+the packaged timer through the normal enable/restart block.
+
+The configuration migrator adds only missing `report_batching.state_file` and
+`report_batching.grouping` keys to preserved collector configurations. Existing
+operator values remain authoritative. The preserved dashboard-snapshot
+configuration receives only wholly absent top-level reporting paths.

@@ -131,11 +131,37 @@ PY
             echo "Preserved existing $NGINX_LOGROTATE_CONFIG"
         fi
 
+        # Prevent the minute collector from acquiring the shared lock while
+        # package configuration migrates the preserved config and database.
+        if [ -d /run/systemd/system ] &&
+           command -v systemctl >/dev/null 2>&1; then
+            systemctl stop argent-sentinel-collector.timer \
+                >/dev/null 2>&1 || true
+            WAIT_SECONDS=0
+            while systemctl is-active --quiet \
+                      argent-sentinel-collector.service &&
+                  [ "$WAIT_SECONDS" -lt 30 ]; do
+                sleep 1
+                WAIT_SECONDS=$((WAIT_SECONDS + 1))
+            done
+            if systemctl is-active --quiet \
+                 argent-sentinel-collector.service; then
+                echo "Collector still active after 30 seconds; stopping it for package migration."
+                systemctl stop argent-sentinel-collector.service \
+                    >/dev/null 2>&1 || true
+            fi
+        fi
+
         install -d -o root -g root -m 0700 "$BACKUP"
         /usr/sbin/argent-sentinel-config-migrate \
             --config "$CONFIG" \
             --example "$EXAMPLE" \
             --backup "$BACKUP/collector.json.pre-v047"
+        /usr/sbin/argent-sentinel-config-migrate \
+            --config "$SNAP_CONFIG" \
+            --example "$SNAP_EXAMPLE" \
+            --backup "$BACKUP/dashboard-snapshot.json.pre-v0511" \
+            --top-level-only
 
         archive_legacy_unit argent-sentinel-collector.service
         archive_legacy_unit argent-sentinel-collector.timer

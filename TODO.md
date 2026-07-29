@@ -257,3 +257,4 @@ Required work:
   follow-up sections.
 - [ ] Review several days of production persistent-WordPress incident volume
   before enabling provider email for that rule.
+- [x] Repair the 0.5.1.1 Debian upgrade race and preserved-config migration in package revision `0.5.1.1-2`.

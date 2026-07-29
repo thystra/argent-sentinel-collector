@@ -44,6 +44,54 @@ def merge_missing(target: dict[str, Any], source: Mapping[str, Any]) -> bool:
     return changed
 
 
+
+def migrate_report_batching_defaults(
+    config: dict[str, Any],
+    example: Mapping[str, Any],
+) -> bool:
+    """Add only absent 0.5.1.1 reporting keys to preserved config."""
+
+    batching = config.get("report_batching")
+    example_batching = example.get("report_batching")
+    if not isinstance(batching, dict) or not isinstance(
+        example_batching, Mapping
+    ):
+        raise MigrationError("report_batching must be an object")
+
+    changed = False
+    if "state_file" not in batching:
+        state_file = example_batching.get("state_file")
+        if not isinstance(state_file, str) or not state_file.strip():
+            raise MigrationError(
+                "example report_batching.state_file must be a non-empty string"
+            )
+        batching["state_file"] = state_file
+        changed = True
+
+    example_grouping = example_batching.get("grouping")
+    if not isinstance(example_grouping, Mapping):
+        raise MigrationError(
+            "example report_batching.grouping must be an object"
+        )
+
+    grouping = batching.get("grouping")
+    if grouping is None:
+        grouping = {}
+        batching["grouping"] = grouping
+        changed = True
+    if not isinstance(grouping, dict):
+        raise MigrationError("report_batching.grouping must be an object")
+
+    for key in (
+        "minimum_ipv4_prefix_length",
+        "minimum_ipv6_prefix_length",
+    ):
+        if key not in grouping:
+            grouping[key] = example_grouping[key]
+            changed = True
+
+    return changed
+
 def migrate_known_defaults(config: dict[str, Any]) -> bool:
     changed = False
     sshd = config.get("sshd_policy")
@@ -111,10 +159,32 @@ def atomic_write(path: Path, value: Mapping[str, Any], mode: int) -> None:
     os.replace(temporary, path)
 
 
-def migrate(config_path: Path, example_path: Path, backup: Path | None) -> dict[str, Any]:
+def migrate(
+    config_path: Path,
+    example_path: Path,
+    backup: Path | None,
+    *,
+    top_level_only: bool = False,
+) -> dict[str, Any]:
     config = load(config_path)
     example = load(example_path)
     changed = merge_missing(config, example)
+    if top_level_only:
+        if backup is not None:
+            backup.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(backup.parent, 0o700)
+            shutil.copy2(config_path, backup)
+            os.chmod(backup, 0o600)
+        if changed:
+            mode = stat.S_IMODE(config_path.stat().st_mode) or 0o600
+            atomic_write(config_path, config, mode)
+        return {
+            "status": "updated" if changed else "unchanged",
+            "config": str(config_path),
+            "backup": str(backup) if backup else None,
+        }
+
+    changed = migrate_report_batching_defaults(config, example) or changed
 
     incoming = config.get("incoming_globs")
     required = example.get("incoming_globs")
@@ -156,12 +226,18 @@ def main() -> int:
     parser.add_argument("--config", required=True)
     parser.add_argument("--example", required=True)
     parser.add_argument("--backup")
+    parser.add_argument(
+        "--top-level-only",
+        action="store_true",
+        help="merge only wholly absent top-level keys",
+    )
     args = parser.parse_args()
     try:
         result = migrate(
             Path(args.config),
             Path(args.example),
             Path(args.backup) if args.backup else None,
+            top_level_only=args.top_level_only,
         )
     except (OSError, json.JSONDecodeError, MigrationError) as exc:
         print(json.dumps({"status": "error", "error": str(exc)}))

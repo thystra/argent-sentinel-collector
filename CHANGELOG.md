@@ -1,5 +1,15 @@
 ## 0.5.1.1
 
+### Debian revision 0.5.1.1-2
+
+- Quiesce the minute collector before package-time configuration and database
+  migration, preventing shared-lock collisions at minute boundaries.
+- Migrate the new bounded-grouping and report-state keys into preserved live
+  collector configurations without replacing operator policy.
+- Add missing dashboard-snapshot top-level reporting paths to preserved
+  configurations.
+
+
 - Bound provider-report groups independently from broad registered allocations.
 - Preserve registered ownership scope while adding explicit batch CIDR context.
 - Publish hourly run state, queued groups, outbound messages, and ban-only

@@ -313,7 +313,7 @@ def main() -> int:
     if not args.skip_tests:
         for source in ("collector.py", "report_batcher.py", "reporting_view.py", "wordpress_sites.py", "agent.py", "server_api.py", "fail2ban_export.py", "review_digest.py", "nginx_429_export.py", "dashboard.py", "dashboard_snapshot.py", "awstats_manager.py"):
             run(sys.executable, "-m", "py_compile", str(ROOT / "src" / source))
-        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_v045.py", "test_v046.py", "test_v047.py", "test_v048.py", "test_v049.py", "test_v0410.py", "test_v050.py", "test_v0501.py", "test_v0503.py", "test_v0504.py", "test_v0505.py", "test_v0510.py", "test_v0511.py", "test_packaging.py"):
+        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_v045.py", "test_v046.py", "test_v047.py", "test_v048.py", "test_v049.py", "test_v0410.py", "test_v050.py", "test_v0501.py", "test_v0503.py", "test_v0504.py", "test_v0505.py", "test_v0510.py", "test_v0511.py", "test_v0511_revision2.py", "test_packaging.py"):
             run(sys.executable, str(ROOT / "tests" / test), cwd=ROOT)
         for script in sorted((ROOT / "scripts").glob("*.sh")):
             run("bash", "-n", str(script))
