@@ -16,8 +16,8 @@ import awstats_manager  # noqa: E402
 
 class V0501Test(unittest.TestCase):
     def test_release_version(self) -> None:
-        self.assertEqual("0.5.1.1", (ROOT / "VERSION").read_text().strip())
-        self.assertEqual("0.5.1.1", awstats_manager.APP_VERSION)
+        self.assertEqual("0.5.2.0", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.2.0", awstats_manager.APP_VERSION)
 
     def test_standard_and_extended_logs_normalize(self) -> None:
         base = (

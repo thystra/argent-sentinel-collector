@@ -22,8 +22,9 @@ from reporting_view import (
     build_reporting_snapshot,
     load_optional_json,
 )
+from review_queue import build_review_snapshot
 
-APP_VERSION = "0.5.1.1"
+APP_VERSION = "0.5.2.0"
 UTC = dt.timezone.utc
 
 DEFAULTS: dict[str, Any] = {
@@ -37,6 +38,12 @@ DEFAULTS: dict[str, Any] = {
     "max_rows": 50,
     "traffic_sites_config": "/etc/argent-sentinel/traffic-sites.json",
     "awstats_root": "/var/lib/argent-sentinel/dashboard/awstats",
+    "review": {
+        "deferred_overdue_minutes": 60,
+        "deferred_attempt_threshold": 3,
+        "note_max_chars": 2000,
+        "recent_attempts_per_item": 10,
+    },
 }
 
 
@@ -275,6 +282,14 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
             max_rows,
             now_epoch=end_epoch,
         )
+        reviews = build_review_snapshot(
+            connection,
+            config.get("review", {}),
+            max_rows,
+            now_epoch=end_epoch,
+        )
+        overview["open_reviews"] = reviews["open_count"]
+        overview["reports_failed"] = reviews["open_count"]
         fail2ban = rows(
             connection,
             """
@@ -421,6 +436,7 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
         "recent_incidents": recent_incidents,
         "report_attempts": report_attempts,
         "reporting": reporting,
+        "reviews": reviews,
         "fail2ban": fail2ban,
         "network_cases": network_cases,
         "repeated_sources": repeated_sources,

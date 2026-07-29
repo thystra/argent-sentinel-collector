@@ -39,8 +39,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.5.1.1"
-SCHEMA_VERSION = 6
+APP_VERSION = "0.5.2.0"
+SCHEMA_VERSION = 7
 
 DEFAULTS: dict[str, Any] = {
     "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
@@ -667,6 +667,26 @@ class StateDB:
                 ON report_attempts(recipient, test_mode, status, attempted_epoch);
             CREATE INDEX IF NOT EXISTS report_attempts_incident_time
                 ON report_attempts(incident_uuid, attempted_epoch);
+            CREATE TABLE IF NOT EXISTS review_actions (
+                action_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_uuid TEXT NOT NULL UNIQUE,
+                incident_uuid TEXT NOT NULL REFERENCES incidents(incident_uuid),
+                action TEXT NOT NULL,
+                operator TEXT NOT NULL,
+                note TEXT,
+                previous_report_status TEXT,
+                new_report_status TEXT,
+                previous_review_status TEXT,
+                new_review_status TEXT,
+                disposition TEXT,
+                requested_at TEXT NOT NULL,
+                applied_epoch INTEGER NOT NULL,
+                applied_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS review_actions_incident_time
+                ON review_actions(incident_uuid, applied_epoch DESC);
+            CREATE INDEX IF NOT EXISTS review_actions_operator_time
+                ON review_actions(operator, applied_epoch DESC);
             CREATE TABLE IF NOT EXISTS observation_files (
                 file_uuid TEXT PRIMARY KEY,
                 sha256 TEXT NOT NULL UNIQUE,
@@ -761,6 +781,11 @@ class StateDB:
         self.ensure_column("incidents", "report_sent_epoch", "INTEGER")
         self.ensure_column("incidents", "report_recipient", "TEXT")
         self.ensure_column("incidents", "report_message_id", "TEXT")
+        self.ensure_column("incidents", "review_status", "TEXT NOT NULL DEFAULT 'open'")
+        self.ensure_column("incidents", "review_disposition", "TEXT")
+        self.ensure_column("incidents", "review_note", "TEXT")
+        self.ensure_column("incidents", "review_updated_epoch", "INTEGER")
+        self.ensure_column("incidents", "review_updated_at", "TEXT")
         self.conn.execute(
             """CREATE INDEX IF NOT EXISTS incidents_ip_rule_site_time
                ON incidents(source_ip, rule_id, site_id, last_seen_epoch)"""
@@ -4168,6 +4193,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 collector.close()
         return 0
     except CollectorError as exc:
+        if (
+            args.command == "run"
+            and str(exc) == "Another collector process is already running"
+        ):
+            LOG.info("Collector cycle skipped because the shared lock is busy")
+            print(json.dumps({
+                "status": "skipped",
+                "reason": "lock-busy",
+                "version": APP_VERSION,
+            }, sort_keys=True))
+            return 0
         LOG.error("%s", exc)
         return 1
 

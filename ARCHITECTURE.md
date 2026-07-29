@@ -181,3 +181,12 @@ collector state directory. The root-owned dashboard snapshot process combines
 that document, read-only SQLite queries, and non-secret reporting settings into
 the published snapshot. The dashboard service itself continues to read only the
 sanitized snapshot.
+
+## Audited review-action boundary in 0.5.2.0
+
+The dashboard remains unable to write SQLite directly. It validates an
+operator action and writes an immutable JSON request to a group-writable spool.
+A root-owned path-activated processor reacquires the collector lock, rejects
+stale forms, applies one transaction, appends the `review_actions` audit row,
+and publishes a new sanitized snapshot. Direct enforcement controls remain out
+of scope for the dashboard.

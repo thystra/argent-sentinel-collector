@@ -1,0 +1,31 @@
+[Unit]
+Description=Process audited Argent Sentinel dashboard review actions
+After=argent-sentinel-collector.service
+ConditionPathExists=/etc/argent-sentinel/review-processor.json
+ConditionPathExists=/var/lib/argent-sentinel/collector/state.sqlite3
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/sbin/argent-sentinel-review-processor --config /etc/argent-sentinel/review-processor.json validate-config
+ExecStart=/usr/sbin/argent-sentinel-review-processor --config /etc/argent-sentinel/review-processor.json process
+ExecStartPost=/bin/systemctl start --no-block argent-sentinel-dashboard-snapshot.service
+User=root
+Group=root
+UMask=0077
+RuntimeDirectory=argent-sentinel
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/var/lib/argent-sentinel/collector
+ReadWritePaths=/var/spool/argent-sentinel/review
+ReadWritePaths=/run/argent-sentinel

@@ -10,6 +10,8 @@ DASH_CONFIG=/etc/argent-sentinel/dashboard.json
 DASH_EXAMPLE=/usr/share/argent-sentinel/dashboard.json.example
 SNAP_CONFIG=/etc/argent-sentinel/dashboard-snapshot.json
 SNAP_EXAMPLE=/usr/share/argent-sentinel/dashboard-snapshot.json.example
+REVIEW_CONFIG=/etc/argent-sentinel/review-processor.json
+REVIEW_EXAMPLE=/usr/share/argent-sentinel/review-processor.json.example
 TRAFFIC_CONFIG=/etc/argent-sentinel/traffic-sites.json
 TRAFFIC_EXAMPLE=/usr/share/argent-sentinel/traffic-sites.json.example
 NGINX_LOGROTATE_CONFIG=/etc/logrotate.d/argent-sentinel-nginx
@@ -67,6 +69,9 @@ case "$1" in
         install -d -o root -g root -m 0750 /var/lib/argent-sentinel/drop/fail2ban /var/lib/argent-sentinel/drop/fail2ban/incoming
         install -d -o root -g root -m 0750 /var/lib/argent-sentinel/drop/nginx /var/lib/argent-sentinel/drop/nginx/rate-review /var/lib/argent-sentinel/drop/nginx/rate-review/incoming /var/lib/argent-sentinel/collector/nginx-429-cursors
         install -d -o root -g www-data -m 0750 /var/lib/argent-sentinel/dashboard /var/lib/argent-sentinel/dashboard/awstats
+        install -d -o root -g argent-sentinel-dashboard -m 0710             /var/spool/argent-sentinel/review
+        install -d -o root -g argent-sentinel-dashboard -m 0730             /var/spool/argent-sentinel/review/incoming
+        install -d -o root -g root -m 0700             /var/spool/argent-sentinel/review/processed             /var/spool/argent-sentinel/review/failed
         install -d -o root -g root -m 0755 /etc/awstats
         install -d -o root -g root -m 0750             /etc/argent-sentinel             /etc/argent-sentinel/nodes.d
         install -d -o root -g root -m 0700             /etc/argent-sentinel/pki             /var/backups/argent-sentinel
@@ -115,6 +120,12 @@ PY
         else
             chown root:root "$SNAP_CONFIG"
             chmod 0640 "$SNAP_CONFIG"
+        fi
+        if [ ! -e "$REVIEW_CONFIG" ]; then
+            install -o root -g root -m 0640 "$REVIEW_EXAMPLE" "$REVIEW_CONFIG"
+        else
+            chown root:root "$REVIEW_CONFIG"
+            chmod 0640 "$REVIEW_CONFIG"
         fi
         if [ ! -e "$TRAFFIC_CONFIG" ]; then
             install -o root -g root -m 0640 "$TRAFFIC_EXAMPLE" "$TRAFFIC_CONFIG"
@@ -176,6 +187,7 @@ PY
         /usr/bin/argent-sentinel --config "$CONFIG" validate-config
         /usr/sbin/argent-sentinel-api --config "$API_CONFIG" validate-config
         /usr/sbin/argent-sentinel-dashboard --config "$DASH_CONFIG" validate-config
+        /usr/sbin/argent-sentinel-review-processor --config "$REVIEW_CONFIG" validate-config
 
         install -d -o root -g root -m 0700 "$BACKUP"
         cp -a "$CONFIG" "$BACKUP/collector.json"
@@ -185,7 +197,7 @@ PY
         if [ -d /run/systemd/system ] &&
            command -v systemctl >/dev/null 2>&1; then
             systemctl daemon-reload || true
-            systemctl enable                 argent-sentinel-collector.timer                 argent-sentinel-report-batch.timer                 argent-sentinel-api.service                 argent-sentinel-nginx-logrotate.timer                 argent-sentinel-fail2ban-export.timer                 argent-sentinel-review-digest.timer                 argent-sentinel-nginx-429-export.timer                 argent-sentinel-dashboard-snapshot.timer                 argent-sentinel-awstats.timer                 argent-sentinel-dashboard.service                 >/dev/null 2>&1 || true
+            systemctl enable                 argent-sentinel-collector.timer                 argent-sentinel-report-batch.timer                 argent-sentinel-api.service                 argent-sentinel-nginx-logrotate.timer                 argent-sentinel-fail2ban-export.timer                 argent-sentinel-review-digest.timer                 argent-sentinel-nginx-429-export.timer                 argent-sentinel-dashboard-snapshot.timer                 argent-sentinel-awstats.timer                 argent-sentinel-dashboard.service                 argent-sentinel-review-processor.path                 >/dev/null 2>&1 || true
             systemctl restart argent-sentinel-api.service                 >/dev/null 2>&1 ||
                 systemctl start argent-sentinel-api.service                     >/dev/null 2>&1 || true
             systemctl restart argent-sentinel-collector.timer                 >/dev/null 2>&1 ||
@@ -206,6 +218,8 @@ PY
                 systemctl start argent-sentinel-awstats.timer                     >/dev/null 2>&1 || true
             systemctl restart argent-sentinel-dashboard.service                 >/dev/null 2>&1 ||
                 systemctl start argent-sentinel-dashboard.service                     >/dev/null 2>&1 || true
+            systemctl restart argent-sentinel-review-processor.path                 >/dev/null 2>&1 ||
+                systemctl start argent-sentinel-review-processor.path                     >/dev/null 2>&1 || true
         fi
         ;;
 esac

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Source: /home/alan/src/argent-sentinel-collector/packaging/bin/argent-sentinel-review-processor
+exec /usr/bin/python3 /usr/lib/argent-sentinel/review_processor.py "$@"
+# EOF: /home/alan/src/argent-sentinel-collector/packaging/bin/argent-sentinel-review-processor

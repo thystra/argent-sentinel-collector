@@ -1,6 +1,9 @@
 {
   "awstats_url_prefix": "/awstats/",
   "max_json_bytes": 20971520,
+  "max_post_bytes": 32768,
+  "review_note_max_chars": 2000,
+  "review_request_dir": "/var/spool/argent-sentinel/review/incoming",
   "snapshot_file": "/var/lib/argent-sentinel/dashboard/snapshot.json",
   "socket_group": "www-data",
   "socket_mode": "0660",

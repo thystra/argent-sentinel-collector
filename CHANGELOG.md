@@ -1,3 +1,13 @@
+## 0.5.2.0
+
+- Replace the report-attempt review count with a deduplicated incident queue.
+- Add audited acknowledge, retry, suppression, permanent-no-contact, and note
+  actions through a write-only spool and root-owned processor.
+- Render dashboard timestamps in the server-local timezone while preserving UTC
+  in machine-readable values and HTML metadata.
+- Treat overlapping scheduled collector cycles as successful skipped runs.
+- Remove generated Python bytecode and Debian build output from source control.
+
 ## 0.5.1.1
 
 ### Debian revision 0.5.1.1-2

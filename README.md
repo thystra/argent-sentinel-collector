@@ -3,7 +3,7 @@
 Argent Sentinel is a self-hosted security event collector, correlation engine,
 CrowdSec decision bridge, and guarded abuse-reporting system.
 
-Version 0.5.1.1 combines authenticated event transport, central policy,
+Version 0.5.2.0 combines authenticated event transport, central policy,
 a read-only dashboard, and per-site traffic analytics:
 
 ```text
@@ -587,3 +587,10 @@ scope. Broad registered allocations remain available for recipient selection,
 while hourly messages are bounded to `/24` for IPv4 and `/48` for IPv6 by
 default. The Reports dashboard shows both prefixes, current queues, the latest
 hourly run, recent message IDs, and ban-only suppressions.
+
+## Audited dashboard reviews
+
+Version 0.5.2.0 publishes one open review item per incident rather than counting
+individual report attempts. Authenticated dashboard actions are written to a
+restricted spool and applied by a root-owned systemd path processor under the
+collector lock. See `docs/dashboard-review-workflow.md`.

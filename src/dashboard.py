@@ -4,6 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import datetime as dt
+import hashlib
+import hmac
+import secrets
+import tempfile
+import uuid
 import grp
 from html import escape
 import json
@@ -16,8 +23,9 @@ import socketserver
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Mapping
+from review_queue import REVIEW_ACTIONS
 
-APP_VERSION = "0.5.1.1"
+APP_VERSION = "0.5.2.0"
 LOG = logging.getLogger("argent-sentinel-dashboard")
 
 DEFAULTS: dict[str, Any] = {
@@ -28,6 +36,9 @@ DEFAULTS: dict[str, Any] = {
     "title": "Argent Sentinel",
     "awstats_url_prefix": "/awstats/",
     "max_json_bytes": 20 * 1024 * 1024,
+    "max_post_bytes": 32768,
+    "review_note_max_chars": 2000,
+    "review_request_dir": "/var/spool/argent-sentinel/review/incoming",
 }
 
 
@@ -85,6 +96,89 @@ def load_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
 def h(value: Any) -> str:
     return escape(str(value if value is not None else "-"), quote=True)
 
+LOCAL_TIME_FORMAT = "%Y-%m-%d %H:%M:%S %Z"
+_CSRF_SECRET = secrets.token_bytes(32)
+
+
+def when(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "-"
+    try:
+        normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        parsed = dt.datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        local = parsed.astimezone()
+    except ValueError:
+        return h(raw)
+    display = local.strftime(LOCAL_TIME_FORMAT)
+    return (
+        f'<time datetime="{h(raw)}" title="UTC: {h(raw)}">'
+        f'{h(display)}</time>'
+    )
+
+
+def csrf_token(request_uuid: str, incident_uuid: str, updated_at: str) -> str:
+    payload = f"{request_uuid}\n{incident_uuid}\n{updated_at}".encode("utf-8")
+    return hmac.new(_CSRF_SECRET, payload, hashlib.sha256).hexdigest()
+
+
+def csrf_valid(
+    supplied: str,
+    request_uuid: str,
+    incident_uuid: str,
+    updated_at: str,
+) -> bool:
+    expected = csrf_token(request_uuid, incident_uuid, updated_at)
+    return hmac.compare_digest(str(supplied or ""), expected)
+
+
+def operator_from_headers(headers: Mapping[str, Any]) -> str:
+    # The existing Nginx Basic Auth credentials are the canonical operator
+    # identity. Do not trust arbitrary client-supplied identity headers.
+    authorization = str(headers.get("Authorization", ""))
+    if authorization.lower().startswith("basic "):
+        try:
+            decoded = base64.b64decode(
+                authorization.split(None, 1)[1],
+                validate=True,
+            ).decode("utf-8")
+            username = decoded.split(":", 1)[0].strip()
+            if username:
+                return username[:128]
+        except (ValueError, UnicodeDecodeError):
+            pass
+    return ""
+
+
+def queue_review_request(
+    directory: Path,
+    request: Mapping[str, Any],
+) -> Path:
+    directory.mkdir(parents=True, exist_ok=True, mode=0o730)
+    payload = (json.dumps(request, indent=2, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+    with tempfile.NamedTemporaryFile(
+        prefix=".review-",
+        suffix=".json",
+        dir=directory,
+        delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    destination = directory / f"{request['request_uuid']}.json"
+    try:
+        os.chmod(temporary, 0o640)
+        os.replace(temporary, destination)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return destination
+
 
 def number(value: Any) -> str:
     try:
@@ -104,7 +198,7 @@ def page(
     snapshot: Mapping[str, Any],
     config: Mapping[str, Any],
 ) -> bytes:
-    generated = h(snapshot.get("generated_at", "unavailable"))
+    generated = when(snapshot.get("generated_at", "unavailable"))
     app_title = h(config.get("title", "Argent Sentinel"))
     html = f"""<!doctype html>
 <html lang="en">
@@ -129,6 +223,8 @@ nav a{{color:var(--accent);text-decoration:none;font-weight:650}}
 main{{padding:24px 28px;max-width:1600px;margin:auto}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin:16px 0 28px}}
 .card{{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}}
+.card-link{{display:block;color:inherit;text-decoration:none}}
+.card-link:hover{{border-color:var(--accent)}}
 .card .value{{font-size:30px;font-weight:750;margin-top:7px}}
 .card .label{{color:var(--muted)}}
 section{{margin:28px 0}}
@@ -145,24 +241,31 @@ tr:last-child td{{border-bottom:0}}
 .status-review,.status-escalation-review,.status-suppressed{{color:var(--warn)}}
 code{{white-space:pre-wrap;overflow-wrap:anywhere;color:#cde7ff}}
 a{{color:var(--accent)}}
+.review-form{{display:grid;gap:7px;min-width:240px}}
+details{{min-width:340px}} details summary{{cursor:pointer;color:var(--accent)}}
+dl{{display:grid;grid-template-columns:max-content 1fr;gap:4px 10px}} dt{{color:var(--muted)}} dd{{margin:0}}
+select,input,button{{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:7px}}
+button{{cursor:pointer;background:#203a5e}}
+button:hover{{border-color:var(--accent)}}
 footer{{padding:20px 28px;color:var(--muted);border-top:1px solid var(--line)}}
 </style>
 </head>
 <body>
 <header>
 <h1>{app_title}</h1>
-<small>Read-only operator dashboard · snapshot {generated}</small>
+<small>Operator dashboard · snapshot {generated}</small>
 <nav>
 <a href="/">Overview</a>
 <a href="/traffic">Traffic</a>
 <a href="/incidents">Incidents</a>
 <a href="/networks">Networks</a>
 <a href="/reports">Reports</a>
+<a href="/reviews">Reviews</a>
 <a href="/api/snapshot">JSON</a>
 </nav>
 </header>
 <main>{body}</main>
-<footer>Argent Sentinel {h(APP_VERSION)} · enforcement changes are not available from this interface.</footer>
+<footer>Argent Sentinel {h(APP_VERSION)} · review actions are audited; direct enforcement changes are not available from this interface.</footer>
 </body>
 </html>"""
     return html.encode("utf-8")
@@ -188,25 +291,31 @@ def table(headers: list[str], rows_data: list[list[Any]]) -> str:
 def render_overview(snapshot: Mapping[str, Any]) -> str:
     overview = snapshot.get("overview", {})
     cards = [
-        ("Events", overview.get("events")),
-        ("Observations", overview.get("observations")),
-        ("HTTP 429", overview.get("http_429")),
-        ("Incidents", overview.get("incidents")),
-        ("Reports sent", overview.get("reports_sent")),
-        ("Reports needing review", overview.get("reports_failed")),
+        ("Events", overview.get("events"), None),
+        ("Observations", overview.get("observations"), None),
+        ("HTTP 429", overview.get("http_429"), None),
+        ("Incidents", overview.get("incidents"), "/incidents"),
+        ("Reports sent", overview.get("reports_sent"), "/reports"),
+        ("Open review items", overview.get("open_reviews"), "/reviews"),
     ]
     card_html = "".join(
-        f'<div class="card"><div class="label">{h(label)}</div>'
-        f'<div class="value">{number(value)}</div></div>'
-        for label, value in cards
+        (
+            f'<a class="card card-link" href="{h(url)}">'
+            f'<div class="label">{h(label)}</div>'
+            f'<div class="value">{number(value)}</div></a>'
+            if url
+            else f'<div class="card"><div class="label">{h(label)}</div>'
+            f'<div class="value">{number(value)}</div></div>'
+        )
+        for label, value, url in cards
     )
     fail_rows = [
         [
             h(row.get("jail")),
             number(row.get("count")),
             number(row.get("source_ips")),
-            h(row.get("first_seen")),
-            h(row.get("last_seen")),
+            when(row.get("first_seen")),
+            when(row.get("last_seen")),
         ]
         for row in snapshot.get("fail2ban", [])
     ]
@@ -216,12 +325,11 @@ def render_overview(snapshot: Mapping[str, Any]) -> str:
             f'<span class="{status_class(row.get("report_status"))}">{h(row.get("report_status"))}</span>',
             number(row.get("count")),
             number(row.get("events")),
-            h(row.get("first_seen")),
-            h(row.get("last_seen")),
+            when(row.get("first_seen")),
+            when(row.get("last_seen")),
         ]
         for row in snapshot.get("incident_rules", [])
     ]
-    awstats = snapshot.get("awstats_sites", [])
     awstats_rows = [
         [
             h(row.get("domain")),
@@ -231,9 +339,9 @@ def render_overview(snapshot: Mapping[str, Any]) -> str:
                 if row.get("report_available")
                 else '<span class="muted">Not generated</span>'
             ),
-            h(row.get("report_mtime")),
+            when(row.get("report_mtime")),
         ]
-        for row in awstats
+        for row in snapshot.get("awstats_sites", [])
     ]
     return (
         f'<div class="grid">{card_html}</div>'
@@ -249,7 +357,6 @@ def render_overview(snapshot: Mapping[str, Any]) -> str:
         + "</section>"
     )
 
-
 def render_traffic(snapshot: Mapping[str, Any]) -> str:
     source_rows = [
         [
@@ -258,8 +365,8 @@ def render_traffic(snapshot: Mapping[str, Any]) -> str:
             number(row.get("source_types")),
             number(row.get("hosts")),
             h(row.get("seen_in")),
-            h(row.get("first_seen")),
-            h(row.get("last_seen")),
+            when(row.get("first_seen")),
+            when(row.get("last_seen")),
         ]
         for row in snapshot.get("repeated_sources", [])
     ]
@@ -271,7 +378,7 @@ def render_traffic(snapshot: Mapping[str, Any]) -> str:
             number(row.get("hosts")),
             number(row.get("limited")),
             number(row.get("denied")),
-            h(row.get("last_seen")),
+            when(row.get("last_seen")),
         ]
         for row in snapshot.get("top_user_agents", [])
     ]
@@ -320,7 +427,7 @@ def render_incidents(snapshot: Mapping[str, Any]) -> str:
             number(row.get("site_count")),
             f"<code>{h(row.get('registered_cidr') or row.get('network_cidr'))}</code>",
             h(row.get("asn_holder")),
-            h(row.get("last_seen")),
+            when(row.get("last_seen")),
             h(row.get("report_detail")),
         ]
         for row in snapshot.get("recent_incidents", [])
@@ -347,7 +454,7 @@ def render_networks(snapshot: Mapping[str, Any]) -> str:
             ),
             h(row.get("asns")),
             h(row.get("network_classes")),
-            h(row.get("last_seen")),
+            when(row.get("last_seen")),
             h(row.get("operator_note")),
         ]
         for row in snapshot.get("network_cases", [])
@@ -379,15 +486,15 @@ def render_reports(snapshot: Mapping[str, Any]) -> str:
     )
     run_rows = [
         [
-            h(last_run.get("generated_at")),
-            h(reporting.get("next_scheduled_at")),
+            when(last_run.get("generated_at")),
+            when(reporting.get("next_scheduled_at")),
             h(last_run.get("status")),
             number(last_run.get("groups")),
             number(last_run.get("messages_sent")),
             number(last_run.get("messages_failed")),
             number(preparation.get("eligible")),
             number(preparation.get("suppressed")),
-            h(reporting.get("production_cutoff")),
+            when(reporting.get("production_cutoff")),
         ]
     ]
     queue_rows = [
@@ -404,7 +511,7 @@ def render_reports(snapshot: Mapping[str, Any]) -> str:
             number(row.get("incident_count")),
             number(row.get("event_count")),
             h(", ".join(row.get("source_ips", [])) or "-"),
-            h(row.get("last_seen")),
+            when(row.get("last_seen")),
         ]
         for row in reporting.get("queued_groups", [])
     ]
@@ -415,14 +522,14 @@ def render_reports(snapshot: Mapping[str, Any]) -> str:
             f"<code>{h(row.get('registered_cidr') or row.get('network_cidr'))}</code>",
             h(row.get("asn")),
             h(row.get("asn_holder")),
-            h(row.get("last_seen")),
+            when(row.get("last_seen")),
             h(row.get("report_detail")),
         ]
         for row in reporting.get("ban_only_suppressions", [])
     ]
     message_rows = [
         [
-            h(row.get("attempted_at")),
+            when(row.get("attempted_at")),
             h(row.get("recipients")),
             number(row.get("incident_count")),
             h(row.get("statuses")),
@@ -433,7 +540,7 @@ def render_reports(snapshot: Mapping[str, Any]) -> str:
     ]
     report_rows = [
         [
-            h(row.get("attempted_at")),
+            when(row.get("attempted_at")),
             h(row.get("recipient")),
             f'<span class="{status_class(row.get("status"))}">{h(row.get("status"))}</span>',
             h(row.get("test_mode")),
@@ -509,6 +616,123 @@ def render_reports(snapshot: Mapping[str, Any]) -> str:
         + "</section>"
     )
 
+def render_reviews(
+    snapshot: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> str:
+    reviews = snapshot.get("reviews", {})
+    items = reviews.get("items", [])
+    note_max = int(config.get("review_note_max_chars", 2000))
+    cards = (
+        '<div class="grid">'
+        f'<div class="card"><div class="label">Open items</div>'
+        f'<div class="value">{number(reviews.get("open_count"))}</div></div>'
+        f'<div class="card"><div class="label">Displayed</div>'
+        f'<div class="value">{number(len(items))}</div></div>'
+        '</div>'
+    )
+    item_rows: list[list[Any]] = []
+    for row in items:
+        request_uuid = str(uuid.uuid4())
+        incident_uuid = str(row.get("incident_uuid") or "")
+        updated_at = str(row.get("updated_at") or "")
+        token = csrf_token(request_uuid, incident_uuid, updated_at)
+        attempt_rows = [
+            [
+                when(attempt.get("attempted_at")),
+                h(attempt.get("recipient")),
+                f'<span class="{status_class(attempt.get("status"))}">'
+                f'{h(attempt.get("status"))}</span>',
+                h(attempt.get("detail")),
+                f'<code>{h(attempt.get("message_id"))}</code>',
+            ]
+            for attempt in row.get("recent_attempts", [])
+        ]
+        evidence = (
+            '<details><summary>Incident and attempt history</summary>'
+            '<dl>'
+            f'<dt>Incident UUID</dt><dd><code>{h(incident_uuid)}</code></dd>'
+            f'<dt>Network</dt><dd>{h(row.get("network_cidr"))}</dd>'
+            f'<dt>Registered allocation</dt><dd>{h(row.get("registered_cidr"))}</dd>'
+            f'<dt>ASN</dt><dd>{h(row.get("asn"))} {h(row.get("asn_holder"))}</dd>'
+            f'<dt>Decision</dt><dd>{h(row.get("decision_status"))}: '
+            f'{h(row.get("decision_detail"))}</dd>'
+            f'<dt>Operator notes</dt><dd>{h(row.get("review_note"))}</dd>'
+            '</dl>'
+            + table(
+                ["Attempted", "Recipient", "Status", "Detail", "Message ID"],
+                attempt_rows,
+            )
+            + '</details>'
+        )
+        controls = f"""
+<form class="review-form" method="post" action="/reviews/action">
+<input type="hidden" name="request_uuid" value="{h(request_uuid)}">
+<input type="hidden" name="incident_uuid" value="{h(incident_uuid)}">
+<input type="hidden" name="expected_updated_at" value="{h(updated_at)}">
+<input type="hidden" name="csrf_token" value="{h(token)}">
+<select name="action" required>
+<option value="acknowledge">Acknowledge</option>
+<option value="retry">Retry next batch</option>
+<option value="suppress">Suppress report</option>
+<option value="permanent-no-contact">Permanent no contact</option>
+<option value="note">Add note</option>
+</select>
+<input type="text" name="note" maxlength="{note_max}" placeholder="Operator note">
+<button type="submit">Queue action</button>
+</form>"""
+        item_rows.append(
+            [
+                f'<code>{h(row.get("source_ip"))}</code>',
+                h(row.get("rule_id")),
+                f'<span class="{status_class(row.get("review_reason"))}">{h(row.get("review_reason"))}</span>',
+                f'<span class="{status_class(row.get("report_status"))}">{h(row.get("report_status"))}</span>',
+                number(row.get("attempt_count")),
+                h(row.get("latest_recipient") or row.get("report_recipient")),
+                when(row.get("first_seen")),
+                when(row.get("last_seen")),
+                h(row.get("report_detail") or row.get("latest_attempt_detail")),
+                evidence,
+                controls,
+            ]
+        )
+    action_rows = [
+        [
+            when(row.get("applied_at")),
+            h(row.get("operator")),
+            h(row.get("action")),
+            h(row.get("disposition")),
+            f'<code>{h(row.get("incident_uuid"))}</code>',
+            h(row.get("previous_report_status")),
+            h(row.get("new_report_status")),
+            h(row.get("note")),
+        ]
+        for row in reviews.get("recent_actions", [])
+    ]
+    return (
+        cards
+        + '<section><h2>Open review items</h2>'
+        + '<p class="muted">One row per current incident. Active cooldown '
+        'deferrals are excluded until overdue or repeatedly deferred.</p>'
+        + table(
+            [
+                "Source", "Rule", "Reason", "Report", "Attempts",
+                "Recipient", "First", "Last", "Detail", "Evidence",
+                "Action",
+            ],
+            item_rows,
+        )
+        + '</section><section><h2>Recent review actions</h2>'
+        + table(
+            [
+                "Applied", "Operator", "Action", "Disposition",
+                "Incident", "Previous", "New", "Note",
+            ],
+            action_rows,
+        )
+        + '</section>'
+    )
+
 class UnixHTTPServer(socketserver.UnixStreamServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -539,11 +763,103 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'none'; style-src 'unsafe-inline'; "
-            "img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'",
+            "img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
         )
         self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(payload)
+
+    def send_redirect(self, location: str) -> None:
+        self.send_response(303)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_POST(self) -> None:
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path != "/reviews/action":
+            self.send_payload(404, b"Not found\n", "text/plain")
+            return
+        try:
+            content_type = str(self.headers.get("Content-Type", ""))
+            if not content_type.startswith("application/x-www-form-urlencoded"):
+                raise DashboardError("Unsupported form content type")
+            length = int(self.headers.get("Content-Length", "0"))
+            maximum = int(self.app_config["max_post_bytes"])
+            if length < 1 or length > maximum:
+                raise DashboardError("Review form size is invalid")
+            raw = self.rfile.read(length).decode("utf-8")
+            form = urllib.parse.parse_qs(
+                raw,
+                keep_blank_values=True,
+                strict_parsing=True,
+            )
+            value = lambda name: str(form.get(name, [""])[0]).strip()
+            request_uuid = str(uuid.UUID(value("request_uuid")))
+            incident_uuid = str(uuid.UUID(value("incident_uuid")))
+            expected_updated_at = value("expected_updated_at")
+            action = value("action")
+            if action not in REVIEW_ACTIONS:
+                raise DashboardError("Unsupported review action")
+            if not csrf_valid(
+                value("csrf_token"),
+                request_uuid,
+                incident_uuid,
+                expected_updated_at,
+            ):
+                raise DashboardError("Invalid or expired review form token")
+            note = value("note")
+            if len(note) > int(self.app_config["review_note_max_chars"]):
+                raise DashboardError("Review note exceeds configured limit")
+            operator = operator_from_headers(self.headers)
+            if not operator:
+                raise DashboardError(
+                    "Authenticated operator identity was not forwarded"
+                )
+            snapshot = load_snapshot(self.app_config)
+            matching = [
+                row
+                for row in snapshot.get("reviews", {}).get("items", [])
+                if str(row.get("incident_uuid")) == incident_uuid
+            ]
+            if len(matching) != 1:
+                raise DashboardError("Incident is no longer in the review queue")
+            if str(matching[0].get("updated_at")) != expected_updated_at:
+                raise DashboardError("Incident changed; reload the review page")
+            request = {
+                "request_uuid": request_uuid,
+                "incident_uuid": incident_uuid,
+                "expected_updated_at": expected_updated_at,
+                "action": action,
+                "operator": operator,
+                "note": note,
+                "requested_at": dt.datetime.now(dt.timezone.utc)
+                    .replace(microsecond=0)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+            }
+            queue_review_request(
+                Path(str(self.app_config["review_request_dir"])),
+                request,
+            )
+            self.send_redirect(
+                "/reviews?queued=" + urllib.parse.quote(request_uuid)
+            )
+        except (
+            DashboardError,
+            UnicodeDecodeError,
+            ValueError,
+            OSError,
+        ) as exc:
+            payload = page(
+                "Review action rejected",
+                '<div class="card"><h2>Review action rejected</h2>'
+                f'<code>{h(exc)}</code></div>',
+                {"generated_at": "unavailable"},
+                self.app_config,
+            )
+            self.send_payload(400, payload, "text/html; charset=utf-8")
 
     def do_HEAD(self) -> None:
         self.do_GET(send_body=False)
@@ -590,6 +906,11 @@ class Handler(BaseHTTPRequestHandler):
                 title, body = "Networks", render_networks(snapshot)
             elif path == "/reports":
                 title, body = "Reports", render_reports(snapshot)
+            elif path == "/reviews":
+                title, body = "Reviews", render_reviews(
+                    snapshot,
+                    self.app_config,
+                )
             else:
                 self.send_payload(404, b"Not found\n", "text/plain")
                 return

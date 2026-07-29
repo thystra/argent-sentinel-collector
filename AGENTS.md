@@ -149,3 +149,13 @@ After implementation or deployment decisions, review and update:
   volume review.
 - `argent-sentinel-wordpress-sites` confirms all four production WordPress
   connector sites as `seen`.
+
+## Current review-workflow checkpoint
+- Version 0.5.2.0 adds the first audited dashboard write workflow.
+- Human-facing times are rendered in the server-local timezone; persisted and
+  machine-readable timestamps remain UTC.
+- Dashboard review actions use `/var/spool/argent-sentinel/review/incoming` and
+  are processed by a root-owned systemd path unit under the collector lock.
+- Routine collector lock contention is a successful skipped cycle, not a failed
+  unit.
+- Generated Python bytecode and `dist/deb` packages are not tracked in Git.

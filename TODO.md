@@ -258,3 +258,17 @@ Required work:
 - [ ] Review several days of production persistent-WordPress incident volume
   before enabling provider email for that rule.
 - [x] Repair the 0.5.1.1 Debian upgrade race and preserved-config migration in package revision `0.5.1.1-2`.
+
+## Implemented in 0.5.2.0 — dashboard review workflow — 2026-07-29
+- [x] Replace report-attempt counts with one open review item per incident.
+- [x] Exclude ordinary future cooldown deferrals from operator work.
+- [x] Add acknowledge, retry, suppress, permanent-no-contact, and note actions.
+- [x] Preserve the dashboard/SQLite write boundary through a request spool and
+  root-owned processor.
+- [x] Add stale-form rejection, request UUID idempotency, and append-only audit.
+- [x] Render human-facing dashboard times in the server-local timezone while
+  retaining canonical UTC values.
+- [x] Treat overlapping minute collector runs as harmless skipped cycles.
+- [x] Stop tracking `__pycache__`, `.pyc`, and `dist/deb` build artifacts.
+- [ ] Review persistent WordPress production volume and decide whether provider
+  reporting should be enabled for newly created incidents.

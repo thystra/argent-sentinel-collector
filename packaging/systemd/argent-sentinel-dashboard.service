@@ -1,5 +1,5 @@
 [Unit]
-Description=Argent Sentinel read-only operator dashboard
+Description=Argent Sentinel operator dashboard
 After=network.target argent-sentinel-dashboard-snapshot.service
 Requires=argent-sentinel-dashboard-snapshot.service
 ConditionPathExists=/etc/argent-sentinel/dashboard.json
@@ -28,6 +28,7 @@ MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_UNIX
 ReadOnlyPaths=/var/lib/argent-sentinel/dashboard
 ReadWritePaths=/run/argent-sentinel-dashboard
+ReadWritePaths=/var/spool/argent-sentinel/review/incoming
 
 [Install]
 WantedBy=multi-user.target
