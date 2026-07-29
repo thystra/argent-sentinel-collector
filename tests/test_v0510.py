@@ -64,17 +64,17 @@ class ReportingBatchTest(unittest.TestCase):
     def test_grouping_is_by_cidr_family_and_recipient_set(self) -> None:
         candidates = [
             {
-                "cidr": "198.51.100.0/24",
+                "batch_cidr": "198.51.100.0/24",
                 "family": "web",
                 "recipients": ("abuse@example.net",),
             },
             {
-                "cidr": "198.51.100.0/24",
+                "batch_cidr": "198.51.100.0/24",
                 "family": "web",
                 "recipients": ("abuse@example.net",),
             },
             {
-                "cidr": "198.51.100.0/24",
+                "batch_cidr": "198.51.100.0/24",
                 "family": "sshd",
                 "recipients": ("abuse@example.net",),
             },

@@ -1,3 +1,12 @@
+## 0.5.1.1
+
+- Bound provider-report groups independently from broad registered allocations.
+- Preserve registered ownership scope while adding explicit batch CIDR context.
+- Publish hourly run state, queued groups, outbound messages, and ban-only
+  suppressions on the read-only Reports dashboard.
+- Record the completed 2026-07-29 production reporting cutover and retire stale
+  OpenSSH XARF follow-up items.
+
 ## 0.5.1.0
 
 - Separate immediate enforcement from hourly CIDR provider reporting.

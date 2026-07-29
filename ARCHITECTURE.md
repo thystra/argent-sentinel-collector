@@ -166,3 +166,18 @@ incident.
 
 XARF remains incident-scoped: a grouped email contains multiple independent
 XARF documents rather than a nonstandard multi-source XARF object.
+
+## Bounded provider-report aggregation in 0.5.1.1
+
+Provider ownership and evidence aggregation are separate concepts.
+`registered_cidr` remains the ownership scope used to resolve the responsible
+provider and recipient. `batch_cidr` is the bounded evidence scope used for the
+hourly group and subject line. Registered IPv4 allocations broader than `/24`
+and IPv6 allocations broader than `/48` are narrowed to a source-containing
+prefix by default. Both values are retained for operator review.
+
+The hourly process writes an atomic sanitized run-state document beneath the
+collector state directory. The root-owned dashboard snapshot process combines
+that document, read-only SQLite queries, and non-secret reporting settings into
+the published snapshot. The dashboard service itself continues to read only the
+sanitized snapshot.

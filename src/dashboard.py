@@ -17,7 +17,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Mapping
 
-APP_VERSION = "0.5.1.0"
+APP_VERSION = "0.5.1.1"
 LOG = logging.getLogger("argent-sentinel-dashboard")
 
 DEFAULTS: dict[str, Any] = {
@@ -359,6 +359,78 @@ def render_networks(snapshot: Mapping[str, Any]) -> str:
 
 
 def render_reports(snapshot: Mapping[str, Any]) -> str:
+    reporting = snapshot.get("reporting", {})
+    counts = reporting.get("status_counts", {})
+    last_run = reporting.get("last_run", {})
+    preparation = last_run.get("preparation", {})
+    cards = [
+        ("Mode", reporting.get("mode", "unknown")),
+        ("Queued groups", len(reporting.get("queued_groups", []))),
+        ("Sent incidents", counts.get("sent", 0)),
+        ("Deferred", counts.get("deferred", 0)),
+        ("Failed", counts.get("failed", 0)),
+        ("No contact", counts.get("no-contact", 0)),
+        ("Suppressed", counts.get("suppressed", 0)),
+    ]
+    card_html = "".join(
+        f'<div class="card"><div class="label">{h(label)}</div>'
+        f'<div class="value">{h(value)}</div></div>'
+        for label, value in cards
+    )
+    run_rows = [
+        [
+            h(last_run.get("generated_at")),
+            h(reporting.get("next_scheduled_at")),
+            h(last_run.get("status")),
+            number(last_run.get("groups")),
+            number(last_run.get("messages_sent")),
+            number(last_run.get("messages_failed")),
+            number(preparation.get("eligible")),
+            number(preparation.get("suppressed")),
+            h(reporting.get("production_cutoff")),
+        ]
+    ]
+    queue_rows = [
+        [
+            (
+                f'<span class="bad"><code>{h(row.get("batch_cidr"))}</code></span>'
+                if row.get("broad_registered_allocation")
+                else f'<code>{h(row.get("batch_cidr"))}</code>'
+            ),
+            h(", ".join(row.get("registered_allocations", [])) or "-"),
+            h(row.get("grouping_basis")),
+            h(row.get("family")),
+            h(row.get("recipients")),
+            number(row.get("incident_count")),
+            number(row.get("event_count")),
+            h(", ".join(row.get("source_ips", [])) or "-"),
+            h(row.get("last_seen")),
+        ]
+        for row in reporting.get("queued_groups", [])
+    ]
+    suppression_rows = [
+        [
+            f"<code>{h(row.get('source_ip'))}</code>",
+            h(row.get("rule_id")),
+            f"<code>{h(row.get('registered_cidr') or row.get('network_cidr'))}</code>",
+            h(row.get("asn")),
+            h(row.get("asn_holder")),
+            h(row.get("last_seen")),
+            h(row.get("report_detail")),
+        ]
+        for row in reporting.get("ban_only_suppressions", [])
+    ]
+    message_rows = [
+        [
+            h(row.get("attempted_at")),
+            h(row.get("recipients")),
+            number(row.get("incident_count")),
+            h(row.get("statuses")),
+            f"<code>{h(row.get('message_id'))}</code>",
+            h(row.get("detail")),
+        ]
+        for row in reporting.get("recent_messages", [])
+    ]
     report_rows = [
         [
             h(row.get("attempted_at")),
@@ -370,11 +442,72 @@ def render_reports(snapshot: Mapping[str, Any]) -> str:
         ]
         for row in snapshot.get("report_attempts", [])
     ]
-    return "<section><h2>Recent report attempts</h2>" + table(
-        ["Attempted", "Recipient", "Status", "Test", "Detail", "Message ID"],
-        report_rows,
-    ) + "</section>"
-
+    return (
+        f'<div class="grid">{card_html}</div>'
+        "<section><h2>Hourly batch runtime</h2>"
+        + table(
+            [
+                "Last run",
+                "Next run",
+                "Status",
+                "Groups",
+                "Sent",
+                "Failed",
+                "Eligible",
+                "Suppressed",
+                "Production cutoff",
+            ],
+            run_rows,
+        )
+        + "</section><section><h2>Queued hourly groups</h2>"
+        + '<p class="muted">Red batch prefixes indicate a registered allocation '
+        "broader than the configured evidence-grouping boundary.</p>"
+        + table(
+            [
+                "Batch CIDR",
+                "Registered allocation(s)",
+                "Basis",
+                "Family",
+                "Recipients",
+                "Incidents",
+                "Events",
+                "Sources",
+                "Latest",
+            ],
+            queue_rows,
+        )
+        + "</section><section><h2>Ban-only suppressions</h2>"
+        + table(
+            [
+                "Source",
+                "Rule",
+                "Network",
+                "ASN",
+                "Holder",
+                "Last",
+                "Reason",
+            ],
+            suppression_rows,
+        )
+        + "</section><section><h2>Recent outbound messages</h2>"
+        + table(
+            [
+                "Attempted",
+                "Recipients",
+                "Incidents",
+                "Status",
+                "Message ID",
+                "Detail",
+            ],
+            message_rows,
+        )
+        + "</section><section><h2>Recent report attempts</h2>"
+        + table(
+            ["Attempted", "Recipient", "Status", "Test", "Detail", "Message ID"],
+            report_rows,
+        )
+        + "</section>"
+    )
 
 class UnixHTTPServer(socketserver.UnixStreamServer):
     allow_reuse_address = True

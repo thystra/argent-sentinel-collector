@@ -14,19 +14,6 @@
     "processing_dir": "/var/lib/argent-sentinel/collector/abuse-context-processing",
     "rejected_dir": "/var/lib/argent-sentinel/collector/abuse-context-rejected"
   },
-  "report_batching": {
-    "enabled": false,
-    "grace_minutes": 5,
-    "max_candidate_incidents": 1000,
-    "max_incidents_per_message": 50,
-    "max_messages_per_run": 10,
-    "ban_only": {
-      "asns": [32934],
-      "cidrs": ["2a03:2880::/32"],
-      "user_agent_tokens": ["meta-externalagent"],
-      "allow_user_agent_only": false
-    }
-  },
   "abuse_reporting": {
     "admin_copy": "",
     "attach_xarf": true,
@@ -87,7 +74,7 @@
     "rdap_url": "https://rdap.org/ip/{ip}",
     "ripe_prefix_url": "https://stat.ripe.net/data/prefix-overview/data.json?resource={ip}",
     "timeout_seconds": 12,
-    "user_agent": "Argent-Sentinel/0.5.0.1 (+self-hosted security abuse reporting)"
+    "user_agent": "Argent-Sentinel/0.5.1.1 (+self-hosted security abuse reporting)"
   },
   "fail2ban_ingest": {
     "cursor_file": "/var/lib/argent-sentinel/collector/fail2ban.cursor",
@@ -167,6 +154,30 @@
   },
   "processing_dir": "/var/lib/argent-sentinel/collector/processing",
   "rejected_dir": "/var/lib/argent-sentinel/collector/rejected",
+  "report_batching": {
+    "ban_only": {
+      "allow_user_agent_only": false,
+      "asns": [
+        32934
+      ],
+      "cidrs": [
+        "2a03:2880::/32"
+      ],
+      "user_agent_tokens": [
+        "meta-externalagent"
+      ]
+    },
+    "enabled": false,
+    "grace_minutes": 5,
+    "grouping": {
+      "minimum_ipv4_prefix_length": 24,
+      "minimum_ipv6_prefix_length": 48
+    },
+    "max_candidate_incidents": 1000,
+    "max_incidents_per_message": 50,
+    "max_messages_per_run": 10,
+    "state_file": "/var/lib/argent-sentinel/collector/report-batch-state.json"
+  },
   "sshd_policy": {
     "distinct_accounts": 1,
     "enabled": true,

@@ -3,7 +3,7 @@
 Argent Sentinel is a self-hosted security event collector, correlation engine,
 CrowdSec decision bridge, and guarded abuse-reporting system.
 
-Version 0.5.0.2 combines authenticated event transport, central policy,
+Version 0.5.1.1 combines authenticated event transport, central policy,
 a read-only dashboard, and per-site traffic analytics:
 
 ```text
@@ -517,7 +517,7 @@ See `ARCHITECTURE.md`, `TODO.md`, and `docs/fail2ban-review-policy.md`.
 
 ## Operator dashboard
 
-Version 0.5.0.2 provides a read-only dashboard intended for
+Version 0.5.1.1 provides a read-only dashboard intended for
 `sentinel.argentwolf.org`, a root-generated sanitized snapshot, static
 per-site AWStats reports, and an operator-controlled Nginx crawler policy.
 See `ARCHITECTURE.md` and `docs/dashboard.md`.
@@ -579,3 +579,11 @@ argent-sentinel-wordpress-sites \
 `seen` means the database contains an imported batch or WordPress event.
 `provisioned-no-import` means the protected drop exists but no batch has yet
 arrived.
+
+### Bounded operational report groups
+
+Version 0.5.1.1 separates provider ownership scope from report aggregation
+scope. Broad registered allocations remain available for recipient selection,
+while hourly messages are bounded to `/24` for IPv4 and `/48` for IPv6 by
+default. The Reports dashboard shows both prefixes, current queues, the latest
+hourly run, recent message IDs, and ban-only suppressions.

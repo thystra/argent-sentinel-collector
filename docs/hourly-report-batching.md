@@ -63,3 +63,27 @@ Recipient cooldown and rolling daily limits count distinct outbound
 as one provider message, not fifty.
 
 <!-- EOF: /home/alan/src/argent-sentinel-collector/docs/hourly-report-batching.md -->
+
+## Bounded grouping in 0.5.1.1
+
+The registered allocation remains authoritative for ownership and abuse-contact
+resolution, but it is no longer always used as the aggregation scope. The
+batcher applies configurable lower bounds:
+
+```json
+"grouping": {
+  "minimum_ipv4_prefix_length": 24,
+  "minimum_ipv6_prefix_length": 48
+}
+```
+
+When RDAP returns a broader allocation, the message is grouped under a bounded
+prefix containing the source address. Human-readable messages, delivery
+details, run state, and the dashboard show both the bounded batch CIDR and the
+registered allocation. Each attached XARF document carries `batch_network`,
+`registered_network`, and `network_grouping_basis` context.
+
+The batcher atomically writes its latest sanitized run result to
+`report_batching.state_file`. The root-owned dashboard snapshot service reads
+that file; the dashboard worker still has no access to the collector database or
+private collector configuration.

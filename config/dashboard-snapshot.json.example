@@ -1,8 +1,10 @@
 {
   "awstats_root": "/var/lib/argent-sentinel/dashboard/awstats",
+  "collector_config": "/etc/argent-sentinel/collector.json",
   "lock_file": "/run/argent-sentinel/collector.lock",
   "lookback_hours": 24,
   "max_rows": 50,
+  "report_batch_state_file": "/var/lib/argent-sentinel/collector/report-batch-state.json",
   "snapshot_file": "/var/lib/argent-sentinel/dashboard/snapshot.json",
   "snapshot_group": "www-data",
   "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",

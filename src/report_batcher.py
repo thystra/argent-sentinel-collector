@@ -30,6 +30,12 @@ from collector import (
     utc_now,
 )
 
+from reporting_view import (
+    atomic_write_state,
+    bounded_report_networks,
+    next_hourly_run,
+    utc_text as reporting_utc_text,
+)
 LOG = logging.getLogger("argent-sentinel-report-batch")
 REPORTABLE_STATES = ("pending", "failed", "deferred", "disabled", "no-contact")
 
@@ -60,23 +66,18 @@ def chunked(
     ]
 
 
-def normalized_cidr(
+def report_networks(
     source_ip: str,
     enrichment: Mapping[str, Any],
     incident: Mapping[str, Any],
-) -> str:
-    for value in (
-        incident.get("registered_cidr"),
-        enrichment.get("network_cidr"),
+    grouping: Mapping[str, Any],
+) -> dict[str, Any]:
+    return bounded_report_networks(
+        source_ip,
+        incident.get("registered_cidr") or enrichment.get("network_cidr"),
         incident.get("network_cidr"),
-    ):
-        if value:
-            try:
-                return str(ipaddress.ip_network(str(value), strict=False))
-            except ValueError:
-                pass
-    return candidate_network(source_ip)
-
+        grouping,
+    )
 
 def ban_only_reason(
     source_ip: str,
@@ -244,7 +245,6 @@ def prepare_candidates(
         "failed": 0,
         "no_contact": 0,
     }
-
     for original in rows:
         incident_uuid = str(original["incident_uuid"])
         incident = collector.db.incident(incident_uuid)
@@ -255,7 +255,6 @@ def prepare_candidates(
             _record_terminal(collector, incident_uuid, status, detail)
             stats["suppressed"] += 1
             continue
-
         protection, protection_detail = collector.source_protection_status(
             str(incident["source_ip"])
         )
@@ -278,10 +277,9 @@ def prepare_candidates(
             )
             stats["failed"] += 1
             continue
-
         try:
             enrichment = collector.enrich(str(incident["source_ip"]))
-        except Exception as exc:  # same guarded behavior as immediate reports
+        except Exception as exc:
             detail = f"Enrichment failed before hourly abuse report: {exc}"
             if test_mode:
                 enrichment = _fallback_enrichment(dict(incident), detail)
@@ -294,7 +292,6 @@ def prepare_candidates(
                 )
                 stats["failed"] += 1
                 continue
-
         collector.db.update_incident(
             incident_uuid,
             registered_cidr=enrichment.get("network_cidr"),
@@ -324,7 +321,6 @@ def prepare_candidates(
             )
             stats["suppressed"] += 1
             continue
-
         recipients = collector.report_recipients(enrichment)
         if not recipients:
             detail = "No RDAP abuse email was found"
@@ -345,23 +341,23 @@ def prepare_candidates(
             )
             stats["no_contact"] += 1
             continue
-
+        networks = report_networks(
+            str(incident["source_ip"]),
+            enrichment,
+            incident_dict,
+            batching["grouping"],
+        )
         result.append(
             {
                 "incident": incident_dict,
                 "enrichment": dict(enrichment),
                 "recipients": tuple(recipients),
-                "cidr": normalized_cidr(
-                    str(incident["source_ip"]),
-                    enrichment,
-                    incident_dict,
-                ),
+                **networks,
                 "family": report_family(str(incident["rule_id"])),
                 "user_agents": agents,
             }
         )
     return result, stats
-
 
 def group_candidates(
     candidates: Sequence[dict[str, Any]],
@@ -369,13 +365,12 @@ def group_candidates(
     grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for item in candidates:
         key = (
-            item["cidr"],
+            item["batch_cidr"],
             item["family"],
             tuple(item["recipients"]),
         )
         grouped[key].append(item)
     return dict(grouped)
-
 
 def _materialize_xarf(
     collector: Collector,
@@ -421,12 +416,14 @@ def _materialize_xarf(
         evidence_lines,
         public_targets,
     )
+    xarf["batch_network"] = str(candidate["batch_cidr"])
+    xarf["registered_network"] = candidate.get("registered_cidr")
+    xarf["network_grouping_basis"] = candidate.get("grouping_basis")
     return xarf, evidence_lines, hosts or sites
-
 
 def send_batch(
     collector: Collector,
-    cidr: str,
+    batch_cidr: str,
     family: str,
     recipients: Sequence[str],
     candidates: Sequence[dict[str, Any]],
@@ -436,7 +433,6 @@ def send_batch(
         return "disabled", "Abuse reporting disabled in configuration", None
     if not recipients:
         return "no-contact", "No valid abuse-report recipient was supplied", None
-
     test_mode = bool(settings.get("test_mode"))
     generated = utc_now()
     message = EmailMessage()
@@ -449,22 +445,33 @@ def send_batch(
         domain=str(settings["message_id_domain"])
     )
     message["Message-ID"] = message_id
-
     unique_sources = sorted(
         {str(item["incident"]["source_ip"]) for item in candidates},
         key=ipaddress.ip_address,
+    )
+    registered_allocations = sorted(
+        {
+            str(item["registered_cidr"])
+            for item in candidates
+            if item.get("registered_cidr")
+        }
+    )
+    broad_registered = any(
+        bool(item.get("broad_registered_allocation"))
+        for item in candidates
     )
     family_name = activity_name(family)
     test_label = " TEST" if test_mode else ""
     message["Subject"] = (
         f"{settings['subject_prefix']}{test_label} Hourly CIDR batch: "
-        f"{family_name} from {cidr} "
+        f"{family_name} from {batch_cidr} "
         f"({len(unique_sources)} source IPs)"
     )
-
     earliest = min(str(item["incident"]["first_seen"]) for item in candidates)
     latest = max(str(item["incident"]["last_seen"]) for item in candidates)
-    event_count = sum(int(item["incident"]["event_count"]) for item in candidates)
+    event_count = sum(
+        int(item["incident"]["event_count"]) for item in candidates
+    )
     all_sites: set[str] = set()
     body: list[str] = []
     if test_mode:
@@ -481,19 +488,31 @@ def send_batch(
             "Hello,",
             "",
             "This hourly report aggregates independently qualifying Argent "
-            "Sentinel incidents from one registered or fallback CIDR.",
+            "Sentinel incidents within one bounded evidence prefix.",
             "",
-            f"CIDR: {cidr}",
+            f"Batch CIDR: {batch_cidr}",
+            "Registered allocation(s): "
+            + (
+                ", ".join(registered_allocations)
+                if registered_allocations
+                else "unavailable"
+            ),
             f"Activity: {family_name}",
             f"Source IPs: {len(unique_sources)}",
             f"Incidents: {len(candidates)}",
             f"Matched events: {event_count}",
             f"Observed timeframe (UTC): {earliest} through {latest}",
-            "",
-            "Per-source summary:",
         ]
     )
-
+    if broad_registered:
+        body.extend(
+            [
+                "Scope note: ownership data returned a broader registered "
+                "allocation; this report is intentionally bounded to the "
+                "evidence prefix shown above.",
+            ]
+        )
+    body.extend(["", "Per-source summary:"])
     materialized: list[tuple[dict[str, Any], list[str], list[str]]] = []
     for number, item in enumerate(candidates, 1):
         incident = item["incident"]
@@ -512,7 +531,6 @@ def send_batch(
         )
         for line in evidence_lines[:3]:
             body.append(f"       evidence: {line}")
-
     body.extend(
         [
             "",
@@ -526,7 +544,6 @@ def send_batch(
             "included.",
         ]
     )
-
     attach_xarf = bool(settings.get("attach_xarf", True))
     if attach_xarf:
         body.append(
@@ -536,7 +553,6 @@ def send_batch(
     if operator_contact:
         body.append(f"Operator contact: {operator_contact}")
     message.set_content("\n".join(body) + "\n")
-
     if attach_xarf:
         single = len(materialized) == 1
         for number, (xarf, _lines, _sites) in enumerate(materialized, 1):
@@ -559,7 +575,6 @@ def send_batch(
                 subtype="json",
                 filename=filename,
             )
-
     try:
         result = subprocess.run(
             [str(settings["sendmail_path"]), "-t", "-oi"],
@@ -579,15 +594,14 @@ def send_batch(
             or f"sendmail exited {result.returncode}"
         )
         return "failed", detail, message_id
-
     return (
         "sent",
         f"Hourly CIDR batch sent to {', '.join(recipients)}; "
-        f"cidr={cidr}; incidents={len(candidates)}; "
-        f"sources={len(unique_sources)}",
+        f"batch_cidr={batch_cidr}; "
+        f"registered_cidrs={','.join(registered_allocations) or 'unavailable'}; "
+        f"incidents={len(candidates)}; sources={len(unique_sources)}",
         message_id,
     )
-
 
 def run_report_batches(collector: Collector) -> dict[str, Any]:
     batching = collector.config["report_batching"]
@@ -603,7 +617,6 @@ def run_report_batches(collector: Collector) -> dict[str, Any]:
             "detail": "abuse_reporting.enabled is false",
             "messages_sent": 0,
         }
-
     candidates, preparation_stats = prepare_candidates(collector)
     groups = group_candidates(candidates)
     max_incidents = int(batching["max_incidents_per_message"])
@@ -612,11 +625,36 @@ def run_report_batches(collector: Collector) -> dict[str, Any]:
     messages_failed = 0
     deferred = 0
     handled_incidents = 0
-
-    for (cidr, family, recipients), grouped in sorted(
+    group_summaries: list[dict[str, Any]] = []
+    for (batch_cidr, family, recipients), grouped in sorted(
         groups.items(),
         key=lambda item: (item[0][0], item[0][1], item[0][2]),
     ):
+        group_summaries.append(
+            {
+                "batch_cidr": batch_cidr,
+                "registered_allocations": sorted(
+                    {
+                        str(item["registered_cidr"])
+                        for item in grouped
+                        if item.get("registered_cidr")
+                    }
+                ),
+                "broad_registered_allocation": any(
+                    bool(item.get("broad_registered_allocation"))
+                    for item in grouped
+                ),
+                "family": family,
+                "recipients": list(recipients),
+                "incidents": len(grouped),
+                "sources": len(
+                    {
+                        str(item["incident"]["source_ip"])
+                        for item in grouped
+                    }
+                ),
+            }
+        )
         for batch in chunked(grouped, max_incidents):
             if messages_sent + messages_failed >= max_messages:
                 break
@@ -638,15 +676,16 @@ def run_report_batches(collector: Collector) -> dict[str, Any]:
                         status,
                         detail,
                         test_mode=bool(
-                            collector.config["abuse_reporting"].get("test_mode")
+                            collector.config["abuse_reporting"].get(
+                                "test_mode"
+                            )
                         ),
                     )
                 deferred += len(batch)
                 continue
-
             status, detail, message_id = send_batch(
                 collector,
-                str(cidr),
+                str(batch_cidr),
                 str(family),
                 recipients,
                 batch,
@@ -669,7 +708,6 @@ def run_report_batches(collector: Collector) -> dict[str, Any]:
                 messages_failed += 1
         if messages_sent + messages_failed >= max_messages:
             break
-
     return {
         "status": "ok",
         "messages_sent": messages_sent,
@@ -677,9 +715,9 @@ def run_report_batches(collector: Collector) -> dict[str, Any]:
         "incidents_handled": handled_incidents,
         "incidents_deferred": deferred,
         "groups": len(groups),
+        "group_summaries": group_summaries,
         "preparation": preparation_stats,
     }
-
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
@@ -699,15 +737,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 result = run_report_batches(collector)
                 result["version"] = APP_VERSION
+                result["generated_at"] = reporting_utc_text()
+                result["next_scheduled_at"] = next_hourly_run()
                 result["counts"] = collector.db.counts()
+                atomic_write_state(
+                    Path(str(config["report_batching"]["state_file"])),
+                    result,
+                )
                 print(json.dumps(result, indent=2, sort_keys=True))
             finally:
                 collector.close()
         return 0
-    except (CollectorError, sqlite3.Error) as exc:
+    except (CollectorError, sqlite3.Error, OSError, ValueError) as exc:
         LOG.error("%s", exc)
         return 1
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

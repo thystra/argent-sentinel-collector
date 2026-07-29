@@ -134,13 +134,18 @@ After implementation or deployment decisions, review and update:
   commented EOF marker when the format supports comments.
 
 ## Current reporting checkpoint
-
-- Version 0.5.1.0 separates immediate per-IP enforcement from hourly provider
-  email.
-- Provider messages are grouped by CIDR, activity family, and recipient set.
-- The Meta/Facebook ban-only policy suppresses provider email for configured
-  ASN/CIDR matches while preserving local decisions.
-- User-Agent-only suppression remains disabled by default because the header
-  is attacker controlled.
-- `argent-sentinel-wordpress-sites` distinguishes collector-visible,
-  provisioned-no-import, and missing WordPress sites.
+- Version 0.5.1.1 is the operational reporting baseline.
+- The 2026-07-29 production cutover retired the legacy Nginx sender and
+  validated the first hourly provider delivery.
+- Immediate per-IP enforcement remains independent of hourly provider email.
+- Provider ownership uses the registered allocation; report aggregation uses a
+  bounded batch CIDR, `/24` for IPv4 and `/48` for IPv6 by default.
+- The Reports dashboard is fed only through the root-generated sanitized
+  snapshot and shows queued groups, run state, message IDs, and ban-only
+  suppressions.
+- Meta/Facebook provider email is suppressed for configured ASN/CIDR matches
+  while local decisions remain active.
+- Persistent WordPress provider reporting remains disabled pending production
+  volume review.
+- `argent-sentinel-wordpress-sites` confirms all four production WordPress
+  connector sites as `seen`.

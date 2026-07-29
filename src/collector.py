@@ -39,7 +39,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.5.1.0"
+APP_VERSION = "0.5.1.1"
 SCHEMA_VERSION = 6
 
 DEFAULTS: dict[str, Any] = {
@@ -152,6 +152,11 @@ DEFAULTS: dict[str, Any] = {
     },
     "report_batching": {
         "enabled": False,
+        "state_file": "/var/lib/argent-sentinel/collector/report-batch-state.json",
+        "grouping": {
+            "minimum_ipv4_prefix_length": 24,
+            "minimum_ipv6_prefix_length": 48,
+        },
         "grace_minutes": 5,
         "max_candidate_incidents": 1000,
         "max_incidents_per_message": 50,
@@ -387,6 +392,27 @@ def validate_config(config: Mapping[str, Any]) -> None:
         if int(batching.get(name, 0)) < 1:
             raise CollectorError(
                 f"report_batching.{name} must be positive"
+            )
+    state_file = str(batching.get("state_file", "")).strip()
+    if not state_file:
+        raise CollectorError(
+            "report_batching.state_file is required"
+        )
+    grouping = batching.get("grouping", {})
+    for name, maximum in (
+        ("minimum_ipv4_prefix_length", 32),
+        ("minimum_ipv6_prefix_length", 128),
+    ):
+        try:
+            value = int(grouping.get(name, -1))
+        except (TypeError, ValueError) as exc:
+            raise CollectorError(
+                f"report_batching.grouping.{name} must be an integer"
+            ) from exc
+        if value < 0 or value > maximum:
+            raise CollectorError(
+                f"report_batching.grouping.{name} must be between 0 "
+                f"and {maximum}"
             )
     ban_only = batching.get("ban_only", {})
     for name in (

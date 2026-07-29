@@ -18,12 +18,18 @@ from typing import Any, Iterator, Mapping, Sequence
 import urllib.parse
 
 import review_digest
+from reporting_view import (
+    build_reporting_snapshot,
+    load_optional_json,
+)
 
-APP_VERSION = "0.5.1.0"
+APP_VERSION = "0.5.1.1"
 UTC = dt.timezone.utc
 
 DEFAULTS: dict[str, Any] = {
     "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
+    "collector_config": "/etc/argent-sentinel/collector.json",
+    "report_batch_state_file": "/var/lib/argent-sentinel/collector/report-batch-state.json",
     "lock_file": "/run/argent-sentinel/collector.lock",
     "snapshot_file": "/var/lib/argent-sentinel/dashboard/snapshot.json",
     "snapshot_group": "www-data",
@@ -174,6 +180,9 @@ def load_sites(path: Path, awstats_root: Path) -> list[dict[str, Any]]:
 
 
 def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
+    collector_config = load_optional_json(
+        Path(str(config["collector_config"]))
+    )
     end_epoch = int(utc_now().timestamp())
     start_epoch = end_epoch - int(config["lookback_hours"]) * 3600
     max_rows = max(1, min(500, int(config["max_rows"])))
@@ -258,6 +267,13 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
             LIMIT ?
             """,
             (start_epoch, max_rows),
+        )
+        reporting = build_reporting_snapshot(
+            connection,
+            collector_config,
+            Path(str(config["report_batch_state_file"])),
+            max_rows,
+            now_epoch=end_epoch,
         )
         fail2ban = rows(
             connection,
@@ -404,6 +420,7 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
         "incident_rules": incident_rules,
         "recent_incidents": recent_incidents,
         "report_attempts": report_attempts,
+        "reporting": reporting,
         "fail2ban": fail2ban,
         "network_cases": network_cases,
         "repeated_sources": repeated_sources,

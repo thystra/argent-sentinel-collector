@@ -180,7 +180,7 @@ Required work:
 - [x] Add regression coverage for SSH connection details and normalized evidence.
 - [ ] Review production incident volume before enabling persistent-policy
   provider reporting.
-- [ ] Complete the existing Allaboard Acres WordPress onboarding TODO.
+- [x] Complete the existing Allaboard Acres WordPress onboarding TODO.
 
 ## WordPress onboarding follow-up — 2026-07-26
 
@@ -191,15 +191,7 @@ Required work:
 - [x] Add an optional matching PHP-FPM restart.
 - [x] Create the site parent as root:sentinel 0750 and incoming as 2770.
 - [x] Inspect WP-CLI command discovery before invoking setup.
-- [ ] Validate the revised helper through a clean second-site onboarding.
-
-## Abuse-report attachment follow-up — 2026-07-26
-
-- [ ] Fix OpenSSH/sshd abuse-report emails that omit the expected `xarf.json`
-  attachment.
-- [ ] Verify XARF generation, MIME filename/content type, and attachment bytes.
-- [ ] Verify retry/resend paths retain the XARF attachment.
-- [ ] Add regression coverage proving SSH reports include `xarf.json`.
+- [x] Validate the revised helper through a clean second-site onboarding.
 
 ## WordPress onboarding completion — 2026-07-26
 
@@ -210,15 +202,7 @@ Required work:
 - [x] Retain `--restart-php-fpm` as an explicit compatibility option.
 - [x] Add `--no-restart-php-fpm` for controlled maintenance windows.
 - [x] Add service-discovery, restart, help, and missing-pool regression tests.
-- [ ] Validate the automatic restart through a clean third-site web-UI onboarding.
-
-## Abuse-report attachment follow-up — 2026-07-26
-
-- [ ] Fix OpenSSH/sshd abuse-report emails that omit the expected `xarf.json`
-  attachment.
-- [ ] Verify XARF generation, MIME filename/content type, and attachment bytes.
-- [ ] Verify retry/resend paths retain the XARF attachment.
-- [ ] Add regression coverage proving SSH reports include `xarf.json`.
+- [x] Validate the automatic restart through a clean third-site web-UI onboarding.
 
 ## PHP-FPM unrestricted-pool detection — 2026-07-26
 
@@ -231,13 +215,6 @@ Required work:
 - [x] Add helper-policy and integration regression tests.
 - [ ] Audit the earlier per-user PHP pool creation script and add a secure open_basedir template.
 - [ ] Backfill restrictions to existing unrestricted per-user pools after review.
-
-## Abuse-report attachment follow-up — 2026-07-26
-
-- [ ] Fix OpenSSH/sshd abuse-report emails that omit the expected `xarf.json` attachment.
-- [ ] Verify XARF generation, MIME filename/content type, and attachment bytes.
-- [ ] Verify retry/resend paths retain the XARF attachment.
-- [ ] Add regression coverage proving SSH reports include `xarf.json`.
 
 ## Implemented in 0.5.1.0 — hourly CIDR reporting checkpoint
 
@@ -262,3 +239,21 @@ Required work:
 - [ ] Add dashboard visibility for queued hourly groups and ban-only
   suppressions.
 - [ ] Evaluate provider-specific minimum batch sizes and longer cooldowns.
+
+## Implemented in 0.5.1.1 — operational provider reporting — 2026-07-29
+- [x] Confirm all four production WordPress connector sites as `seen`.
+- [x] Validate redirected hourly batching and XARF attachments.
+- [x] Retire the legacy Nginx abuse sender and daily cron scheduler.
+- [x] Enable production hourly batching with a fresh cutoff timestamp.
+- [x] Validate the first production delivery and Message-ID accounting.
+- [x] Suppress Meta provider email by ASN and explicit IPv4/IPv6 policy while
+  preserving local enforcement.
+- [x] Bound broad registered allocations to `/24` IPv4 and `/48` IPv6 report
+  prefixes while retaining ownership scope.
+- [x] Publish reporting mode, run state, queued groups, recent messages, broad
+  allocation warnings, and ban-only suppressions through the sanitized
+  dashboard snapshot.
+- [x] Mark the OpenSSH XARF attachment defect complete and remove duplicate
+  follow-up sections.
+- [ ] Review several days of production persistent-WordPress incident volume
+  before enabling provider email for that rule.
