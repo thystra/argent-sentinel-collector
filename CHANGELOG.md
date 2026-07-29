@@ -1,3 +1,14 @@
+## 0.5.2.1
+
+- Automatically close no-contact review items only after local CrowdSec IP
+  enforcement is verified as applied or already existing.
+- Keep failed, refused, stale, and dry-run no-contact enforcement visible for
+  operator review and retry.
+- Add explicit approve, keep-suppressed, duplicate/subsumed, contact-refresh,
+  and note actions for suppressed WordPress credential-spray incidents.
+- Return refreshed abuse contacts to the review queue without sending mail.
+- Separate credential-spray and unresolved no-contact counts on the dashboard.
+
 ## 0.5.2.0
 
 - Replace the report-attempt review count with a deduplicated incident queue.

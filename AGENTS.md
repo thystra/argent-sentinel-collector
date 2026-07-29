@@ -159,3 +159,12 @@ After implementation or deployment decisions, review and update:
 - Routine collector lock contention is a successful skipped cycle, not a failed
   unit.
 - Generated Python bytecode and `dist/deb` packages are not tracked in Git.
+
+## Current review-policy checkpoint
+- Version 0.5.2.1 keeps schema version 7.
+- A no-contact incident is auto-closed only after CrowdSec returns `applied` or
+  `existing`; enforcement failures remain open.
+- Suppressed WordPress credential-spray incidents have explicit audited review
+  dispositions and contact refresh returns to review without sending.
+- CIDR review and most-specific justified block selection remain targeted for
+  0.5.3.0.

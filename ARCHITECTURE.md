@@ -190,3 +190,11 @@ A root-owned path-activated processor reacquires the collector lock, rejects
 stale forms, applies one transaction, appends the `review_actions` audit row,
 and publishes a new sanitized snapshot. Direct enforcement controls remain out
 of scope for the dashboard.
+
+## No-contact and credential-spray review policy in 0.5.2.1
+
+The hourly report batcher owns automatic no-contact reconciliation because it
+already performs RDAP lookup and uses the collector's guarded CrowdSec decision
+path. It appends an automatic audit row only after `applied` or `existing` is
+returned. Operator credential-spray approvals remain spool requests; refreshed
+contacts are returned to the review queue before any provider delivery.

@@ -36,6 +36,11 @@ from reporting_view import (
     next_hourly_run,
     utc_text as reporting_utc_text,
 )
+from review_queue import (
+    close_no_contact_review,
+    open_no_contact_review,
+    reopen_contact_refreshed_review,
+)
 LOG = logging.getLogger("argent-sentinel-report-batch")
 REPORTABLE_STATES = ("pending", "failed", "deferred", "disabled", "no-contact")
 
@@ -218,6 +223,77 @@ def _fallback_enrichment(
     }
 
 
+def ensure_no_contact_enforcement(
+    collector: Collector,
+    incident_uuid: str,
+    detail: str,
+    *,
+    now_epoch: int,
+    test_mode: bool,
+) -> dict[str, Any]:
+    """Verify/apply the local IP decision and close a no-contact review."""
+
+    incident = collector.db.incident(incident_uuid)
+    decision_status, decision_detail = collector.apply_decision(incident)
+    collector.db.update_incident(
+        incident_uuid,
+        decision_status=decision_status,
+        decision_detail=decision_detail,
+    )
+    attempted_detail = (
+        f"{detail}; local decision status={decision_status}: "
+        f"{decision_detail}"
+    )
+    if decision_status in {"applied", "existing"}:
+        collector.db.update_incident(
+            incident_uuid,
+            report_status="no-contact",
+            report_detail=attempted_detail,
+            next_report_after_epoch=0,
+        )
+        collector.db.record_report_attempt(
+            incident_uuid,
+            [],
+            "no-contact",
+            attempted_detail,
+            test_mode=test_mode,
+            attempted_epoch=now_epoch,
+        )
+        result = close_no_contact_review(
+            collector.db.conn,
+            incident_uuid,
+            decision_status=decision_status,
+            decision_detail=decision_detail,
+            report_detail=attempted_detail,
+            now_epoch=now_epoch,
+        )
+        result["decision_status"] = decision_status
+        return result
+    retry_epoch = collector.report_retry_epoch(now_epoch)
+    open_no_contact_review(
+        collector.db.conn,
+        incident_uuid,
+        decision_status=decision_status,
+        decision_detail=decision_detail,
+        report_detail=attempted_detail,
+        retry_epoch=retry_epoch,
+        now_epoch=now_epoch,
+    )
+    collector.db.record_report_attempt(
+        incident_uuid,
+        [],
+        "no-contact",
+        attempted_detail,
+        test_mode=test_mode,
+        attempted_epoch=now_epoch,
+    )
+    return {
+        "status": "open",
+        "incident_uuid": incident_uuid,
+        "decision_status": decision_status,
+        "retry_epoch": retry_epoch,
+    }
+
 def prepare_candidates(
     collector: Collector,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -231,6 +307,12 @@ def prepare_candidates(
         collector.db.conn.execute(
             f"""SELECT * FROM incidents
                 WHERE report_status IN ({marks})
+                  AND NOT (
+                      report_status = 'no-contact'
+                      AND COALESCE(review_status, 'open') = 'closed'
+                      AND COALESCE(review_disposition, '')
+                          != 'contact-refresh-requested'
+                  )
                   AND COALESCE(next_report_after_epoch, 0) <= ?
                   AND last_seen_epoch <= ?
                 ORDER BY last_seen_epoch ASC, created_at ASC
@@ -244,39 +326,53 @@ def prepare_candidates(
         "suppressed": 0,
         "failed": 0,
         "no_contact": 0,
+        "auto_closed_no_contact": 0,
+        "contact_refreshed": 0,
     }
     for original in rows:
         incident_uuid = str(original["incident_uuid"])
         incident = collector.db.incident(incident_uuid)
-
-        gate = collector.report_time_gate(incident)
-        if gate is not None:
-            status, detail = gate
-            _record_terminal(collector, incident_uuid, status, detail)
-            stats["suppressed"] += 1
-            continue
-        protection, protection_detail = collector.source_protection_status(
-            str(incident["source_ip"])
+        review_disposition = str(
+            incident["review_disposition"] or ""
         )
+        refresh_only = review_disposition == "contact-refresh-requested"
         test_mode = bool(reporting.get("test_mode"))
-        if protection == "protected" and not test_mode:
-            _record_terminal(
-                collector,
-                incident_uuid,
-                "suppressed",
-                protection_detail,
+        if not refresh_only:
+            gate = collector.report_time_gate(incident)
+            if gate is not None:
+                status, detail = gate
+                policy_override = (
+                    review_disposition == "credential-spray-approved"
+                    and (
+                        "production review" in str(detail).lower()
+                        or "persistent wordpress" in str(detail).lower()
+                    )
+                )
+                if not policy_override:
+                    _record_terminal(collector, incident_uuid, status, detail)
+                    stats["suppressed"] += 1
+                    continue
+            protection, protection_detail = collector.source_protection_status(
+                str(incident["source_ip"])
             )
-            stats["suppressed"] += 1
-            continue
-        if protection == "error" and not test_mode:
-            _record_terminal(
-                collector,
-                incident_uuid,
-                "failed",
-                f"Abuse report withheld: {protection_detail}",
-            )
-            stats["failed"] += 1
-            continue
+            if protection == "protected" and not test_mode:
+                _record_terminal(
+                    collector,
+                    incident_uuid,
+                    "suppressed",
+                    protection_detail,
+                )
+                stats["suppressed"] += 1
+                continue
+            if protection == "error" and not test_mode:
+                _record_terminal(
+                    collector,
+                    incident_uuid,
+                    "failed",
+                    f"Abuse report withheld: {protection_detail}",
+                )
+                stats["failed"] += 1
+                continue
         try:
             enrichment = collector.enrich(str(incident["source_ip"]))
         except Exception as exc:
@@ -302,43 +398,60 @@ def prepare_candidates(
         incident = collector.db.incident(incident_uuid)
         incident_dict = dict(incident)
         agents = _incident_user_agents(collector, incident_uuid)
-        suppression = ban_only_reason(
-            str(incident["source_ip"]),
-            incident["asn"] or enrichment.get("asn"),
-            agents,
-            batching.get("ban_only", {}),
-        )
-        if suppression is not None:
-            detail = (
-                f"{suppression}; local IP enforcement remains active; "
-                "provider email suppressed"
+        if not refresh_only:
+            suppression = ban_only_reason(
+                str(incident["source_ip"]),
+                incident["asn"] or enrichment.get("asn"),
+                agents,
+                batching.get("ban_only", {}),
             )
-            _record_terminal(
-                collector,
-                incident_uuid,
-                "suppressed",
-                detail,
-            )
-            stats["suppressed"] += 1
-            continue
+            if suppression is not None:
+                detail = (
+                    f"{suppression}; local IP enforcement remains active; "
+                    "provider email suppressed"
+                )
+                _record_terminal(
+                    collector,
+                    incident_uuid,
+                    "suppressed",
+                    detail,
+                )
+                stats["suppressed"] += 1
+                continue
         recipients = collector.report_recipients(enrichment)
-        if not recipients:
-            detail = "No RDAP abuse email was found"
-            next_epoch = collector.report_retry_epoch(now_epoch)
-            collector.db.update_incident(
+        if refresh_only and recipients:
+            detail = (
+                "Credential-spray contact refresh found usable recipient(s): "
+                + ", ".join(recipients)
+            )
+            reopen_contact_refreshed_review(
+                collector.db.conn,
                 incident_uuid,
-                report_status="no-contact",
-                report_detail=detail,
-                next_report_after_epoch=next_epoch,
+                recipients=list(recipients),
+                now_epoch=now_epoch,
             )
             collector.db.record_report_attempt(
                 incident_uuid,
-                [],
-                "no-contact",
+                recipients,
+                "contact-refreshed",
                 detail,
                 test_mode=test_mode,
                 attempted_epoch=now_epoch,
             )
+            stats["contact_refreshed"] += 1
+            stats["suppressed"] += 1
+            continue
+        if not recipients:
+            detail = "No RDAP abuse email was found"
+            outcome = ensure_no_contact_enforcement(
+                collector,
+                incident_uuid,
+                detail,
+                now_epoch=now_epoch,
+                test_mode=test_mode,
+            )
+            if outcome.get("status") == "closed":
+                stats["auto_closed_no_contact"] += 1
             stats["no_contact"] += 1
             continue
         networks = report_networks(

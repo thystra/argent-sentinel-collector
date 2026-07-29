@@ -3,7 +3,7 @@
 Argent Sentinel is a self-hosted security event collector, correlation engine,
 CrowdSec decision bridge, and guarded abuse-reporting system.
 
-Version 0.5.2.0 combines authenticated event transport, central policy,
+Version 0.5.2.1 combines authenticated event transport, central policy,
 a read-only dashboard, and per-site traffic analytics:
 
 ```text
@@ -594,3 +594,10 @@ Version 0.5.2.0 publishes one open review item per incident rather than counting
 individual report attempts. Authenticated dashboard actions are written to a
 restricted spool and applied by a root-owned systemd path processor under the
 collector lock. See `docs/dashboard-review-workflow.md`.
+
+## Review refinements in 0.5.2.1
+
+No-contact incidents close automatically only after the local CrowdSec IP
+ban is verified. Suppressed WordPress credential-spray incidents expose audited
+approval, suppression, duplicate/subsumed, contact-refresh, and note actions.
+See `docs/review-workflow-0.5.2.1.md`.

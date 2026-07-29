@@ -19,12 +19,14 @@ from typing import Any, Iterator, Mapping
 import uuid
 
 from review_queue import (
+    CREDENTIAL_REVIEW_ACTIONS,
+    CREDENTIAL_SPRAY_RULES,
     REVIEW_ACTIONS,
     install_review_schema,
     utc_text,
 )
 
-APP_VERSION = "0.5.2.0"
+APP_VERSION = "0.5.2.1"
 UTC = dt.timezone.utc
 DEFAULTS: dict[str, Any] = {
     "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
@@ -193,10 +195,17 @@ def action_result(
         return "suppressed", "closed", "operator-suppressed"
     if action == "permanent-no-contact":
         return "suppressed", "closed", "permanent-no-contact"
+    if action == "approve-report":
+        return "pending", "closed", "credential-spray-approved"
+    if action == "keep-suppressed":
+        return "suppressed", "closed", "credential-spray-kept-suppressed"
+    if action == "duplicate-subsumed":
+        return "suppressed", "closed", "duplicate-subsumed"
+    if action == "refresh-contact":
+        return "no-contact", "closed", "contact-refresh-requested"
     if action == "note":
         return previous_report_status, "open", "note-added"
     raise ReviewError(f"Unsupported action: {action}")
-
 
 def apply_request(
     connection: sqlite3.Connection,
@@ -214,11 +223,11 @@ def apply_request(
             "action_id": int(existing_action[0]),
             "request_uuid": request["request_uuid"],
         }
-
     incident = connection.execute(
         """
-        SELECT incident_uuid, report_status, report_detail, updated_at,
-               review_status, review_disposition, review_note
+        SELECT incident_uuid, source_ip, rule_id, report_status,
+               report_detail, updated_at, review_status,
+               review_disposition, review_note
         FROM incidents
         WHERE incident_uuid = ?
         """,
@@ -230,14 +239,31 @@ def apply_request(
         raise ReviewError(
             "Stale review form: incident changed after the snapshot was built"
         )
-
+    action = request["action"]
+    if action in CREDENTIAL_REVIEW_ACTIONS:
+        detail = str(incident["report_detail"] or "").lower()
+        credential_review = (
+            str(incident["rule_id"]) in CREDENTIAL_SPRAY_RULES
+            and str(incident["report_status"]) == "suppressed"
+            and (
+                "pending production review" in detail
+                or "contact refresh" in detail
+                or str(incident["review_disposition"] or "")
+                    in {"credential-spray-review", "contact-refreshed"}
+            )
+        )
+        if not credential_review:
+            raise ReviewError(
+                f"Action {action!r} requires a suppressed credential-spray "
+                "review item"
+            )
     applied = (now or dt.datetime.now(UTC)).astimezone(UTC)
     applied_epoch = int(applied.timestamp())
     applied_at = utc_text(applied)
     previous_report_status = str(incident["report_status"])
     previous_review_status = str(incident["review_status"] or "open")
     new_report_status, new_review_status, disposition = action_result(
-        request["action"],
+        action,
         previous_report_status,
     )
     review_note = append_note(
@@ -246,7 +272,6 @@ def apply_request(
         request["operator"],
         applied_at,
     )
-
     report_detail = str(incident["report_detail"] or "").strip()
     action_detail = (
         f"Operator review {disposition} by {request['operator']} at "
@@ -254,35 +279,57 @@ def apply_request(
     )
     if request["note"]:
         action_detail += f": {request['note']}"
-    if request["action"] in {
+    if action in {
         "retry",
         "suppress",
         "permanent-no-contact",
+        "approve-report",
+        "keep-suppressed",
+        "duplicate-subsumed",
+        "refresh-contact",
     }:
         report_detail = (
-            f"{report_detail}; {action_detail}" if report_detail else action_detail
+            f"{report_detail}; {action_detail}"
+            if report_detail
+            else action_detail
         )
-
+    clear_delivery = action in {
+        "retry",
+        "approve-report",
+        "refresh-contact",
+    }
     with connection:
+        if action == "refresh-contact":
+            cache_exists = connection.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'enrichment_cache'
+                """
+            ).fetchone()
+            if cache_exists is not None:
+                connection.execute(
+                    "DELETE FROM enrichment_cache WHERE source_ip = ?",
+                    (str(incident["source_ip"]),),
+                )
         connection.execute(
             """
             UPDATE incidents
             SET report_status = ?,
                 report_detail = ?,
                 next_report_after_epoch = CASE
-                    WHEN ? = 'retry' THEN 0
+                    WHEN ? THEN 0
                     ELSE next_report_after_epoch
                 END,
                 report_recipient = CASE
-                    WHEN ? = 'retry' THEN NULL
+                    WHEN ? THEN NULL
                     ELSE report_recipient
                 END,
                 report_message_id = CASE
-                    WHEN ? = 'retry' THEN NULL
+                    WHEN ? THEN NULL
                     ELSE report_message_id
                 END,
                 report_sent_epoch = CASE
-                    WHEN ? = 'retry' THEN NULL
+                    WHEN ? THEN NULL
                     ELSE report_sent_epoch
                 END,
                 review_status = ?,
@@ -296,10 +343,10 @@ def apply_request(
             (
                 new_report_status,
                 report_detail or None,
-                request["action"],
-                request["action"],
-                request["action"],
-                request["action"],
+                int(clear_delivery),
+                int(clear_delivery),
+                int(clear_delivery),
+                int(clear_delivery),
                 new_review_status,
                 disposition,
                 review_note or None,
@@ -321,7 +368,7 @@ def apply_request(
             (
                 request["request_uuid"],
                 request["incident_uuid"],
-                request["action"],
+                action,
                 request["operator"],
                 request["note"] or None,
                 previous_report_status,
@@ -339,13 +386,12 @@ def apply_request(
         "action_id": int(cursor.lastrowid),
         "request_uuid": request["request_uuid"],
         "incident_uuid": request["incident_uuid"],
-        "action": request["action"],
+        "action": action,
         "disposition": disposition,
         "report_status": new_report_status,
         "review_status": new_review_status,
         "applied_at": applied_at,
     }
-
 
 def read_request(path: Path, config: Mapping[str, Any]) -> dict[str, str]:
     if path.stat().st_size > int(config["max_request_bytes"]):

@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler
 from typing import Any, Mapping
 from review_queue import REVIEW_ACTIONS
 
-APP_VERSION = "0.5.2.0"
+APP_VERSION = "0.5.2.1"
 LOG = logging.getLogger("argent-sentinel-dashboard")
 
 DEFAULTS: dict[str, Any] = {
@@ -297,6 +297,16 @@ def render_overview(snapshot: Mapping[str, Any]) -> str:
         ("Incidents", overview.get("incidents"), "/incidents"),
         ("Reports sent", overview.get("reports_sent"), "/reports"),
         ("Open review items", overview.get("open_reviews"), "/reviews"),
+        (
+            "Credential-spray reviews",
+            overview.get("credential_spray_reviews"),
+            "/reviews",
+        ),
+        (
+            "No-contact enforcement",
+            overview.get("no_contact_reviews"),
+            "/reviews",
+        ),
     ]
     card_html = "".join(
         (
@@ -322,7 +332,8 @@ def render_overview(snapshot: Mapping[str, Any]) -> str:
     rule_rows = [
         [
             h(row.get("rule_id")),
-            f'<span class="{status_class(row.get("report_status"))}">{h(row.get("report_status"))}</span>',
+            f'<span class="{status_class(row.get("report_status"))}">'
+            f'{h(row.get("report_status"))}</span>',
             number(row.get("count")),
             number(row.get("events")),
             when(row.get("first_seen")),
@@ -622,15 +633,33 @@ def render_reviews(
 ) -> str:
     reviews = snapshot.get("reviews", {})
     items = reviews.get("items", [])
+    counts = reviews.get("category_counts", {})
     note_max = int(config.get("review_note_max_chars", 2000))
     cards = (
         '<div class="grid">'
         f'<div class="card"><div class="label">Open items</div>'
         f'<div class="value">{number(reviews.get("open_count"))}</div></div>'
+        f'<div class="card"><div class="label">Credential spray</div>'
+        f'<div class="value">{number(counts.get("credential_spray"))}</div></div>'
+        f'<div class="card"><div class="label">No-contact enforcement</div>'
+        f'<div class="value">{number(counts.get("no_contact"))}</div></div>'
+        f'<div class="card"><div class="label">Delivery failures</div>'
+        f'<div class="value">{number(counts.get("delivery_failed"))}</div></div>'
         f'<div class="card"><div class="label">Displayed</div>'
         f'<div class="value">{number(len(items))}</div></div>'
         '</div>'
     )
+    action_labels = {
+        "acknowledge": "Acknowledge",
+        "retry": "Retry next batch",
+        "suppress": "Suppress report",
+        "permanent-no-contact": "Permanent no contact",
+        "approve-report": "Approve provider report",
+        "keep-suppressed": "Keep suppressed and close",
+        "duplicate-subsumed": "Close as duplicate/subsumed",
+        "refresh-contact": "Refresh abuse contact",
+        "note": "Add note",
+    }
     item_rows: list[list[Any]] = []
     for row in items:
         request_uuid = str(uuid.uuid4())
@@ -655,8 +684,11 @@ def render_reviews(
             f'<dt>Network</dt><dd>{h(row.get("network_cidr"))}</dd>'
             f'<dt>Registered allocation</dt><dd>{h(row.get("registered_cidr"))}</dd>'
             f'<dt>ASN</dt><dd>{h(row.get("asn"))} {h(row.get("asn_holder"))}</dd>'
+            f'<dt>Targeted accounts</dt><dd>{number(row.get("distinct_accounts"))}</dd>'
+            f'<dt>Sites</dt><dd>{number(row.get("site_count"))}</dd>'
             f'<dt>Decision</dt><dd>{h(row.get("decision_status"))}: '
             f'{h(row.get("decision_detail"))}</dd>'
+            f'<dt>Review disposition</dt><dd>{h(row.get("review_disposition"))}</dd>'
             f'<dt>Operator notes</dt><dd>{h(row.get("review_note"))}</dd>'
             '</dl>'
             + table(
@@ -665,19 +697,25 @@ def render_reviews(
             )
             + '</details>'
         )
+        actions = row.get("available_actions") or [
+            "acknowledge",
+            "retry",
+            "suppress",
+            "permanent-no-contact",
+            "note",
+        ]
+        options = "".join(
+            f'<option value="{h(action)}">'
+            f'{h(action_labels.get(str(action), str(action)))}</option>'
+            for action in actions
+        )
         controls = f"""
 <form class="review-form" method="post" action="/reviews/action">
 <input type="hidden" name="request_uuid" value="{h(request_uuid)}">
 <input type="hidden" name="incident_uuid" value="{h(incident_uuid)}">
 <input type="hidden" name="expected_updated_at" value="{h(updated_at)}">
 <input type="hidden" name="csrf_token" value="{h(token)}">
-<select name="action" required>
-<option value="acknowledge">Acknowledge</option>
-<option value="retry">Retry next batch</option>
-<option value="suppress">Suppress report</option>
-<option value="permanent-no-contact">Permanent no contact</option>
-<option value="note">Add note</option>
-</select>
+<select name="action" required>{options}</select>
 <input type="text" name="note" maxlength="{note_max}" placeholder="Operator note">
 <button type="submit">Queue action</button>
 </form>"""
@@ -685,8 +723,10 @@ def render_reviews(
             [
                 f'<code>{h(row.get("source_ip"))}</code>',
                 h(row.get("rule_id")),
-                f'<span class="{status_class(row.get("review_reason"))}">{h(row.get("review_reason"))}</span>',
-                f'<span class="{status_class(row.get("report_status"))}">{h(row.get("report_status"))}</span>',
+                f'<span class="{status_class(row.get("review_reason"))}">'
+                f'{h(row.get("review_reason"))}</span>',
+                f'<span class="{status_class(row.get("report_status"))}">'
+                f'{h(row.get("report_status"))}</span>',
                 number(row.get("attempt_count")),
                 h(row.get("latest_recipient") or row.get("report_recipient")),
                 when(row.get("first_seen")),
@@ -712,8 +752,9 @@ def render_reviews(
     return (
         cards
         + '<section><h2>Open review items</h2>'
-        + '<p class="muted">One row per current incident. Active cooldown '
-        'deferrals are excluded until overdue or repeatedly deferred.</p>'
+        + '<p class="muted">Credential-spray suppressions have explicit '
+        'approval and closure actions. No-contact items close automatically '
+        'only after local CrowdSec enforcement is verified.</p>'
         + table(
             [
                 "Source", "Rule", "Reason", "Report", "Attempts",

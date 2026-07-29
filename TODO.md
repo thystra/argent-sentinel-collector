@@ -272,3 +272,13 @@ Required work:
 - [x] Stop tracking `__pycache__`, `.pyc`, and `dist/deb` build artifacts.
 - [ ] Review persistent WordPress production volume and decide whether provider
   reporting should be enabled for newly created incidents.
+
+## Implemented in 0.5.2.1 — review refinements — 2026-07-29
+- [x] Verify/apply a local IP decision before auto-closing no-contact incidents.
+- [x] Preserve unresolved local-enforcement failures as open review work.
+- [x] Add explicit provider-report approval and closure dispositions for
+  suppressed WordPress credential-spray incidents.
+- [x] Add cached-contact refresh that returns the result to review without
+  automatically sending provider mail.
+- [x] Publish separate credential-spray and no-contact review counts.
+- [ ] Add audited most-specific CIDR review and enforcement in 0.5.3.0.

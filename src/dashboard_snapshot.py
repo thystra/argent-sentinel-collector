@@ -24,7 +24,7 @@ from reporting_view import (
 )
 from review_queue import build_review_snapshot
 
-APP_VERSION = "0.5.2.0"
+APP_VERSION = "0.5.2.1"
 UTC = dt.timezone.utc
 
 DEFAULTS: dict[str, Any] = {
@@ -289,6 +289,12 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
             now_epoch=end_epoch,
         )
         overview["open_reviews"] = reviews["open_count"]
+        overview["credential_spray_reviews"] = reviews.get(
+            "category_counts", {}
+        ).get("credential_spray", 0)
+        overview["no_contact_reviews"] = reviews.get(
+            "category_counts", {}
+        ).get("no_contact", 0)
         overview["reports_failed"] = reviews["open_count"]
         fail2ban = rows(
             connection,
