@@ -1,3 +1,17 @@
+## 0.5.3.1
+
+- Add a dedicated `enforcement_protection.protected_cidrs` policy that blocks
+  CrowdSec enforcement without exempting the protected network from telemetry.
+- Continue treating `trusted_cidrs` as enforcement-protected for backward
+  compatibility.
+- Mark CIDR proposals that overlap configured protections in dashboard snapshots,
+  suppress 180- and 365-day block actions, and show the matching protected CIDR.
+- Add an audited `Acknowledge protected network` action that closes the current
+  proposal revision without creating a CrowdSec decision.
+- Preserve an independent root-processor refusal for both trusted and dedicated
+  protected CIDRs.
+- Keep schema version 8 and automatic CIDR blocking disabled.
+
 ## 0.5.3.0
 
 - Add schema version 8 for deterministic bounded CIDR proposals and immutable

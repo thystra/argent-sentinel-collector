@@ -71,17 +71,17 @@ class V041Test(unittest.TestCase):
         self.assertNotIn("alan", json.dumps(event))
 
     def test_v041_runtime_layout_and_versions(self) -> None:
-        self.assertEqual("0.5.3.0", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.3.1", (ROOT / "VERSION").read_text().strip())
         for name in ("agent.py", "collector.py", "server_api.py"):
             self.assertIn(
-                'APP_VERSION = "0.5.3.0"',
+                'APP_VERSION = "0.5.3.1"',
                 (ROOT / "src" / name).read_text(),
             )
 
         package_builder = (
             ROOT / "packaging/build_debs.py"
         ).read_text()
-        self.assertIn('if upstream != "0.5.3.0":', package_builder)
+        self.assertIn('if upstream != "0.5.3.1":', package_builder)
         self.assertIn('"test_v041.py"', package_builder)
         self.assertIn('"test_v042.py"', package_builder)
 

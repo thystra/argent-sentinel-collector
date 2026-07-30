@@ -163,6 +163,9 @@ After implementation or deployment decisions, review and update:
 
 ## Current review-policy checkpoint
 - Version 0.5.3.0 uses schema version 8.
+- Version 0.5.3.1 separates enforcement-protected CIDRs from trusted source
+  CIDRs. Dashboard action suppression is advisory; the root review processor
+  must independently reject every protected overlap.
 - A no-contact incident is auto-closed only after CrowdSec returns `applied` or
   `existing`; enforcement failures remain open.
 - Suppressed WordPress credential-spray incidents have explicit audited review

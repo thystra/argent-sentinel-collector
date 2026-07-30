@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Source: /home/alan/src/argent-sentinel-collector/tests/test_v044.py
 import ast
-# Argent Sentinel v0.5.3.0 release regression tests.
+# Argent Sentinel v0.5.3.1 release regression tests.
 
 from pathlib import Path
 import unittest
@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class V044Test(unittest.TestCase):
     def test_release_versions_and_banner_layout(self) -> None:
-        expected_version = "0.5.3.0"
+        expected_version = "0.5.3.1"
         self.assertEqual(
             expected_version,
             (ROOT / "VERSION").read_text(encoding="utf-8").strip(),

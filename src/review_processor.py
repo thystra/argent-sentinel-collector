@@ -26,11 +26,13 @@ from review_queue import (
     NETWORK_REVIEW_ACTIONS,
     REVIEW_ACTIONS,
     install_review_schema,
+    annotate_network_protection,
     network_available_actions,
+    network_protection_match,
     utc_text,
 )
 
-APP_VERSION = "0.5.3.0"
+APP_VERSION = "0.5.3.1"
 UTC = dt.timezone.utc
 DEFAULTS: dict[str, Any] = {
     "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
@@ -458,8 +460,28 @@ def load_network_policy(config: Mapping[str, Any]) -> dict[str, Any]:
     trusted = raw.get("trusted_cidrs", [])
     if not isinstance(trusted, list):
         raise ReviewError("trusted_cidrs must be a list")
+    protection = raw.get("enforcement_protection", {})
+    if not isinstance(protection, Mapping):
+        raise ReviewError("enforcement_protection must be an object")
+    protected = protection.get("protected_cidrs", [])
+    if not isinstance(protected, list):
+        raise ReviewError(
+            "enforcement_protection.protected_cidrs must be a list"
+        )
+    for label, values in (
+        ("trusted_cidrs", trusted),
+        ("enforcement_protection.protected_cidrs", protected),
+    ):
+        for value in values:
+            try:
+                ipaddress.ip_network(str(value), strict=False)
+            except ValueError as exc:
+                raise ReviewError(
+                    f"{label} contains invalid CIDR {value!r}"
+                ) from exc
     return {
         "trusted_cidrs": [str(value) for value in trusted],
+        "protected_cidrs": [str(value) for value in protected],
         "reason_prefix": str(policy.get("reason_prefix", "argent-sentinel")).rstrip("/"),
         "long_days": int(policy.get("network_long_block_days", 180)),
         "severe_days": int(policy.get("network_severe_block_days", 365)),
@@ -504,17 +526,16 @@ def validate_network_target(
             f"Proposed CIDR /{proposal.prefixlen} is broader than the "
             f"configured /{minimum} safety boundary"
         )
-    for value in policy["trusted_cidrs"]:
-        try:
-            trusted = ipaddress.ip_network(str(value), strict=False)
-        except ValueError as exc:
-            raise ReviewError(f"Invalid trusted CIDR in collector config: {value}") from exc
-        if trusted.version == proposal.version and trusted.overlaps(proposal):
-            raise ReviewError(
-                f"Proposed CIDR overlaps trusted network {trusted}"
-            )
+    match = network_protection_match(str(proposal), policy)
+    if match:
+        source = str(match["protection_source"])
+        network = str(match["protected_by_cidr"])
+        if source == "trusted-cidrs":
+            raise ReviewError(f"Proposed CIDR overlaps trusted network {network}")
+        raise ReviewError(
+            f"Proposed CIDR overlaps enforcement-protected network {network}"
+        )
     return proposal
-
 
 def crowdsec_decision_items(payload: Any) -> list[Mapping[str, Any]]:
     """Extract decision objects from current and wrapped cscli JSON shapes."""
@@ -665,11 +686,12 @@ def apply_network_request(
     if str(case["proposal_cidr"] or "") != request["proposal_cidr"]:
         raise ReviewError("Stale review form: proposed CIDR changed")
     action = request["action"]
-    allowed = network_available_actions(dict(case))
+    policy = load_network_policy(config)
+    action_case = annotate_network_protection(dict(case), policy)
+    allowed = network_available_actions(action_case)
     if action not in allowed:
         raise ReviewError(f"Action {action!r} is not available for this network case")
 
-    policy = load_network_policy(config)
     applied = (now or dt.datetime.now(UTC)).astimezone(UTC)
     applied_epoch = int(applied.timestamp())
     applied_at = utc_text(applied)
@@ -683,6 +705,8 @@ def apply_network_request(
     decision_detail = str(case["decision_detail"] or "")
     decision_cidr = str(case["decision_cidr"] or "")
     decision_applied_at = case["decision_applied_at"]
+    audit_decision_status: str | None = None
+    audit_decision_detail: str | None = None
 
     if action in {"network-block-180", "network-block-365"}:
         requested_days = (
@@ -746,10 +770,32 @@ def apply_network_request(
         new_status = "closed"
         new_review_status = "closed"
         disposition = "recommendation-rejected"
+    elif action == "network-ack-protected":
+        match = network_protection_match(
+            str(case["proposal_cidr"] or ""),
+            policy,
+        )
+        if not match:
+            raise ReviewError(
+                "Network proposal no longer overlaps an enforcement protection"
+            )
+        new_status = "protected"
+        new_review_status = "closed"
+        disposition = "protected-network-acknowledged"
+        audit_decision_status = "protected"
+        audit_decision_detail = (
+            f"Proposal overlaps {match['protection_source']} "
+            f"{match['protected_by_cidr']}"
+        )
     elif action == "network-note":
         disposition = "note-added"
     else:
         raise ReviewError(f"Unsupported network action: {action}")
+
+    if audit_decision_status is None:
+        audit_decision_status = decision_status
+    if audit_decision_detail is None:
+        audit_decision_detail = decision_detail
 
     review_note = append_note(
         case["review_note"],
@@ -810,8 +856,8 @@ def apply_network_request(
                 new_review_status,
                 disposition,
                 requested_days,
-                decision_status or None,
-                decision_detail or None,
+                audit_decision_status or None,
+                audit_decision_detail or None,
                 request["requested_at"],
                 applied_epoch,
                 applied_at,
@@ -827,7 +873,7 @@ def apply_network_request(
         "disposition": disposition,
         "case_status": new_status,
         "review_status": new_review_status,
-        "decision_status": decision_status,
+        "decision_status": audit_decision_status or decision_status,
         "applied_at": applied_at,
     }
 

@@ -17,9 +17,9 @@ import review_digest  # noqa: E402
 
 class V049Test(unittest.TestCase):
     def test_release_versions(self) -> None:
-        self.assertEqual("0.5.3.0", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.3.1", (ROOT / "VERSION").read_text().strip())
         for module in (collector, fail2ban_export, review_digest):
-            self.assertEqual("0.5.3.0", module.APP_VERSION)
+            self.assertEqual("0.5.3.1", module.APP_VERSION)
 
     def test_fail2ban_row_parser(self) -> None:
         event = fail2ban_export.parse_ban_row(

@@ -3,7 +3,7 @@
 Argent Sentinel is a self-hosted security event collector, correlation engine,
 CrowdSec decision bridge, and guarded abuse-reporting system.
 
-Version 0.5.3.0 combines authenticated event transport, central policy,
+Version 0.5.3.1 combines authenticated event transport, central policy,
 a read-only dashboard, and per-site traffic analytics:
 
 ```text
@@ -601,6 +601,19 @@ No-contact incidents close automatically only after the local CrowdSec IP
 ban is verified. Suppressed WordPress credential-spray incidents expose audited
 approval, suppression, duplicate/subsumed, contact-refresh, and note actions.
 See `docs/review-workflow-0.5.2.1.md`.
+
+## Enforcement-protected CIDRs in 0.5.3.1
+
+`enforcement_protection.protected_cidrs` identifies addresses and prefixes that
+Argent Sentinel must never submit to CrowdSec as an IP or range decision. Unlike
+`trusted_cidrs`, these networks remain eligible for telemetry and review. The
+dashboard marks overlapping proposals as protected, suppresses block actions,
+and permits an audited acknowledgment or note. The root-owned review processor
+independently refuses enforcement even if a stale or forged request reaches the
+spool.
+
+This static safety foundation precedes the dynamic per-node host/LAN discovery
+and Debian installer selection planned for 0.5.4.0.
 
 ## Audited CIDR review in 0.5.3.0
 

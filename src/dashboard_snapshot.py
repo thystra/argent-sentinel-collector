@@ -28,7 +28,7 @@ from review_queue import (
     recent_network_review_actions,
 )
 
-APP_VERSION = "0.5.3.0"
+APP_VERSION = "0.5.3.1"
 UTC = dt.timezone.utc
 
 DEFAULTS: dict[str, Any] = {
@@ -351,7 +351,7 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
             LIMIT ?
             """,
             (max_rows,),
-        ))
+        ), collector_config)
         network_review_actions = recent_network_review_actions(
             connection,
             max_rows,
@@ -360,6 +360,11 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
             connection,
             "SELECT COUNT(*) FROM network_cases "
             "WHERE COALESCE(review_status, 'open') != 'closed'",
+        )
+        overview["protected_network_reviews"] = sum(
+            item.get("protection_status") == "protected-overlap"
+            and str(item.get("review_status") or "open") != "closed"
+            for item in network_cases
         )
         repeated_sources = rows(
             connection,

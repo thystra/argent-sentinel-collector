@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Source: tests/test_v0530.py
-"""Regression coverage for Argent Sentinel 0.5.3.0."""
+"""Regression coverage for Argent Sentinel 0.5.3.1."""
 
 from __future__ import annotations
 
@@ -32,12 +32,12 @@ class Completed:
 
 class V0530Test(unittest.TestCase):
     def test_release_and_schema_markers(self) -> None:
-        self.assertEqual("0.5.3.0", (ROOT / "VERSION").read_text().strip())
-        self.assertEqual("0.5.3.0", collector.APP_VERSION)
+        self.assertEqual("0.5.3.1", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.3.1", collector.APP_VERSION)
         self.assertEqual(8, collector.SCHEMA_VERSION)
         self.assertEqual(8, review_queue.SCHEMA_VERSION)
-        self.assertEqual("0.5.3.0", review_processor.APP_VERSION)
-        self.assertEqual("0.5.3.0", dashboard.APP_VERSION)
+        self.assertEqual("0.5.3.1", review_processor.APP_VERSION)
+        self.assertEqual("0.5.3.1", dashboard.APP_VERSION)
         build_script = (ROOT / "packaging/build_debs.py").read_text(encoding="utf-8")
         self.assertIn('"test_v0530.py"', build_script)
 

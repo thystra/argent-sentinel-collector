@@ -93,6 +93,19 @@ superficial browser-platform User-Agent variations. Sustained single-address
 path enumeration is a separate review condition. Neither condition creates an
 automatic ban.
 
+## Enforcement-protected networks
+
+The collector configuration separates enforcement protection from event trust.
+`trusted_cidrs` remain exempt from selected source-processing paths and are also
+never blockable. `enforcement_protection.protected_cidrs` are never blockable but
+remain visible to telemetry and incident correlation. Dashboard suppression is a
+usability control; the root-owned review processor repeats the overlap check at
+action time and is authoritative.
+
+Dynamic host and LAN-prefix protection will be derived by enrolled agents in a
+later release. A configured interface prefix is never sufficient on its own to
+infer ownership of the whole prefix.
+
 ## Registered-CIDR cases
 
 Network cases use `registered_cidr` returned by enrichment when available and

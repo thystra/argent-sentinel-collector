@@ -39,7 +39,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.5.3.0"
+APP_VERSION = "0.5.3.1"
 SCHEMA_VERSION = 8
 
 DEFAULTS: dict[str, Any] = {
@@ -114,6 +114,9 @@ DEFAULTS: dict[str, Any] = {
         "suppress_matching_markers": True,
     },
     "trusted_cidrs": ["127.0.0.0/8", "::1/128", "192.168.0.0/16"],
+    "enforcement_protection": {
+        "protected_cidrs": [],
+    },
     "policy": {
         "window_seconds": 900,
         "failure_threshold": 5,
@@ -342,8 +345,26 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise CollectorError("policy.ban_duration is required")
     if not str(policy.get("reason_prefix", "")).strip():
         raise CollectorError("policy.reason_prefix is required")
-    for cidr in config.get("trusted_cidrs", []):
-        ipaddress.ip_network(str(cidr), strict=False)
+    trusted_cidrs = config.get("trusted_cidrs", [])
+    if not isinstance(trusted_cidrs, list):
+        raise CollectorError("trusted_cidrs must be a list")
+    protection = config.get("enforcement_protection", {})
+    if not isinstance(protection, Mapping):
+        raise CollectorError("enforcement_protection must be an object")
+    protected_cidrs = protection.get("protected_cidrs", [])
+    if not isinstance(protected_cidrs, list):
+        raise CollectorError(
+            "enforcement_protection.protected_cidrs must be a list"
+        )
+    for label, values in (
+        ("trusted_cidrs", trusted_cidrs),
+        ("enforcement_protection.protected_cidrs", protected_cidrs),
+    ):
+        for cidr in values:
+            try:
+                ipaddress.ip_network(str(cidr), strict=False)
+            except ValueError as exc:
+                raise CollectorError(f"{label} contains invalid CIDR {cidr!r}") from exc
     node = config.get("node", {})
     if not str(node.get("id", "")).strip():
         raise CollectorError("node.id is required")
@@ -361,7 +382,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if network_reporting.get("automatic_cidr_blocking"):
         raise CollectorError(
             "network_reporting.automatic_cidr_blocking remains disabled; "
-            "0.5.3.0 supports only audited operator-initiated CIDR decisions"
+            "0.5.3.1 supports only audited operator-initiated CIDR decisions"
         )
     sshd_policy = config.get("sshd_policy", {})
     for name in (

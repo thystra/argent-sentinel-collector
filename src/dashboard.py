@@ -26,7 +26,7 @@ from http.server import BaseHTTPRequestHandler
 from typing import Any, Mapping
 from review_queue import NETWORK_REVIEW_ACTIONS, REVIEW_ACTIONS
 
-APP_VERSION = "0.5.3.0"
+APP_VERSION = "0.5.3.1"
 LOG = logging.getLogger("argent-sentinel-dashboard")
 
 DEFAULTS: dict[str, Any] = {
@@ -474,12 +474,18 @@ def render_networks(
         for row in cases
     )
     blocked_count = sum(str(row.get("status") or "") == "blocked" for row in cases)
+    protected_count = sum(
+        row.get("protection_status") == "protected-overlap"
+        for row in cases
+    )
     cards = (
         '<div class="grid">'
         f'<div class="card"><div class="label">Open CIDR reviews</div>'
         f'<div class="value">{number(open_count)}</div></div>'
         f'<div class="card"><div class="label">Blocked prefixes</div>'
         f'<div class="value">{number(blocked_count)}</div></div>'
+        f'<div class="card"><div class="label">Protected overlaps</div>'
+        f'<div class="value">{number(protected_count)}</div></div>'
         f'<div class="card"><div class="label">Displayed cases</div>'
         f'<div class="value">{number(len(cases))}</div></div>'
         '</div>'
@@ -491,6 +497,7 @@ def render_networks(
         "network-reject": "Reject recommendation",
         "network-remove-block": "Remove existing CIDR block",
         "network-note": "Add note",
+        "network-ack-protected": "Acknowledge protected network",
     }
     network_rows: list[list[Any]] = []
     for row in cases:
@@ -515,6 +522,9 @@ def render_networks(
             f'<dt>Proposed CIDR</dt><dd><code>{h(proposal_cidr)}</code></dd>'
             f'<dt>Proposal revision</dt><dd><code>{h(proposal_revision)}</code></dd>'
             f'<dt>Proposal basis</dt><dd>{h(row.get("proposal_basis"))}</dd>'
+            f'<dt>Protection status</dt><dd>{h(row.get("protection_status"))}</dd>'
+            f'<dt>Protected by</dt><dd><code>{h(row.get("protected_by_cidr"))}</code> '
+            f'({h(row.get("protection_source"))})</dd>'
             f'<dt>Proposal hostile IPs</dt><dd>{number(row.get("proposal_hostile_ips"))}</dd>'
             f'<dt>Proposal incidents/events</dt><dd>'
             f'{number(row.get("proposal_incident_count"))} / '
@@ -550,10 +560,13 @@ def render_networks(
 </form>"""
         else:
             controls = '<span class="muted">No action until evidence changes</span>'
+        display_status = str(row.get("status") or "")
+        if row.get("protection_status") == "protected-overlap":
+            display_status = f"{display_status} / protected"
         network_rows.append(
             [
                 f'<code>{h(network_cidr)}</code>',
-                f'<span class="{status_class(row.get("status"))}">{h(row.get("status"))}</span>',
+                f'<span class="{status_class(row.get("status"))}">{h(display_status)}</span>',
                 f'<span class="{status_class(row.get("review_status"))}">{h(row.get("review_status"))}</span>',
                 f'<code>{h(proposal_cidr)}</code>',
                 number(row.get("proposal_hostile_ips")),

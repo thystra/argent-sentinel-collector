@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import ipaddress
 import sqlite3
 import uuid
 from typing import Any, Mapping
@@ -31,6 +32,7 @@ NETWORK_REVIEW_ACTIONS = (
     "network-reject",
     "network-remove-block",
     "network-note",
+    "network-ack-protected",
 )
 REVIEW_ACTIONS = (
     "acknowledge",
@@ -176,10 +178,70 @@ def install_review_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def _configured_protection_sets(
+    config: Mapping[str, Any] | None,
+) -> tuple[list[Any], list[Any]]:
+    if not isinstance(config, Mapping):
+        return [], []
+    trusted = config.get("trusted_cidrs", [])
+    protection = config.get("enforcement_protection", {})
+    protected = config.get("protected_cidrs", [])
+    if isinstance(protection, Mapping):
+        protected = protection.get("protected_cidrs", protected)
+    return (
+        list(trusted) if isinstance(trusted, list) else [],
+        list(protected) if isinstance(protected, list) else [],
+    )
+
+
+def network_protection_match(
+    proposal_cidr: Any,
+    config: Mapping[str, Any] | None,
+) -> dict[str, str] | None:
+    value = str(proposal_cidr or "").strip()
+    if not value:
+        return None
+    try:
+        proposal = ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        return None
+    trusted, protected = _configured_protection_sets(config)
+    for source, values in (
+        ("trusted-cidrs", trusted),
+        ("protected-cidrs", protected),
+    ):
+        for configured in values:
+            try:
+                network = ipaddress.ip_network(str(configured), strict=False)
+            except ValueError:
+                continue
+            if network.version == proposal.version and network.overlaps(proposal):
+                return {
+                    "protection_status": "protected-overlap",
+                    "protection_source": source,
+                    "protected_by_cidr": str(network),
+                }
+    return None
+
+
+def annotate_network_protection(
+    row: dict[str, Any],
+    config: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    match = network_protection_match(row.get("proposal_cidr"), config)
+    row["protection_status"] = None
+    row["protection_source"] = None
+    row["protected_by_cidr"] = None
+    if match:
+        row.update(match)
+    return row
+
+
 def network_available_actions(row: Mapping[str, Any]) -> list[str]:
     status = str(row.get("status") or "")
     review_status = str(row.get("review_status") or "open")
     proposal = str(row.get("proposal_cidr") or "").strip()
+    protected = str(row.get("protection_status") or "") == "protected-overlap"
     proposal_evidence = (
         int(row.get("proposal_hostile_ips") or 0) >= 2
         or int(row.get("proposal_active_days") or 0) >= 2
@@ -188,6 +250,8 @@ def network_available_actions(row: Mapping[str, Any]) -> list[str]:
         return ["network-remove-block", "network-note"]
     if review_status == "closed":
         return []
+    if protected:
+        return ["network-ack-protected", "network-note"]
     actions: list[str] = []
     if (
         status in {"escalation-review", "long-block-review"}
@@ -197,7 +261,6 @@ def network_available_actions(row: Mapping[str, Any]) -> list[str]:
         actions.extend(("network-block-180", "network-block-365"))
     actions.extend(("network-observe", "network-reject", "network-note"))
     return actions
-
 
 def _review_predicate() -> str:
     credential_marks = ", ".join(
@@ -802,8 +865,10 @@ def recent_network_review_actions(
 
 def prepare_network_cases(
     cases: list[dict[str, Any]],
+    protection_config: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     for item in cases:
+        annotate_network_protection(item, protection_config)
         item["available_actions"] = network_available_actions(item)
     return cases
 

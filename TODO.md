@@ -313,3 +313,14 @@ Required work:
   automatic CIDR blocking.
 - [ ] Add auditable VPN endpoint classification and manual-review flags before
   considering an automatic VPN endpoint policy.
+
+## Implemented in 0.5.3.1 — enforcement-protected CIDR safety
+
+- [x] Separate enforcement-protected CIDRs from trusted source CIDRs.
+- [x] Suppress range-block actions for overlapping protected proposals.
+- [x] Retain authoritative protected-overlap refusal in the root processor.
+- [x] Add audited acknowledgment for protected proposal revisions.
+- [ ] Add dynamic signed node address inventories and host/LAN protection modes
+  in 0.5.4.0.
+- [ ] Add Debian debconf selection with conservative noninteractive `/128`
+  fallback in 0.5.4.0.
