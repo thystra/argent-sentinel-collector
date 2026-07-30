@@ -1,4 +1,5 @@
 {
+  "collector_config": "/etc/argent-sentinel/collector.json",
   "failed_dir": "/var/spool/argent-sentinel/review/failed",
   "incoming_dir": "/var/spool/argent-sentinel/review/incoming",
   "lock_file": "/run/argent-sentinel/collector.lock",

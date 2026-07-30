@@ -96,10 +96,25 @@ automatic ban.
 ## Registered-CIDR cases
 
 Network cases use `registered_cidr` returned by enrichment when available and
-fall back to the local candidate prefix otherwise. Review thresholds can
-recommend 180- or 365-day prefix blocks, but automatic CIDR enforcement remains
-disabled. An operator must review shared-network risk, evidence, exceptions,
-and the proposed expiration before changing a case to `blocked`.
+fall back to the local candidate prefix otherwise. The registered allocation is
+an ownership and correlation scope, not automatically the enforcement target.
+
+Schema version 8 derives a deterministic proposal from the strongest bounded
+evidence scope: `/24` for IPv4 or `/48` for IPv6 by default. Within that scope,
+the proposal is narrowed to the smallest common prefix containing the selected
+hostile addresses. The case records the proposal revision, distinct hostile
+addresses, incidents, events, active days, address-space coverage, and
+derivation basis. A materially changed evidence set produces a new revision and
+reopens an observe/reject review.
+
+The dashboard submits network actions to the same immutable review spool used
+for incident review. The root-owned processor validates the case timestamp,
+proposal revision, registered-allocation containment, configured prefix bound,
+trusted-prefix overlap, approved duration, and operator justification before
+calling CrowdSec with `decisions add --range`. It never uses
+`--bypass-allowlist`. Applied, existing, failed, refused, removed, and absent
+results are recorded in `network_review_actions`; failed enforcement remains
+open. Automatic CIDR enforcement remains disabled.
 
 ## v0.5 dashboard and traffic analysis
 

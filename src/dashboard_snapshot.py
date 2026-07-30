@@ -22,9 +22,13 @@ from reporting_view import (
     build_reporting_snapshot,
     load_optional_json,
 )
-from review_queue import build_review_snapshot
+from review_queue import (
+    build_review_snapshot,
+    prepare_network_cases,
+    recent_network_review_actions,
+)
 
-APP_VERSION = "0.5.2.1"
+APP_VERSION = "0.5.3.0"
 UTC = dt.timezone.utc
 
 DEFAULTS: dict[str, Any] = {
@@ -318,13 +322,21 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
             """,
             (start_epoch, max_rows),
         )
-        network_cases = rows(
+        network_cases = prepare_network_cases(rows(
             connection,
             """
             SELECT network_cidr, status, hostile_ips, incident_count,
                    event_count, active_days, first_seen, last_seen,
                    suggested_block_days, grouping_basis, asns,
-                   network_classes, operator_note, updated_at
+                   network_classes, operator_note, updated_at,
+                   proposal_cidr, proposal_revision,
+                   proposal_hostile_ips, proposal_incident_count,
+                   proposal_event_count, proposal_active_days,
+                   proposal_coverage_percent, proposal_basis,
+                   review_status, review_disposition, review_note,
+                   review_updated_at, decision_cidr, decision_status,
+                   decision_detail, decision_duration_days,
+                   decision_applied_at
             FROM network_cases
             ORDER BY
                 CASE status
@@ -339,6 +351,15 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
             LIMIT ?
             """,
             (max_rows,),
+        ))
+        network_review_actions = recent_network_review_actions(
+            connection,
+            max_rows,
+        )
+        overview["network_reviews"] = scalar(
+            connection,
+            "SELECT COUNT(*) FROM network_cases "
+            "WHERE COALESCE(review_status, 'open') != 'closed'",
         )
         repeated_sources = rows(
             connection,
@@ -445,6 +466,7 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
         "reviews": reviews,
         "fail2ban": fail2ban,
         "network_cases": network_cases,
+        "network_review_actions": network_review_actions,
         "repeated_sources": repeated_sources,
         "top_user_agents": top_user_agents,
         "crawler_groups": crawler_groups[:max_rows],

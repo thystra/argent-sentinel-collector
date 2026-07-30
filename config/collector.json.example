@@ -137,6 +137,8 @@
     "failure_threshold": 5,
     "incident_merge_seconds": 86400,
     "max_enforcement_age_days": 7,
+    "network_block_min_ipv4_prefix_length": 24,
+    "network_block_min_ipv6_prefix_length": 48,
     "network_escalation_active_days": 3,
     "network_escalation_distinct_ips": 5,
     "network_long_block_active_days": 1,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Source: /home/alan/src/argent-sentinel-collector/tests/test_v0521.py
-"""Regression coverage for Argent Sentinel 0.5.2.1."""
+"""Regression coverage for Argent Sentinel 0.5.3.0."""
 
 from __future__ import annotations
 
@@ -535,7 +535,7 @@ class V0521Test(unittest.TestCase):
 
     def test_release_markers(self) -> None:
         self.assertEqual(
-            "0.5.2.1",
+            "0.5.3.0",
             (ROOT / "VERSION").read_text(encoding="utf-8").strip(),
         )
         batcher = (ROOT / "src/report_batcher.py").read_text(
@@ -547,7 +547,7 @@ class V0521Test(unittest.TestCase):
         builder = (ROOT / "packaging/build_debs.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('upstream != "0.5.2.1"', builder)
+        self.assertIn('upstream != "0.5.3.0"', builder)
         self.assertIn('"test_v0521.py"', builder)
 
 

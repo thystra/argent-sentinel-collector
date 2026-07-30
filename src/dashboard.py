@@ -8,6 +8,7 @@ import base64
 import datetime as dt
 import hashlib
 import hmac
+import ipaddress
 import secrets
 import tempfile
 import uuid
@@ -23,9 +24,9 @@ import socketserver
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Mapping
-from review_queue import REVIEW_ACTIONS
+from review_queue import NETWORK_REVIEW_ACTIONS, REVIEW_ACTIONS
 
-APP_VERSION = "0.5.2.1"
+APP_VERSION = "0.5.3.0"
 LOG = logging.getLogger("argent-sentinel-dashboard")
 
 DEFAULTS: dict[str, Any] = {
@@ -119,18 +120,26 @@ def when(value: Any) -> str:
     )
 
 
-def csrf_token(request_uuid: str, incident_uuid: str, updated_at: str) -> str:
-    payload = f"{request_uuid}\n{incident_uuid}\n{updated_at}".encode("utf-8")
+def csrf_token(
+    request_uuid: str,
+    target_id: str,
+    updated_at: str,
+    revision: str = "",
+) -> str:
+    payload = (
+        f"{request_uuid}\n{target_id}\n{updated_at}\n{revision}"
+    ).encode("utf-8")
     return hmac.new(_CSRF_SECRET, payload, hashlib.sha256).hexdigest()
 
 
 def csrf_valid(
     supplied: str,
     request_uuid: str,
-    incident_uuid: str,
+    target_id: str,
     updated_at: str,
+    revision: str = "",
 ) -> bool:
-    expected = csrf_token(request_uuid, incident_uuid, updated_at)
+    expected = csrf_token(request_uuid, target_id, updated_at, revision)
     return hmac.compare_digest(str(supplied or ""), expected)
 
 
@@ -307,6 +316,11 @@ def render_overview(snapshot: Mapping[str, Any]) -> str:
             overview.get("no_contact_reviews"),
             "/reviews",
         ),
+        (
+            "CIDR reviews",
+            overview.get("network_reviews"),
+            "/networks",
+        ),
     ]
     card_html = "".join(
         (
@@ -449,31 +463,150 @@ def render_incidents(snapshot: Mapping[str, Any]) -> str:
     ) + "</section>"
 
 
-def render_networks(snapshot: Mapping[str, Any]) -> str:
-    network_rows = [
+def render_networks(
+    snapshot: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> str:
+    cases = snapshot.get("network_cases", [])
+    note_max = int(config.get("review_note_max_chars", 2000))
+    open_count = sum(
+        str(row.get("review_status") or "open") != "closed"
+        for row in cases
+    )
+    blocked_count = sum(str(row.get("status") or "") == "blocked" for row in cases)
+    cards = (
+        '<div class="grid">'
+        f'<div class="card"><div class="label">Open CIDR reviews</div>'
+        f'<div class="value">{number(open_count)}</div></div>'
+        f'<div class="card"><div class="label">Blocked prefixes</div>'
+        f'<div class="value">{number(blocked_count)}</div></div>'
+        f'<div class="card"><div class="label">Displayed cases</div>'
+        f'<div class="value">{number(len(cases))}</div></div>'
+        '</div>'
+    )
+    labels = {
+        "network-block-180": "Block proposed CIDR for 180 days",
+        "network-block-365": "Block proposed CIDR for 365 days",
+        "network-observe": "Keep observing",
+        "network-reject": "Reject recommendation",
+        "network-remove-block": "Remove existing CIDR block",
+        "network-note": "Add note",
+    }
+    network_rows: list[list[Any]] = []
+    for row in cases:
+        request_uuid = str(uuid.uuid4())
+        network_cidr = str(row.get("network_cidr") or "")
+        proposal_cidr = str(row.get("proposal_cidr") or "")
+        proposal_revision = str(row.get("proposal_revision") or "")
+        updated_at = str(row.get("updated_at") or "")
+        token = csrf_token(
+            request_uuid,
+            network_cidr,
+            updated_at,
+            proposal_revision,
+        )
+        try:
+            coverage = f"{float(row.get('proposal_coverage_percent') or 0):.6f}%"
+        except (TypeError, ValueError):
+            coverage = "0%"
+        evidence = (
+            '<details><summary>Proposal and enforcement history</summary><dl>'
+            f'<dt>Registered case</dt><dd><code>{h(network_cidr)}</code></dd>'
+            f'<dt>Proposed CIDR</dt><dd><code>{h(proposal_cidr)}</code></dd>'
+            f'<dt>Proposal revision</dt><dd><code>{h(proposal_revision)}</code></dd>'
+            f'<dt>Proposal basis</dt><dd>{h(row.get("proposal_basis"))}</dd>'
+            f'<dt>Proposal hostile IPs</dt><dd>{number(row.get("proposal_hostile_ips"))}</dd>'
+            f'<dt>Proposal incidents/events</dt><dd>'
+            f'{number(row.get("proposal_incident_count"))} / '
+            f'{number(row.get("proposal_event_count"))}</dd>'
+            f'<dt>Proposal active days</dt><dd>{number(row.get("proposal_active_days"))}</dd>'
+            f'<dt>Address-space coverage</dt><dd>{h(coverage)}</dd>'
+            f'<dt>Review disposition</dt><dd>{h(row.get("review_disposition"))}</dd>'
+            f'<dt>Operator notes</dt><dd>{h(row.get("review_note") or row.get("operator_note"))}</dd>'
+            f'<dt>Decision CIDR</dt><dd><code>{h(row.get("decision_cidr"))}</code></dd>'
+            f'<dt>Decision</dt><dd>{h(row.get("decision_status"))}: '
+            f'{h(row.get("decision_detail"))}</dd>'
+            f'<dt>Decision duration</dt><dd>{number(row.get("decision_duration_days"))} days</dd>'
+            f'<dt>Decision applied</dt><dd>{when(row.get("decision_applied_at"))}</dd>'
+            '</dl></details>'
+        )
+        actions = [str(value) for value in row.get("available_actions", [])]
+        if actions:
+            options = "".join(
+                f'<option value="{h(action)}">{h(labels.get(action, action))}</option>'
+                for action in actions
+            )
+            controls = f"""
+<form class="review-form" method="post" action="/networks/action">
+<input type="hidden" name="request_uuid" value="{h(request_uuid)}">
+<input type="hidden" name="network_cidr" value="{h(network_cidr)}">
+<input type="hidden" name="proposal_cidr" value="{h(proposal_cidr)}">
+<input type="hidden" name="proposal_revision" value="{h(proposal_revision)}">
+<input type="hidden" name="expected_updated_at" value="{h(updated_at)}">
+<input type="hidden" name="csrf_token" value="{h(token)}">
+<select name="action" required>{options}</select>
+<input type="text" name="note" maxlength="{note_max}" placeholder="Justification or operator note">
+<button type="submit">Queue action</button>
+</form>"""
+        else:
+            controls = '<span class="muted">No action until evidence changes</span>'
+        network_rows.append(
+            [
+                f'<code>{h(network_cidr)}</code>',
+                f'<span class="{status_class(row.get("status"))}">{h(row.get("status"))}</span>',
+                f'<span class="{status_class(row.get("review_status"))}">{h(row.get("review_status"))}</span>',
+                f'<code>{h(proposal_cidr)}</code>',
+                number(row.get("proposal_hostile_ips")),
+                coverage,
+                number(row.get("active_days")),
+                h(row.get("asns")),
+                h(row.get("network_classes")),
+                when(row.get("last_seen")),
+                evidence,
+                controls,
+            ]
+        )
+    action_rows = [
         [
-            f"<code>{h(row.get('network_cidr'))}</code>",
-            f'<span class="{status_class(row.get("status"))}">{h(row.get("status"))}</span>',
-            h(row.get("grouping_basis")),
-            number(row.get("hostile_ips")),
-            number(row.get("incident_count")),
-            number(row.get("active_days")),
-            (
-                f"{number(row.get('suggested_block_days'))} days"
-                if row.get("suggested_block_days")
-                else "-"
-            ),
-            h(row.get("asns")),
-            h(row.get("network_classes")),
-            when(row.get("last_seen")),
-            h(row.get("operator_note")),
+            when(row.get("applied_at")),
+            h(row.get("operator")),
+            h(row.get("action")),
+            h(row.get("disposition")),
+            f'<code>{h(row.get("network_cidr"))}</code>',
+            f'<code>{h(row.get("proposal_cidr"))}</code>',
+            h(row.get("previous_status")),
+            h(row.get("new_status")),
+            h(row.get("decision_status")),
+            h(row.get("decision_detail")),
+            h(row.get("note")),
         ]
-        for row in snapshot.get("network_cases", [])
+        for row in snapshot.get("network_review_actions", [])
     ]
-    return "<section><h2>CIDR and registered-network cases</h2>" + table(
-        ["Network", "Status", "Basis", "IPs", "Incidents", "Days", "Suggested block", "ASNs", "Class", "Last", "Note"],
-        network_rows,
-    ) + "</section>"
+    return (
+        cards
+        + '<section><h2>Audited CIDR review and enforcement</h2>'
+        + '<p class="muted">Registered allocations remain ownership scopes. '
+        'Only the displayed most-specific bounded proposal is eligible for a '
+        'manual CrowdSec range decision. Block actions require an operator '
+        'justification and never bypass allowlists.</p>'
+        + table(
+            [
+                "Registered case", "Recommendation", "Review", "Proposal",
+                "Proposal IPs", "Coverage", "Days", "ASNs", "Class", "Last",
+                "Evidence", "Action",
+            ],
+            network_rows,
+        )
+        + '</section><section><h2>Recent CIDR review actions</h2>'
+        + table(
+            [
+                "Applied", "Operator", "Action", "Disposition", "Case",
+                "Proposal", "Previous", "New", "Decision", "Detail", "Note",
+            ],
+            action_rows,
+        )
+        + '</section>'
+    )
 
 
 def render_reports(snapshot: Mapping[str, Any]) -> str:
@@ -819,7 +952,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
-        if parsed.path != "/reviews/action":
+        if parsed.path not in {"/reviews/action", "/networks/action"}:
             self.send_payload(404, b"Not found\n", "text/plain")
             return
         try:
@@ -838,18 +971,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             value = lambda name: str(form.get(name, [""])[0]).strip()
             request_uuid = str(uuid.UUID(value("request_uuid")))
-            incident_uuid = str(uuid.UUID(value("incident_uuid")))
             expected_updated_at = value("expected_updated_at")
             action = value("action")
-            if action not in REVIEW_ACTIONS:
-                raise DashboardError("Unsupported review action")
-            if not csrf_valid(
-                value("csrf_token"),
-                request_uuid,
-                incident_uuid,
-                expected_updated_at,
-            ):
-                raise DashboardError("Invalid or expired review form token")
             note = value("note")
             if len(note) > int(self.app_config["review_note_max_chars"]):
                 raise DashboardError("Review note exceeds configured limit")
@@ -859,34 +982,112 @@ class Handler(BaseHTTPRequestHandler):
                     "Authenticated operator identity was not forwarded"
                 )
             snapshot = load_snapshot(self.app_config)
-            matching = [
-                row
-                for row in snapshot.get("reviews", {}).get("items", [])
-                if str(row.get("incident_uuid")) == incident_uuid
-            ]
-            if len(matching) != 1:
-                raise DashboardError("Incident is no longer in the review queue")
-            if str(matching[0].get("updated_at")) != expected_updated_at:
-                raise DashboardError("Incident changed; reload the review page")
-            request = {
-                "request_uuid": request_uuid,
-                "incident_uuid": incident_uuid,
-                "expected_updated_at": expected_updated_at,
-                "action": action,
-                "operator": operator,
-                "note": note,
-                "requested_at": dt.datetime.now(dt.timezone.utc)
-                    .replace(microsecond=0)
-                    .isoformat()
-                    .replace("+00:00", "Z"),
-            }
+            requested_at = (
+                dt.datetime.now(dt.timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+
+            if parsed.path == "/reviews/action":
+                incident_uuid = str(uuid.UUID(value("incident_uuid")))
+                if action not in REVIEW_ACTIONS or action in NETWORK_REVIEW_ACTIONS:
+                    raise DashboardError("Unsupported incident review action")
+                if not csrf_valid(
+                    value("csrf_token"),
+                    request_uuid,
+                    incident_uuid,
+                    expected_updated_at,
+                ):
+                    raise DashboardError("Invalid or expired review form token")
+                matching = [
+                    row
+                    for row in snapshot.get("reviews", {}).get("items", [])
+                    if str(row.get("incident_uuid")) == incident_uuid
+                ]
+                if len(matching) != 1:
+                    raise DashboardError("Incident is no longer in the review queue")
+                item = matching[0]
+                if str(item.get("updated_at")) != expected_updated_at:
+                    raise DashboardError("Incident changed; reload the review page")
+                if action not in item.get("available_actions", []):
+                    raise DashboardError("Action is no longer available")
+                request = {
+                    "request_uuid": request_uuid,
+                    "target_type": "incident",
+                    "incident_uuid": incident_uuid,
+                    "expected_updated_at": expected_updated_at,
+                    "action": action,
+                    "operator": operator,
+                    "note": note,
+                    "requested_at": requested_at,
+                }
+                redirect = "/reviews?queued=" + urllib.parse.quote(request_uuid)
+            else:
+                try:
+                    network_cidr = str(
+                        ipaddress.ip_network(value("network_cidr"), strict=False)
+                    )
+                except ValueError as exc:
+                    raise DashboardError("Invalid network review CIDR") from exc
+                proposal_cidr = value("proposal_cidr")
+                if proposal_cidr:
+                    try:
+                        proposal_cidr = str(
+                            ipaddress.ip_network(proposal_cidr, strict=False)
+                        )
+                    except ValueError as exc:
+                        raise DashboardError("Invalid proposed CIDR") from exc
+                proposal_revision = value("proposal_revision")
+                if action not in NETWORK_REVIEW_ACTIONS:
+                    raise DashboardError("Unsupported network review action")
+                if not csrf_valid(
+                    value("csrf_token"),
+                    request_uuid,
+                    network_cidr,
+                    expected_updated_at,
+                    proposal_revision,
+                ):
+                    raise DashboardError("Invalid or expired network review token")
+                matching = [
+                    row
+                    for row in snapshot.get("network_cases", [])
+                    if str(row.get("network_cidr")) == network_cidr
+                ]
+                if len(matching) != 1:
+                    raise DashboardError("Network case is no longer available")
+                item = matching[0]
+                if str(item.get("updated_at")) != expected_updated_at:
+                    raise DashboardError("Network case changed; reload the page")
+                if str(item.get("proposal_revision") or "") != proposal_revision:
+                    raise DashboardError("Network proposal changed; reload the page")
+                if str(item.get("proposal_cidr") or "") != proposal_cidr:
+                    raise DashboardError("Proposed CIDR changed; reload the page")
+                if action not in item.get("available_actions", []):
+                    raise DashboardError("Network action is no longer available")
+                if action in {"network-block-180", "network-block-365"} and not note:
+                    raise DashboardError(
+                        "CIDR block actions require an operator justification"
+                    )
+                request = {
+                    "request_uuid": request_uuid,
+                    "target_type": "network",
+                    "network_cidr": network_cidr,
+                    "proposal_cidr": proposal_cidr,
+                    "proposal_revision": proposal_revision,
+                    "expected_updated_at": expected_updated_at,
+                    "action": action,
+                    "operator": operator,
+                    "note": note,
+                    "requested_at": requested_at,
+                }
+                redirect = "/networks?queued=" + urllib.parse.quote(request_uuid)
+
             queue_review_request(
                 Path(str(self.app_config["review_request_dir"])),
                 request,
             )
-            self.send_redirect(
-                "/reviews?queued=" + urllib.parse.quote(request_uuid)
-            )
+            self.send_redirect(redirect)
         except (
             DashboardError,
             UnicodeDecodeError,
@@ -944,7 +1145,10 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/incidents":
                 title, body = "Incidents", render_incidents(snapshot)
             elif path == "/networks":
-                title, body = "Networks", render_networks(snapshot)
+                title, body = "Networks", render_networks(
+                    snapshot,
+                    self.app_config,
+                )
             elif path == "/reports":
                 title, body = "Reports", render_reports(snapshot)
             elif path == "/reviews":

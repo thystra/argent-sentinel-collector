@@ -3,7 +3,7 @@
 Argent Sentinel is a self-hosted security event collector, correlation engine,
 CrowdSec decision bridge, and guarded abuse-reporting system.
 
-Version 0.5.2.1 combines authenticated event transport, central policy,
+Version 0.5.3.0 combines authenticated event transport, central policy,
 a read-only dashboard, and per-site traffic analytics:
 
 ```text
@@ -601,3 +601,26 @@ No-contact incidents close automatically only after the local CrowdSec IP
 ban is verified. Suppressed WordPress credential-spray incidents expose audited
 approval, suppression, duplicate/subsumed, contact-refresh, and note actions.
 See `docs/review-workflow-0.5.2.1.md`.
+
+## Audited CIDR review in 0.5.3.0
+
+The Networks page preserves each RDAP registered allocation as the ownership
+scope while displaying a separate most-specific enforcement proposal. Argent
+Sentinel first selects the strongest `/24` IPv4 or `/48` IPv6 evidence group,
+then narrows the proposal to the smallest common prefix containing those
+hostile addresses. The snapshot shows proposal counts, active days,
+address-space coverage, derivation basis, revision, and CrowdSec decision state.
+
+Authenticated operators may queue 180-day or 365-day range blocks, keep a case
+under observation, reject the current recommendation, add a note, or remove an
+existing range block. The dashboard writes only an immutable request file. The
+root-owned review processor verifies the current proposal revision, containment
+inside the registered case, configured `/24` and `/48` safety bounds, trusted
+network overlap, exact duration, and a nonempty block justification before
+using `cscli decisions add --range`. It never requests allowlist bypass.
+
+Automatic CIDR blocking remains disabled. Count/coverage thresholds and VPN
+endpoint classification are deferred until manual audited range decisions have
+enough production history. A future percentage threshold must use an explicit
+bounded-scope denominator rather than the minimal proposal's inherently biased
+coverage. See `docs/cidr-review-0.5.3.0.md`.

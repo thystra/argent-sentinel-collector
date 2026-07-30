@@ -11,7 +11,7 @@ import uuid
 from typing import Any, Mapping
 
 UTC = dt.timezone.utc
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 OPEN_REPORT_STATES = ("failed", "no-contact")
 CREDENTIAL_SPRAY_RULES = (
     "wordpress-credential-spray",
@@ -24,6 +24,14 @@ CREDENTIAL_REVIEW_ACTIONS = (
     "duplicate-subsumed",
     "refresh-contact",
 )
+NETWORK_REVIEW_ACTIONS = (
+    "network-block-180",
+    "network-block-365",
+    "network-observe",
+    "network-reject",
+    "network-remove-block",
+    "network-note",
+)
 REVIEW_ACTIONS = (
     "acknowledge",
     "retry",
@@ -31,6 +39,7 @@ REVIEW_ACTIONS = (
     "permanent-no-contact",
     *CREDENTIAL_REVIEW_ACTIONS,
     "note",
+    *NETWORK_REVIEW_ACTIONS,
 )
 
 
@@ -66,7 +75,7 @@ def ensure_column(
 
 
 def install_review_schema(connection: sqlite3.Connection) -> None:
-    """Install the schema-v7 review audit without changing old dispositions."""
+    """Install the schema-v8 incident and network review audit."""
 
     ensure_column(
         connection,
@@ -78,6 +87,43 @@ def install_review_schema(connection: sqlite3.Connection) -> None:
     ensure_column(connection, "incidents", "review_note", "TEXT")
     ensure_column(connection, "incidents", "review_updated_epoch", "INTEGER")
     ensure_column(connection, "incidents", "review_updated_at", "TEXT")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS network_cases (
+            network_cidr TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'observing',
+            hostile_ips INTEGER NOT NULL DEFAULT 0,
+            incident_count INTEGER NOT NULL DEFAULT 0,
+            event_count INTEGER NOT NULL DEFAULT 0,
+            active_days INTEGER NOT NULL DEFAULT 0,
+            first_seen TEXT,
+            last_seen TEXT,
+            operator_note TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    for name, definition in (
+        ("proposal_cidr", "TEXT"),
+        ("proposal_revision", "TEXT"),
+        ("proposal_hostile_ips", "INTEGER NOT NULL DEFAULT 0"),
+        ("proposal_incident_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("proposal_event_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("proposal_active_days", "INTEGER NOT NULL DEFAULT 0"),
+        ("proposal_coverage_percent", "REAL NOT NULL DEFAULT 0"),
+        ("proposal_basis", "TEXT"),
+        ("review_status", "TEXT NOT NULL DEFAULT 'open'"),
+        ("review_disposition", "TEXT"),
+        ("review_note", "TEXT"),
+        ("review_updated_epoch", "INTEGER"),
+        ("review_updated_at", "TEXT"),
+        ("decision_cidr", "TEXT"),
+        ("decision_status", "TEXT"),
+        ("decision_detail", "TEXT"),
+        ("decision_duration_days", "INTEGER NOT NULL DEFAULT 0"),
+        ("decision_applied_at", "TEXT"),
+    ):
+        ensure_column(connection, "network_cases", name, definition)
 
     connection.executescript(
         """
@@ -101,8 +147,56 @@ def install_review_schema(connection: sqlite3.Connection) -> None:
             ON review_actions(incident_uuid, applied_epoch DESC);
         CREATE INDEX IF NOT EXISTS review_actions_operator_time
             ON review_actions(operator, applied_epoch DESC);
+        CREATE TABLE IF NOT EXISTS network_review_actions (
+            action_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_uuid TEXT NOT NULL UNIQUE,
+            network_cidr TEXT NOT NULL REFERENCES network_cases(network_cidr),
+            proposal_cidr TEXT,
+            proposal_revision TEXT,
+            action TEXT NOT NULL,
+            operator TEXT NOT NULL,
+            note TEXT,
+            previous_status TEXT,
+            new_status TEXT,
+            previous_review_status TEXT,
+            new_review_status TEXT,
+            disposition TEXT,
+            requested_duration_days INTEGER NOT NULL DEFAULT 0,
+            decision_status TEXT,
+            decision_detail TEXT,
+            requested_at TEXT NOT NULL,
+            applied_epoch INTEGER NOT NULL,
+            applied_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS network_review_actions_case_time
+            ON network_review_actions(network_cidr, applied_epoch DESC);
+        CREATE INDEX IF NOT EXISTS network_review_actions_operator_time
+            ON network_review_actions(operator, applied_epoch DESC);
         """
     )
+
+
+def network_available_actions(row: Mapping[str, Any]) -> list[str]:
+    status = str(row.get("status") or "")
+    review_status = str(row.get("review_status") or "open")
+    proposal = str(row.get("proposal_cidr") or "").strip()
+    proposal_evidence = (
+        int(row.get("proposal_hostile_ips") or 0) >= 2
+        or int(row.get("proposal_active_days") or 0) >= 2
+    )
+    if status == "blocked":
+        return ["network-remove-block", "network-note"]
+    if review_status == "closed":
+        return []
+    actions: list[str] = []
+    if (
+        status in {"escalation-review", "long-block-review"}
+        and proposal
+        and proposal_evidence
+    ):
+        actions.extend(("network-block-180", "network-block-365"))
+    actions.extend(("network-observe", "network-reject", "network-note"))
+    return actions
 
 
 def _review_predicate() -> str:
@@ -680,6 +774,38 @@ def recent_review_actions(
             (max(1, int(limit)),),
         )
     ]
+
+
+def recent_network_review_actions(
+    connection: sqlite3.Connection,
+    limit: int,
+) -> list[dict[str, Any]]:
+    try:
+        rows = connection.execute(
+            """
+            SELECT action_id, request_uuid, network_cidr, proposal_cidr,
+                   proposal_revision, action, operator, note,
+                   previous_status, new_status, previous_review_status,
+                   new_review_status, disposition,
+                   requested_duration_days, decision_status,
+                   decision_detail, requested_at, applied_at
+            FROM network_review_actions
+            ORDER BY action_id DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        )
+    except sqlite3.OperationalError:
+        return []
+    return [dict(row) for row in rows]
+
+
+def prepare_network_cases(
+    cases: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    for item in cases:
+        item["available_actions"] = network_available_actions(item)
+    return cases
 
 
 def build_review_snapshot(

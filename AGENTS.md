@@ -151,7 +151,8 @@ After implementation or deployment decisions, review and update:
   connector sites as `seen`.
 
 ## Current review-workflow checkpoint
-- Version 0.5.2.0 adds the first audited dashboard write workflow.
+- Version 0.5.3.0 extends the audited dashboard workflow to registered-network
+  cases and most-specific bounded CIDR proposals.
 - Human-facing times are rendered in the server-local timezone; persisted and
   machine-readable timestamps remain UTC.
 - Dashboard review actions use `/var/spool/argent-sentinel/review/incoming` and
@@ -161,10 +162,17 @@ After implementation or deployment decisions, review and update:
 - Generated Python bytecode and `dist/deb` packages are not tracked in Git.
 
 ## Current review-policy checkpoint
-- Version 0.5.2.1 keeps schema version 7.
+- Version 0.5.3.0 uses schema version 8.
 - A no-contact incident is auto-closed only after CrowdSec returns `applied` or
   `existing`; enforcement failures remain open.
 - Suppressed WordPress credential-spray incidents have explicit audited review
   dispositions and contact refresh returns to review without sending.
-- CIDR review and most-specific justified block selection remain targeted for
-  0.5.3.0.
+- Registered allocations remain ownership scopes. Proposed CrowdSec range
+  decisions are bounded to no broader than `/24` for IPv4 and `/48` for IPv6,
+  then narrowed to the smallest common prefix containing the selected hostile
+  addresses.
+- CIDR actions use the immutable request spool and root-owned review processor;
+  the dashboard retains no direct database or CrowdSec access.
+- Range decisions require an authenticated operator, a nonempty justification,
+  a current proposal revision, trusted-prefix checks, and an approved 180- or
+  365-day duration. Automatic CIDR and VPN-endpoint blocking remain disabled.

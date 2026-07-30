@@ -108,6 +108,18 @@ Required work:
 - Include network-case evidence and proposed expiration in the daily review
   before a long-duration prefix block is enacted.
 - Support manual exceptions inside a blocked prefix.
+- After audited manual range decisions have production history, evaluate a
+  configurable automatic threshold that requires either a distinct hostile
+  address count (initial candidates: 10 or 20) or a percentage of a separately
+  defined bounded candidate scope in use by hostile addresses (initial
+  candidates: 25% or 50%). Do not reuse the minimal proposal's coverage as the
+  automatic denominator; deriving the smallest common prefix biases that value
+  upward.
+- Add enrichment-time VPN endpoint classification using configurable,
+  case-insensitive patterns against RDAP network name/handle and ASN holder.
+  Initially expose this only as an audited manual-review flag with explicit
+  exceptions; consider automatic VPN endpoint blocking only after false-positive
+  behavior is understood.
 
 ## Abuse-contact delivery failures
 
@@ -281,4 +293,23 @@ Required work:
 - [x] Add cached-contact refresh that returns the result to review without
   automatically sending provider mail.
 - [x] Publish separate credential-spray and no-contact review counts.
-- [ ] Add audited most-specific CIDR review and enforcement in 0.5.3.0.
+- [x] Add audited most-specific CIDR review and enforcement in 0.5.3.0.
+
+## Implemented in 0.5.3.0 — audited CIDR enforcement — 2026-07-29
+- [x] Add schema version 8 network proposal and audit fields.
+- [x] Preserve registered allocations as ownership scopes while deriving a
+  bounded most-specific proposal from the strongest `/24` or `/48` evidence
+  group.
+- [x] Require multiple hostile addresses and/or multiple active days before
+  exposing a CIDR block action.
+- [x] Add authenticated 180-day and 365-day range-block actions, observe,
+  reject, note, and removal actions through the immutable review spool.
+- [x] Verify proposal revision, containment, prefix limits, trusted-network
+  overlap, exact duration, and operator justification before CrowdSec access.
+- [x] Record immutable network action history and keep failed enforcement open.
+- [x] Publish proposal evidence, decisions, action controls, and recent CIDR
+  audit history on the Networks dashboard and daily digest.
+- [ ] Accumulate manual production history before enabling count/coverage-based
+  automatic CIDR blocking.
+- [ ] Add auditable VPN endpoint classification and manual-review flags before
+  considering an automatic VPN endpoint policy.

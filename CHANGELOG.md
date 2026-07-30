@@ -1,3 +1,26 @@
+## 0.5.3.0
+
+- Add schema version 8 for deterministic bounded CIDR proposals and immutable
+  network review-action history.
+- Preserve the registered allocation as the ownership scope while selecting the
+  strongest bounded `/24` IPv4 or `/48` IPv6 evidence group and narrowing it to
+  the most-specific common prefix.
+- Record proposal revision, hostile-address count, incident/event count, active
+  days, address-space coverage, derivation basis, review state, and CrowdSec
+  range-decision state.
+- Add audited 180-day and 365-day range blocks, keep-observing, reject, note,
+  and range-removal actions through the existing write-only dashboard spool and
+  root-owned review processor.
+- Refuse stale proposals, prefixes broader than policy, targets outside the
+  registered case, trusted-prefix overlap, unsupported durations, and block
+  requests without operator justification.
+- Keep failed or dry-run range enforcement open and record command outcomes in
+  `network_review_actions`.
+- Add network-review counts, proposal evidence, action controls, and recent CIDR
+  audit history to the dashboard and daily review digest.
+- Keep automatic CIDR and VPN-endpoint blocking disabled pending audited manual
+  production history.
+
 ## 0.5.2.1
 
 - Automatically close no-contact review items only after local CrowdSec IP

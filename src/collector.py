@@ -39,8 +39,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.5.2.1"
-SCHEMA_VERSION = 7
+APP_VERSION = "0.5.3.0"
+SCHEMA_VERSION = 8
 
 DEFAULTS: dict[str, Any] = {
     "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
@@ -134,6 +134,8 @@ DEFAULTS: dict[str, Any] = {
         "network_severe_block_distinct_ips": 48,
         "network_severe_block_incidents": 48,
         "network_severe_block_days": 365,
+        "network_block_min_ipv4_prefix_length": 24,
+        "network_block_min_ipv6_prefix_length": 48,
     },
     "crowdsec": {
         "enabled": False,
@@ -322,9 +324,20 @@ def validate_config(config: Mapping[str, Any]) -> None:
         "network_severe_block_distinct_ips",
         "network_severe_block_incidents",
         "network_severe_block_days",
+        "network_block_min_ipv4_prefix_length",
+        "network_block_min_ipv6_prefix_length",
     ):
         if int(policy[name]) < 1:
             raise CollectorError(f"policy.{name} must be positive")
+    for name, maximum in (
+        ("network_block_min_ipv4_prefix_length", 32),
+        ("network_block_min_ipv6_prefix_length", 128),
+    ):
+        value = int(policy[name])
+        if value > maximum:
+            raise CollectorError(
+                f"policy.{name} must be between 1 and {maximum}"
+            )
     if not str(policy.get("ban_duration", "")).strip():
         raise CollectorError("policy.ban_duration is required")
     if not str(policy.get("reason_prefix", "")).strip():
@@ -346,7 +359,10 @@ def validate_config(config: Mapping[str, Any]) -> None:
         if int(network_reporting.get(name, 0)) < 1:
             raise CollectorError(f"network_reporting.{name} must be positive")
     if network_reporting.get("automatic_cidr_blocking"):
-        raise CollectorError("network_reporting.automatic_cidr_blocking remains manual in v0.4.0")
+        raise CollectorError(
+            "network_reporting.automatic_cidr_blocking remains disabled; "
+            "0.5.3.0 supports only audited operator-initiated CIDR decisions"
+        )
     sshd_policy = config.get("sshd_policy", {})
     for name in (
         "window_seconds", "failure_threshold", "distinct_accounts",
@@ -756,6 +772,31 @@ class StateDB:
                 detail TEXT,
                 message_id TEXT
             );
+            CREATE TABLE IF NOT EXISTS network_review_actions (
+                action_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_uuid TEXT NOT NULL UNIQUE,
+                network_cidr TEXT NOT NULL REFERENCES network_cases(network_cidr),
+                proposal_cidr TEXT,
+                proposal_revision TEXT,
+                action TEXT NOT NULL,
+                operator TEXT NOT NULL,
+                note TEXT,
+                previous_status TEXT,
+                new_status TEXT,
+                previous_review_status TEXT,
+                new_review_status TEXT,
+                disposition TEXT,
+                requested_duration_days INTEGER NOT NULL DEFAULT 0,
+                decision_status TEXT,
+                decision_detail TEXT,
+                requested_at TEXT NOT NULL,
+                applied_epoch INTEGER NOT NULL,
+                applied_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS network_review_actions_case_time
+                ON network_review_actions(network_cidr, applied_epoch DESC);
+            CREATE INDEX IF NOT EXISTS network_review_actions_operator_time
+                ON network_review_actions(operator, applied_epoch DESC);
             CREATE TABLE IF NOT EXISTS legacy_reports (
                 marker_key TEXT PRIMARY KEY,
                 source_ip TEXT NOT NULL,
@@ -800,6 +841,27 @@ class StateDB:
         )
         self.ensure_column("network_cases", "asns", "TEXT")
         self.ensure_column("network_cases", "network_classes", "TEXT")
+        for name, definition in (
+            ("proposal_cidr", "TEXT"),
+            ("proposal_revision", "TEXT"),
+            ("proposal_hostile_ips", "INTEGER NOT NULL DEFAULT 0"),
+            ("proposal_incident_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("proposal_event_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("proposal_active_days", "INTEGER NOT NULL DEFAULT 0"),
+            ("proposal_coverage_percent", "REAL NOT NULL DEFAULT 0"),
+            ("proposal_basis", "TEXT"),
+            ("review_status", "TEXT NOT NULL DEFAULT 'open'"),
+            ("review_disposition", "TEXT"),
+            ("review_note", "TEXT"),
+            ("review_updated_epoch", "INTEGER"),
+            ("review_updated_at", "TEXT"),
+            ("decision_cidr", "TEXT"),
+            ("decision_status", "TEXT"),
+            ("decision_detail", "TEXT"),
+            ("decision_duration_days", "INTEGER NOT NULL DEFAULT 0"),
+            ("decision_applied_at", "TEXT"),
+        ):
+            self.ensure_column("network_cases", name, definition)
         self.conn.execute(
             """INSERT INTO schema_meta (key, value, updated_at)
                VALUES ('schema_version', ?, ?)
@@ -1568,6 +1630,16 @@ class StateDB:
     def network_context(self, network_cidr: str, policy: Mapping[str, Any]) -> dict[str, Any]:
         cutoff = int(utc_now().timestamp()) - int(policy["network_review_window_days"]) * 86400
         effective = "COALESCE(NULLIF(registered_cidr, ''), network_cidr)"
+        evidence_rows = list(
+            self.conn.execute(
+                f"""SELECT incident_uuid, source_ip, event_count,
+                           first_seen, last_seen, last_seen_epoch
+                    FROM incidents
+                    WHERE {effective} = ? AND last_seen_epoch >= ?
+                    ORDER BY last_seen_epoch, incident_uuid""",
+                (network_cidr, cutoff),
+            )
+        )
         row = self.conn.execute(
             f"""SELECT COUNT(DISTINCT source_ip) AS hostile_ips,
                        COUNT(*) AS incident_count,
@@ -1590,12 +1662,33 @@ class StateDB:
         status, suggested_days, _ = network_case_recommendation(
             policy, hostile_ips, incident_count, active_days,
         )
+        proposal = network_block_proposal(network_cidr, evidence_rows, policy)
         existing = self.conn.execute(
-            "SELECT status, operator_note FROM network_cases WHERE network_cidr = ?",
+            "SELECT * FROM network_cases WHERE network_cidr = ?",
             (network_cidr,),
         ).fetchone()
-        if existing is not None and str(existing["status"]) in {"blocked", "closed"}:
-            status = str(existing["status"])
+        review_status = "open"
+        review_disposition = None
+        review_note = None
+        review_updated_epoch = None
+        review_updated_at = None
+        if existing is not None:
+            previous_status = str(existing["status"])
+            previous_revision = str(existing["proposal_revision"] or "")
+            same_revision = previous_revision == str(proposal["proposal_revision"])
+            if previous_status == "blocked":
+                status = previous_status
+                review_status = str(existing["review_status"] or "closed")
+                review_disposition = existing["review_disposition"]
+            elif same_revision and str(existing["review_status"] or "open") == "closed":
+                status = previous_status
+                review_status = "closed"
+                review_disposition = existing["review_disposition"]
+            elif previous_revision and not same_revision:
+                review_disposition = "proposal-updated"
+            review_note = existing["review_note"]
+            review_updated_epoch = existing["review_updated_epoch"]
+            review_updated_at = existing["review_updated_at"]
         return {
             "network_cidr": network_cidr,
             "hostile_ips": hostile_ips,
@@ -1610,6 +1703,17 @@ class StateDB:
             "asns": row["asns"],
             "network_classes": row["network_classes"],
             "operator_note": existing["operator_note"] if existing is not None else None,
+            **proposal,
+            "review_status": review_status,
+            "review_disposition": review_disposition,
+            "review_note": review_note,
+            "review_updated_epoch": review_updated_epoch,
+            "review_updated_at": review_updated_at,
+            "decision_cidr": existing["decision_cidr"] if existing is not None else None,
+            "decision_status": existing["decision_status"] if existing is not None else None,
+            "decision_detail": existing["decision_detail"] if existing is not None else None,
+            "decision_duration_days": int(existing["decision_duration_days"] or 0) if existing is not None else 0,
+            "decision_applied_at": existing["decision_applied_at"] if existing is not None else None,
         }
     def sync_network_cases(self, policy: Mapping[str, Any]) -> int:
         changed = 0
@@ -1624,17 +1728,24 @@ class StateDB:
                     (context["network_cidr"],),
                 ).fetchone()
                 status = context["status"]
-                if current is not None and str(current["status"]) in {"blocked", "closed"}:
+                if current is not None and str(current["status"]) == "blocked":
                     status = str(current["status"])
                 self.conn.execute(
                     """INSERT INTO network_cases
                     (network_cidr, status, hostile_ips, incident_count, event_count,
                      active_days, first_seen, last_seen, suggested_block_days,
-                     grouping_basis, asns, network_classes, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     grouping_basis, asns, network_classes, operator_note,
+                     proposal_cidr, proposal_revision, proposal_hostile_ips,
+                     proposal_incident_count, proposal_event_count,
+                     proposal_active_days, proposal_coverage_percent,
+                     proposal_basis, review_status, review_disposition,
+                     review_note, review_updated_epoch, review_updated_at,
+                     decision_cidr, decision_status, decision_detail,
+                     decision_duration_days, decision_applied_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(network_cidr) DO UPDATE SET
-                     status=CASE WHEN network_cases.status IN ('blocked','closed')
-                                 THEN network_cases.status ELSE excluded.status END,
+                     status=excluded.status,
                      hostile_ips=excluded.hostile_ips,
                      incident_count=excluded.incident_count,
                      event_count=excluded.event_count,
@@ -1645,6 +1756,25 @@ class StateDB:
                      grouping_basis=excluded.grouping_basis,
                      asns=excluded.asns,
                      network_classes=excluded.network_classes,
+                     operator_note=excluded.operator_note,
+                     proposal_cidr=excluded.proposal_cidr,
+                     proposal_revision=excluded.proposal_revision,
+                     proposal_hostile_ips=excluded.proposal_hostile_ips,
+                     proposal_incident_count=excluded.proposal_incident_count,
+                     proposal_event_count=excluded.proposal_event_count,
+                     proposal_active_days=excluded.proposal_active_days,
+                     proposal_coverage_percent=excluded.proposal_coverage_percent,
+                     proposal_basis=excluded.proposal_basis,
+                     review_status=excluded.review_status,
+                     review_disposition=excluded.review_disposition,
+                     review_note=excluded.review_note,
+                     review_updated_epoch=excluded.review_updated_epoch,
+                     review_updated_at=excluded.review_updated_at,
+                     decision_cidr=excluded.decision_cidr,
+                     decision_status=excluded.decision_status,
+                     decision_detail=excluded.decision_detail,
+                     decision_duration_days=excluded.decision_duration_days,
+                     decision_applied_at=excluded.decision_applied_at,
                      updated_at=excluded.updated_at""",
                     (
                         context["network_cidr"], status, context["hostile_ips"],
@@ -1652,7 +1782,20 @@ class StateDB:
                         context["active_days"], context["first_seen"],
                         context["last_seen"], context["suggested_block_days"],
                         context["grouping_basis"], context["asns"],
-                        context["network_classes"], now,
+                        context["network_classes"], context["operator_note"],
+                        context["proposal_cidr"], context["proposal_revision"],
+                        context["proposal_hostile_ips"],
+                        context["proposal_incident_count"],
+                        context["proposal_event_count"],
+                        context["proposal_active_days"],
+                        context["proposal_coverage_percent"],
+                        context["proposal_basis"], context["review_status"],
+                        context["review_disposition"], context["review_note"],
+                        context["review_updated_epoch"],
+                        context["review_updated_at"], context["decision_cidr"],
+                        context["decision_status"], context["decision_detail"],
+                        context["decision_duration_days"],
+                        context["decision_applied_at"], now,
                     ),
                 )
                 self.conn.execute(
@@ -1864,6 +2007,136 @@ def network_case_recommendation(
     if hostile_ips >= int(policy["network_review_distinct_ips"]):
         return "review", 0, "Network review threshold reached."
     return "observing", 0, "Below network review threshold."
+
+
+def network_block_proposal(
+    network_cidr: str,
+    evidence_rows: Sequence[Mapping[str, Any]],
+    policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the strongest bounded, most-specific hostile CIDR proposal."""
+
+    registered = ipaddress.ip_network(str(network_cidr), strict=False)
+    boundary_prefix = int(
+        policy[
+            "network_block_min_ipv4_prefix_length"
+            if registered.version == 4
+            else "network_block_min_ipv6_prefix_length"
+        ]
+    )
+    boundary_prefix = max(boundary_prefix, registered.prefixlen)
+    groups: dict[str, list[Mapping[str, Any]]] = {}
+    for row in evidence_rows:
+        try:
+            address = ipaddress.ip_address(str(row["source_ip"]))
+        except (ValueError, KeyError, TypeError):
+            continue
+        if address.version != registered.version or address not in registered:
+            continue
+        bounded = ipaddress.ip_network(
+            f"{address}/{boundary_prefix}",
+            strict=False,
+        )
+        groups.setdefault(str(bounded), []).append(row)
+
+    if not groups:
+        revision_payload = {
+            "network_cidr": str(registered),
+            "proposal_cidr": None,
+            "source_ips": [],
+            "incident_uuids": [],
+        }
+        revision = hashlib.sha256(
+            json.dumps(revision_payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return {
+            "proposal_cidr": None,
+            "proposal_revision": revision,
+            "proposal_hostile_ips": 0,
+            "proposal_incident_count": 0,
+            "proposal_event_count": 0,
+            "proposal_active_days": 0,
+            "proposal_coverage_percent": 0.0,
+            "proposal_basis": f"bounded-/{boundary_prefix}-no-evidence",
+        }
+
+    def group_score(item: tuple[str, list[Mapping[str, Any]]]) -> tuple[Any, ...]:
+        cidr, rows = item
+        sources = {str(row["source_ip"]) for row in rows}
+        active_days = {
+            value
+            for row in rows
+            for value in (
+                str(row["first_seen"])[:10],
+                str(row["last_seen"])[:10],
+            )
+            if value
+        }
+        last_epoch = max(int(row["last_seen_epoch"] or 0) for row in rows)
+        return (len(sources), len(rows), len(active_days), last_epoch, cidr)
+
+    bounded_cidr, selected = max(groups.items(), key=group_score)
+    addresses = sorted(
+        {
+            ipaddress.ip_address(str(row["source_ip"]))
+            for row in selected
+        },
+        key=int,
+    )
+    minimum = int(addresses[0])
+    maximum = int(addresses[-1])
+    width = addresses[0].max_prefixlen
+    common_prefix = width - (minimum ^ maximum).bit_length()
+    proposal_prefix = max(boundary_prefix, common_prefix, registered.prefixlen)
+    proposal = ipaddress.ip_network((minimum, proposal_prefix), strict=False)
+    if not proposal.subnet_of(registered):
+        proposal = registered
+
+    incident_ids = sorted(
+        {str(row["incident_uuid"]) for row in selected}
+    )
+    source_ips = [str(address) for address in addresses]
+    event_count = sum(int(row["event_count"] or 0) for row in selected)
+    active_days = len(
+        {
+            value
+            for row in selected
+            for value in (
+                str(row["first_seen"])[:10],
+                str(row["last_seen"])[:10],
+            )
+            if value
+        }
+    )
+    first_seen = min(str(row["first_seen"]) for row in selected)
+    last_seen = max(str(row["last_seen"]) for row in selected)
+    coverage = (len(addresses) / int(proposal.num_addresses)) * 100.0
+    revision_payload = {
+        "network_cidr": str(registered),
+        "bounded_cidr": bounded_cidr,
+        "proposal_cidr": str(proposal),
+        "source_ips": source_ips,
+        "incident_uuids": incident_ids,
+        "event_count": event_count,
+        "active_days": active_days,
+        "first_seen": first_seen,
+        "last_seen": last_seen,
+    }
+    revision = hashlib.sha256(
+        json.dumps(revision_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return {
+        "proposal_cidr": str(proposal),
+        "proposal_revision": revision,
+        "proposal_hostile_ips": len(addresses),
+        "proposal_incident_count": len(selected),
+        "proposal_event_count": event_count,
+        "proposal_active_days": active_days,
+        "proposal_coverage_percent": round(coverage, 8),
+        "proposal_basis": (
+            f"strongest-bounded-/{boundary_prefix}; source={bounded_cidr}"
+        ),
+    }
 
 
 def epoch_text(epoch: int) -> str:

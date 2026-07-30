@@ -19,7 +19,7 @@ import subprocess
 from typing import Any, Iterator, Mapping, Sequence
 import urllib.parse
 
-APP_VERSION = "0.5.2.1"
+APP_VERSION = "0.5.3.0"
 UTC = dt.timezone.utc
 CRAWLER_IDENTITIES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("crawler:meta-externalagent", re.compile(r"(?:meta-externalagent|facebookexternalhit)", re.I)),
@@ -224,9 +224,15 @@ def render_digest(
         connection,
         """SELECT network_cidr, status, hostile_ips, incident_count, event_count,
                   active_days, first_seen, last_seen, suggested_block_days,
-                  grouping_basis, asns, network_classes, operator_note
+                  grouping_basis, asns, network_classes, operator_note,
+                  proposal_cidr, proposal_hostile_ips,
+                  proposal_incident_count, proposal_event_count,
+                  proposal_active_days, proposal_coverage_percent,
+                  proposal_basis, review_status, review_disposition,
+                  decision_cidr, decision_status, decision_duration_days
            FROM network_cases
            WHERE status IN ('review','escalation-review','long-block-review','blocked')
+             AND COALESCE(review_status, 'open') != 'closed'
            ORDER BY CASE status WHEN 'blocked' THEN 0 WHEN 'long-block-review' THEN 1
                                 WHEN 'escalation-review' THEN 2 ELSE 3 END,
                     hostile_ips DESC, last_seen DESC LIMIT ?""",
@@ -296,6 +302,13 @@ def render_digest(
                     f"  Incidents/events: {row['incident_count']} / {row['event_count']}",
                     f"  Active days: {row['active_days']}",
                     f"  Suggested block: {duration} days" if duration else "  Suggested block: none",
+                    f"  Proposed CIDR: {row['proposal_cidr'] or '-'}",
+                    f"  Proposal IPs/incidents/events: {row['proposal_hostile_ips']} / {row['proposal_incident_count']} / {row['proposal_event_count']}",
+                    f"  Proposal active days: {row['proposal_active_days']}",
+                    f"  Proposal coverage: {float(row['proposal_coverage_percent'] or 0):.6f}%",
+                    f"  Proposal basis: {row['proposal_basis'] or '-'}",
+                    f"  Review state: {row['review_status'] or 'open'} / {row['review_disposition'] or '-'}",
+                    f"  Active decision: {row['decision_cidr'] or '-'} / {row['decision_status'] or '-'} / {row['decision_duration_days'] or 0} days",
                     f"  ASN(s): {row['asns'] or '-'}",
                     f"  Network classes: {row['network_classes'] or '-'}",
                     f"  First/last seen: {row['first_seen'] or '-'} / {row['last_seen'] or '-'}",
@@ -307,9 +320,9 @@ def render_digest(
     body.extend(
         [
             "",
-            "HTTP 429 and CIDR long-block entries are review telemetry only.",
-            "The digest does not create a firewall ban or provider report",
-            "from a 429 response or recommendation alone.",
+            "HTTP 429 entries remain review telemetry only.",
+            "CIDR recommendations require an audited operator action before",
+            "the root-owned review processor may create a CrowdSec range decision.",
         ]
     )
     return "\n".join(body) + "\n"
