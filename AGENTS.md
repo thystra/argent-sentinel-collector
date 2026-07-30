@@ -134,7 +134,8 @@ After implementation or deployment decisions, review and update:
   commented EOF marker when the format supports comments.
 
 ## Current reporting checkpoint
-- Version 0.5.1.1 is the operational reporting baseline.
+- Version 0.5.4.0 is the current development target; 0.5.3.1 is the verified
+  production enforcement-protection baseline.
 - The 2026-07-29 production cutover retired the legacy Nginx sender and
   validated the first hourly provider delivery.
 - Immediate per-IP enforcement remains independent of hourly provider email.
@@ -162,10 +163,18 @@ After implementation or deployment decisions, review and update:
 - Generated Python bytecode and `dist/deb` packages are not tracked in Git.
 
 ## Current review-policy checkpoint
-- Version 0.5.3.0 uses schema version 8.
+- Version 0.5.4.0 uses schema version 9 and adds authenticated dynamic
+  local-address protection inventories from enrolled agents.
 - Version 0.5.3.1 separates enforcement-protected CIDRs from trusted source
   CIDRs. Dashboard action suppression is advisory; the root review processor
   must independently reject every protected overlap.
+- Dynamic protection modes are `host`, `lan-prefix`, `manual`, and `off`.
+  Virtualized/uncertain nodes default to `/128` host mode; LAN-prefix protection
+  requires explicit ownership confirmation. Noninteractive package setup is
+  unconfirmed host mode and never silently broadens to a prefix.
+- The collector publishes `/var/lib/argent-sentinel/collector/effective-protected-cidrs.json`;
+  the root review processor must fail closed if configured dynamic state is
+  missing, invalid, or stale.
 - A no-contact incident is auto-closed only after CrowdSec returns `applied` or
   `existing`; enforcement failures remain open.
 - Suppressed WordPress credential-spray incidents have explicit audited review

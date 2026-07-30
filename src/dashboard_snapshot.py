@@ -28,7 +28,7 @@ from review_queue import (
     recent_network_review_actions,
 )
 
-APP_VERSION = "0.5.3.1"
+APP_VERSION = "0.5.4.0"
 UTC = dt.timezone.utc
 
 DEFAULTS: dict[str, Any] = {
@@ -193,6 +193,46 @@ def load_sites(path: Path, awstats_root: Path) -> list[dict[str, Any]]:
 def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
     collector_config = load_optional_json(
         Path(str(config["collector_config"]))
+    )
+    protection_config = collector_config.get("enforcement_protection", {})
+    if not isinstance(protection_config, Mapping):
+        protection_config = {}
+    dynamic_state_path = Path(
+        str(
+            protection_config.get(
+                "dynamic_state_file",
+                "/var/lib/argent-sentinel/collector/effective-protected-cidrs.json",
+            )
+        )
+    )
+    dynamic_state = load_optional_json(dynamic_state_path)
+    try:
+        dynamic_generated_epoch = int(dynamic_state.get("generated_epoch", 0))
+    except (TypeError, ValueError):
+        dynamic_generated_epoch = 0
+    dynamic_state_age = (
+        max(0, int(utc_now().timestamp()) - dynamic_generated_epoch)
+        if dynamic_generated_epoch > 0
+        else None
+    )
+    dynamic_state_max_age = int(
+        protection_config.get("dynamic_state_max_age_seconds", 600)
+    )
+    if not dynamic_state_path.is_file():
+        dynamic_state_status = "missing"
+    elif dynamic_state.get("schema_version") != 1 or dynamic_generated_epoch < 1:
+        dynamic_state_status = "invalid"
+    elif dynamic_state_age is not None and dynamic_state_age > dynamic_state_max_age:
+        dynamic_state_status = "stale"
+    else:
+        dynamic_state_status = "fresh"
+    dynamic_cidrs = dynamic_state.get("dynamic_cidrs", [])
+    dynamic_sources = dynamic_state.get("dynamic_sources", {})
+    collector_config["dynamic_protected_cidrs"] = (
+        dynamic_cidrs if isinstance(dynamic_cidrs, list) else []
+    )
+    collector_config["dynamic_protection_sources"] = (
+        dynamic_sources if isinstance(dynamic_sources, Mapping) else {}
     )
     end_epoch = int(utc_now().timestamp())
     start_epoch = end_epoch - int(config["lookback_hours"]) * 3600
@@ -472,6 +512,16 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
         "fail2ban": fail2ban,
         "network_cases": network_cases,
         "network_review_actions": network_review_actions,
+        "local_address_protection": {
+            "state_file": str(dynamic_state_path),
+            "state_status": dynamic_state_status,
+            "state_age_seconds": dynamic_state_age,
+            "state_max_age_seconds": dynamic_state_max_age,
+            "generated_at": dynamic_state.get("generated_at"),
+            "static_cidrs": dynamic_state.get("static_cidrs", []),
+            "dynamic_cidrs": dynamic_state.get("dynamic_cidrs", []),
+            "nodes": dynamic_state.get("nodes", []),
+        },
         "repeated_sources": repeated_sources,
         "top_user_agents": top_user_agents,
         "crawler_groups": crawler_groups[:max_rows],

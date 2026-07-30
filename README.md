@@ -3,7 +3,7 @@
 Argent Sentinel is a self-hosted security event collector, correlation engine,
 CrowdSec decision bridge, and guarded abuse-reporting system.
 
-Version 0.5.3.1 combines authenticated event transport, central policy,
+Version 0.5.4.0 combines authenticated event transport, central policy,
 a read-only dashboard, and per-site traffic analytics:
 
 ```text
@@ -11,7 +11,7 @@ WordPress / Nginx / OpenSSH
           | local immutable spool or journald cursor
           v
 argent-sentinel-agent
-          | HTTPS + per-node mTLS certificate
+          | HTTPS + per-node mTLS events and protection inventory
           v
 sentinel.example.org
           | Nginx verified-client proxy
@@ -39,8 +39,8 @@ Validate redirected test mode before production delivery.
 
 | File | Purpose | Important options |
 | --- | --- | --- |
-| `/etc/argent-sentinel/collector.json` | Central ingestion, correlation, enforcement, and reporting policy | `incoming_globs`, `abuse_context`, `policy`, `sshd_policy`, `web_policy`, `trusted_cidrs`, `crowdsec`, `enrichment`, `abuse_reporting` |
-| `/etc/argent-sentinel/agent.json` | Node transport and SSH collection | `enabled`, `node`, `central_url`, certificate paths, local WordPress/Nginx globs, `sshd` |
+| `/etc/argent-sentinel/collector.json` | Central ingestion, correlation, enforcement, and reporting policy | `incoming_globs`, `abuse_context`, `protection_inventory`, `policy`, `sshd_policy`, `web_policy`, `trusted_cidrs`, `enforcement_protection`, `crowdsec`, `enrichment`, `abuse_reporting` |
+| `/etc/argent-sentinel/agent.json` | Node transport, dynamic local-address protection, and SSH collection | `enabled`, `node`, `central_url`, certificate paths, local WordPress/Nginx globs, `local_address_protection`, `sshd` |
 | `/etc/argent-sentinel/server-api.json` | Unix-socket ingestion API | `socket_path`, `socket_group`, `nodes_dir`, `receipt_db`, `event_drop_root` |
 | `/etc/argent-sentinel/nodes.d/NAME.json` | Per-node enrollment and service authorization | `node_id`, `enabled`, allowed `services`, allowed WordPress `site_ids` |
 | `/etc/logrotate.d/argent-sentinel-nginx` | Hourly rotation and staging of the filtered Nginx JSONL log | retention, compression, stage helper |
@@ -612,8 +612,47 @@ and permits an audited acknowledgment or note. The root-owned review processor
 independently refuses enforcement even if a stale or forged request reaches the
 spool.
 
-This static safety foundation precedes the dynamic per-node host/LAN discovery
-and Debian installer selection planned for 0.5.4.0.
+Version 0.5.4.0 extends this foundation with authenticated per-node dynamic
+inventories. Each agent recalculates qualifying public IPv6 addresses on every
+run and sends a changed inventory immediately, with periodic heartbeats. The
+collector publishes the merged effective set and the root review processor
+fails closed if that publication is unavailable or stale.
+
+### Dynamic local-address modes
+
+The `argent-sentinel-agent` package prompts on first installation, or on an
+upgrade where `local_address_protection` is absent. It displays discovered
+public IPv6 addresses and a recommendation:
+
+- `host`: protect each current address as `/128`; recommended for VPS, cloud,
+  virtualized, or uncertain systems.
+- `lan-prefix`: protect each current connected public IPv6 prefix; select only
+  after confirming ownership or control of the complete prefix.
+- `manual`: protect only explicitly entered CIDRs, bounded to `/24` or
+  narrower for IPv4 and `/48` or narrower for IPv6.
+- `off`: disable dynamic inventory protection while leaving static collector
+  protections intact.
+
+An unattended installation never broadens to a prefix. It records unconfirmed
+host mode and begins protecting current `/128` addresses as soon as the agent is
+enabled and enrolled. Review or change the choice later with:
+
+```bash
+sudo dpkg-reconfigure argent-sentinel-agent
+```
+
+Inspect discovery and the current effective inventory with:
+
+```bash
+sudo argent-sentinel-local-protection discover
+sudo argent-sentinel-agent \
+  --config /etc/argent-sentinel/agent.json \
+  protection-inventory
+```
+
+The address inventory is an enforcement safety boundary, not a source-trust
+allowlist. Dynamic addresses remain visible in telemetry and incident
+correlation.
 
 ## Audited CIDR review in 0.5.3.0
 

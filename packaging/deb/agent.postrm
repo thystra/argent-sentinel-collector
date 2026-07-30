@@ -1,8 +1,15 @@
 #!/bin/sh
+# File: /home/alan/src/argent-sentinel-collector/packaging/deb/agent.postrm
 set -e
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || true; fi
 if [ "$1" = purge ]; then
  rm -f /etc/argent-sentinel/agent.json /etc/argent-sentinel/agent-privacy.key
  # Node private keys and certificates are intentionally retained under pki/.
+ if [ -f /usr/share/debconf/confmodule ]; then
+  . /usr/share/debconf/confmodule
+  db_purge
+ fi
 fi
 exit 0
+
+# EOF: /home/alan/src/argent-sentinel-collector/packaging/deb/agent.postrm

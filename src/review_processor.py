@@ -32,7 +32,7 @@ from review_queue import (
     utc_text,
 )
 
-APP_VERSION = "0.5.3.1"
+APP_VERSION = "0.5.4.0"
 UTC = dt.timezone.utc
 DEFAULTS: dict[str, Any] = {
     "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
@@ -479,9 +479,59 @@ def load_network_policy(config: Mapping[str, Any]) -> dict[str, Any]:
                 raise ReviewError(
                     f"{label} contains invalid CIDR {value!r}"
                 ) from exc
+    dynamic_state_file = str(
+        protection.get("dynamic_state_file", "")
+    ).strip()
+    dynamic_state_max_age = int(
+        protection.get("dynamic_state_max_age_seconds", 600)
+    )
+    dynamic: list[str] = []
+    dynamic_sources: dict[str, list[str]] = {}
+    if dynamic_state_file:
+        state_path = Path(dynamic_state_file)
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise ReviewError(
+                f"Dynamic protection state is unavailable: {state_path}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise ReviewError(
+                f"Dynamic protection state is invalid JSON: {exc}"
+            ) from exc
+        if not isinstance(state, Mapping) or state.get("schema_version") != 1:
+            raise ReviewError("Dynamic protection state schema is unsupported")
+        try:
+            generated_epoch = int(state.get("generated_epoch", 0))
+        except (TypeError, ValueError) as exc:
+            raise ReviewError("Dynamic protection state timestamp is invalid") from exc
+        age = max(0, int(dt.datetime.now(UTC).timestamp()) - generated_epoch)
+        if generated_epoch < 1 or age > dynamic_state_max_age:
+            raise ReviewError(
+                "Dynamic protection state is stale; CIDR enforcement is fail-closed"
+            )
+        values = state.get("dynamic_cidrs", [])
+        if not isinstance(values, list):
+            raise ReviewError("Dynamic protection state CIDRs must be a list")
+        for value in values:
+            try:
+                dynamic.append(
+                    str(ipaddress.ip_network(str(value), strict=False))
+                )
+            except ValueError as exc:
+                raise ReviewError(
+                    f"Dynamic protection state contains invalid CIDR {value!r}"
+                ) from exc
+        sources = state.get("dynamic_sources", {})
+        if isinstance(sources, Mapping):
+            for cidr, nodes in sources.items():
+                if isinstance(nodes, list):
+                    dynamic_sources[str(cidr)] = [str(node) for node in nodes]
     return {
         "trusted_cidrs": [str(value) for value in trusted],
         "protected_cidrs": [str(value) for value in protected],
+        "dynamic_protected_cidrs": dynamic,
+        "dynamic_protection_sources": dynamic_sources,
         "reason_prefix": str(policy.get("reason_prefix", "argent-sentinel")).rstrip("/"),
         "long_days": int(policy.get("network_long_block_days", 180)),
         "severe_days": int(policy.get("network_severe_block_days", 365)),

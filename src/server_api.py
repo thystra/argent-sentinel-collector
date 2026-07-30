@@ -9,7 +9,9 @@ certificate subject as X-Argent-Client-DN plus X-Argent-Client-Verify=SUCCESS.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import base64
+import datetime as dt
 import grp
 import hashlib
 import ipaddress
@@ -24,11 +26,26 @@ import tempfile
 import threading
 import urllib.parse
 import uuid
+import sys
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-APP_VERSION = "0.5.3.1"
+try:
+    import local_protection
+except ModuleNotFoundError:
+    _LOCAL_PROTECTION_PATH = Path(__file__).with_name("local_protection.py")
+    _LOCAL_PROTECTION_SPEC = importlib.util.spec_from_file_location(
+        "local_protection",
+        _LOCAL_PROTECTION_PATH,
+    )
+    if _LOCAL_PROTECTION_SPEC is None or _LOCAL_PROTECTION_SPEC.loader is None:
+        raise
+    local_protection = importlib.util.module_from_spec(_LOCAL_PROTECTION_SPEC)
+    sys.modules.setdefault("local_protection", local_protection)
+    _LOCAL_PROTECTION_SPEC.loader.exec_module(local_protection)
+
+APP_VERSION = "0.5.4.0"
 LOG = logging.getLogger("argent-sentinel-api")
 
 DEFAULTS: dict[str, Any] = {
@@ -144,7 +161,7 @@ def decode_envelope(raw: bytes, expected_node: str, max_payload: int) -> tuple[d
     if node_id != expected_node:
         raise APIError(403, "Envelope node_id does not match client certificate")
     kind = str(envelope.get("kind", ""))
-    if kind not in {"event_batch", "abuse_context"}:
+    if kind not in {"event_batch", "abuse_context", "protection_inventory"}:
         raise APIError(400, "Unsupported transport kind")
     try:
         payload = base64.b64decode(str(envelope.get("payload_b64", "")), validate=True)
@@ -228,6 +245,59 @@ def validate_abuse_context(payload: bytes, node: Mapping[str, Any]) -> None:
         raise APIError(400, "Abuse-context observation count is outside limits")
 
 
+def validate_protection_inventory(payload: bytes, node: Mapping[str, Any]) -> dict[str, Any]:
+    if not payload or len(payload) > 1024 * 1024:
+        raise APIError(400, "Protection inventory size is outside limits")
+    try:
+        inventory = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise APIError(400, f"Protection inventory is invalid JSON: {exc}") from exc
+    if not isinstance(inventory, dict) or inventory.get("schema_version") != 1:
+        raise APIError(400, "Unsupported protection inventory schema")
+    if normalize_node_id(str(inventory.get("node_id", ""))) != str(node["node_id"]):
+        raise APIError(403, "Protection inventory node_id is not authorized")
+    try:
+        uuid.UUID(str(inventory.get("inventory_uuid", "")))
+    except ValueError as exc:
+        raise APIError(400, "Invalid protection inventory UUID") from exc
+    try:
+        generated = dt.datetime.fromisoformat(
+            str(inventory.get("generated_at", "")).replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise APIError(400, "Invalid protection inventory generated_at") from exc
+    if generated.tzinfo is None:
+        raise APIError(400, "Protection inventory generated_at requires a timezone")
+    configured_mode = str(inventory.get("configured_mode", ""))
+    effective_mode = str(inventory.get("effective_mode", ""))
+    if configured_mode not in local_protection.MODES:
+        raise APIError(400, "Invalid configured protection mode")
+    if effective_mode not in local_protection.MODES:
+        raise APIError(400, "Invalid effective protection mode")
+    if not isinstance(inventory.get("enabled"), bool):
+        raise APIError(400, "enabled must be boolean")
+    if not isinstance(inventory.get("operator_confirmed"), bool):
+        raise APIError(400, "operator_confirmed must be boolean")
+    effective = inventory.get("effective_cidrs", [])
+    addresses = inventory.get("addresses", [])
+    if not isinstance(effective, list) or len(effective) > 256:
+        raise APIError(400, "effective_cidrs must be a bounded list")
+    if not isinstance(addresses, list) or len(addresses) > 256:
+        raise APIError(400, "addresses must be a bounded list")
+    try:
+        normalized = local_protection.normalize_inventory_cidrs(effective)
+    except local_protection.ProtectionError as exc:
+        raise APIError(400, str(exc)) from exc
+    if effective_mode == "host" and any(
+        ipaddress.ip_network(value).version != 6
+        or ipaddress.ip_network(value).prefixlen != 128
+        for value in normalized
+    ):
+        raise APIError(400, "Host mode may report only /128 effective CIDRs")
+    inventory["effective_cidrs"] = normalized
+    return inventory
+
+
 class ReceiptDB:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -291,12 +361,15 @@ class Ingress:
         if envelope["kind"] == "event_batch":
             service, _ = validate_event_batch(payload, node)
             destination = root / "events" / "incoming" / f"{envelope['transport_uuid']}-{service}.json"
-        else:
+        elif envelope["kind"] == "abuse_context":
             allowed_services = {str(value) for value in node.get("services", [])}
             if allowed_services and "nginx" not in allowed_services:
                 raise APIError(403, "Nginx abuse-context is not authorized for this node")
             validate_abuse_context(payload, node)
             destination = root / "abuse-context" / "incoming" / f"{envelope['transport_uuid']}.jsonl"
+        else:
+            validate_protection_inventory(payload, node)
+            destination = root / "protection" / "incoming" / f"{envelope['transport_uuid']}.json"
         atomic_write(destination, payload, 0o640)
         self.receipts.insert(envelope, destination)
         return 201, {

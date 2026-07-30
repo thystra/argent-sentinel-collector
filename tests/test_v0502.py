@@ -317,7 +317,7 @@ class PersistentWordPressPolicyTest(unittest.TestCase):
         row = self.collector.db.conn.execute(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
         ).fetchone()
-        self.assertEqual("8", row["value"])
+        self.assertEqual("9", row["value"])
 
 
 if __name__ == "__main__":

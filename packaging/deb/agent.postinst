@@ -1,5 +1,7 @@
 #!/bin/sh
+# File: /home/alan/src/argent-sentinel-collector/packaging/deb/agent.postinst
 set -e
+. /usr/share/debconf/confmodule
 CONFIG=/etc/argent-sentinel/agent.json
 EXAMPLE=/usr/share/argent-sentinel/agent.json.example
 case "$1" in
@@ -23,6 +25,27 @@ p=Path(os.environ['CONFIG']); c=json.loads(p.read_text()); c['node']={'id':os.en
 t=p.with_suffix('.json.tmp'); t.write_text(json.dumps(c,indent=2,sort_keys=True)+'\n'); t.chmod(0o600); t.replace(p)
 PY
   else chown root:root "$CONFIG"; chmod 0600 "$CONFIG"; fi
+  db_get argent-sentinel-agent/protection-apply
+  if [ "$RET" = true ]; then
+    db_get argent-sentinel-agent/protection-mode
+    PROTECTION_MODE=$RET
+    db_get argent-sentinel-agent/protection-interfaces
+    PROTECTION_INTERFACES=$RET
+    db_get argent-sentinel-agent/manual-cidrs
+    PROTECTION_MANUAL=$RET
+    db_get argent-sentinel-agent/protection-source
+    PROTECTION_SOURCE=$RET
+    db_get argent-sentinel-agent/protection-confirmed
+    PROTECTION_CONFIRMED=$RET
+    /usr/lib/argent-sentinel/local_protection.py apply-config \
+      --config "$CONFIG" \
+      --mode "$PROTECTION_MODE" \
+      --interfaces "$PROTECTION_INTERFACES" \
+      --manual-cidrs "$PROTECTION_MANUAL" \
+      --selection-source "$PROTECTION_SOURCE" \
+      --operator-confirmed "$PROTECTION_CONFIRMED"
+  fi
+  rm -f /run/argent-sentinel/local-protection-debconf.json
   if [ ! -s /etc/argent-sentinel/agent-privacy.key ]; then
     umask 077; openssl rand 32 > /etc/argent-sentinel/agent-privacy.key
   fi
@@ -33,4 +56,7 @@ PY
     systemctl restart argent-sentinel-agent.timer >/dev/null 2>&1 || systemctl start argent-sentinel-agent.timer >/dev/null 2>&1 || true
   fi
  ;; esac
+db_stop
 exit 0
+
+# EOF: /home/alan/src/argent-sentinel-collector/packaging/deb/agent.postinst

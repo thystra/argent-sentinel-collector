@@ -32,5 +32,16 @@
     "destination_ip": "",
     "destination_port": 22,
     "max_events_per_batch": 500
+  },
+  "local_address_protection": {
+    "enabled": true,
+    "mode": "host",
+    "interfaces": [],
+    "manual_cidrs": [],
+    "include_unique_local": false,
+    "selection_source": "safe-default",
+    "operator_confirmed": false,
+    "inventory_state_file": "/var/lib/argent-sentinel/agent/protection-inventory-state.json",
+    "inventory_heartbeat_seconds": 3600
   }
 }

@@ -1,0 +1,4 @@
+#!/bin/sh
+# File: /home/alan/src/argent-sentinel-collector/packaging/bin/argent-sentinel-local-protection
+exec /usr/bin/python3 /usr/lib/argent-sentinel/local_protection.py "$@"
+# EOF: /home/alan/src/argent-sentinel-collector/packaging/bin/argent-sentinel-local-protection

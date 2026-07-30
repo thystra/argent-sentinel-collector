@@ -28,6 +28,7 @@ import socket
 import sqlite3
 import stat
 import subprocess
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -39,8 +40,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.5.3.1"
-SCHEMA_VERSION = 8
+APP_VERSION = "0.5.4.0"
+SCHEMA_VERSION = 9
 
 DEFAULTS: dict[str, Any] = {
     "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
@@ -72,6 +73,18 @@ DEFAULTS: dict[str, Any] = {
         "max_file_bytes": 20 * 1024 * 1024,
         "max_line_bytes": 64 * 1024,
         "fallback_correlation_seconds": 2,
+    },
+    "protection_inventory": {
+        "incoming_globs": [
+            "/var/lib/argent-sentinel/drop/remote/*/protection/incoming/*.json"
+        ],
+        "processing_dir": "/var/lib/argent-sentinel/collector/protection-processing",
+        "archive_dir": "/var/lib/argent-sentinel/collector/protection-archive",
+        "rejected_dir": "/var/lib/argent-sentinel/collector/protection-rejected",
+        "max_file_bytes": 1024 * 1024,
+        "active_max_age_seconds": 86400,
+        "stale_grace_seconds": 604800,
+        "state_file": "/var/lib/argent-sentinel/collector/effective-protected-cidrs.json",
     },
     "network_reporting": {
         "enabled": True,
@@ -281,6 +294,106 @@ def parse_time(value: Any) -> dt.datetime:
     return parsed.astimezone(UTC)
 
 
+def normalize_protection_inventory(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or value.get("schema_version") != 1:
+        raise CollectorError("Unsupported protection inventory schema")
+    normalized = dict(value)
+    try:
+        normalized["inventory_uuid"] = str(
+            uuid.UUID(str(value.get("inventory_uuid") or ""))
+        )
+    except ValueError as exc:
+        raise CollectorError("Invalid protection inventory UUID") from exc
+    node_id = str(value.get("node_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", node_id):
+        raise CollectorError("Invalid protection inventory node_id")
+    normalized["node_id"] = node_id
+    generated = parse_time(value.get("generated_at"))
+    if generated > utc_now() + dt.timedelta(minutes=10):
+        raise CollectorError("Protection inventory is dated too far in the future")
+    normalized["generated_at"] = utc_text(generated)
+    modes = {"host", "lan-prefix", "manual", "off"}
+    configured_mode = str(value.get("configured_mode") or "")
+    effective_mode = str(value.get("effective_mode") or "")
+    if configured_mode not in modes or effective_mode not in modes:
+        raise CollectorError("Invalid protection inventory mode")
+    if not isinstance(value.get("operator_confirmed"), bool):
+        raise CollectorError("Protection inventory operator_confirmed must be boolean")
+    if not isinstance(value.get("enabled"), bool):
+        raise CollectorError("Protection inventory enabled must be boolean")
+    effective = value.get("effective_cidrs", [])
+    if not isinstance(effective, list) or len(effective) > 256:
+        raise CollectorError("Protection inventory effective_cidrs must be a bounded list")
+    normalized_cidrs: list[str] = []
+    for item in effective:
+        try:
+            cidr = str(ipaddress.ip_network(str(item), strict=False))
+        except ValueError as exc:
+            raise CollectorError(f"Invalid protection inventory CIDR {item!r}") from exc
+        network = ipaddress.ip_network(cidr, strict=False)
+        minimum = 24 if network.version == 4 else 48
+        if network.prefixlen < minimum:
+            raise CollectorError(
+                f"Dynamic protected CIDR {network} is broader than /{minimum}"
+            )
+        if cidr not in normalized_cidrs:
+            normalized_cidrs.append(cidr)
+    if effective_mode == "host" and any(
+        ipaddress.ip_network(item).version == 6
+        and ipaddress.ip_network(item).prefixlen != 128
+        for item in normalized_cidrs
+    ):
+        raise CollectorError("Host-mode IPv6 protection must use /128 CIDRs")
+    normalized["effective_cidrs"] = normalized_cidrs
+    addresses = value.get("addresses", [])
+    if not isinstance(addresses, list) or len(addresses) > 256:
+        raise CollectorError("Protection inventory addresses must be a bounded list")
+    normalized["addresses"] = [
+        dict(item) for item in addresses if isinstance(item, Mapping)
+    ]
+    for key in ("configured_interfaces", "default_route_interfaces"):
+        values = value.get(key, [])
+        if not isinstance(values, list) or len(values) > 128:
+            raise CollectorError(f"Protection inventory {key} must be a bounded list")
+        normalized[key] = [str(item)[:64] for item in values]
+    for key in ("virtualization", "recommendation"):
+        item = value.get(key, {})
+        normalized[key] = dict(item) if isinstance(item, Mapping) else {}
+    normalized["selection_source"] = clean_optional(
+        value.get("selection_source"), 128
+    ) or "unknown"
+    normalized["status"] = clean_optional(value.get("status"), 128) or "unknown"
+    return normalized
+
+
+def atomic_write_json(path: Path, value: Mapping[str, Any], mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+    payload = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{path.name}.",
+        dir=path.parent,
+        mode="w",
+        encoding="utf-8",
+        delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+
+
+def protection_state_path(config: Mapping[str, Any]) -> Path:
+    configured = Path(str(config["protection_inventory"]["state_file"]))
+    default_state = Path(str(DEFAULTS["protection_inventory"]["state_file"]))
+    state_db = Path(str(config["state_db"]))
+    default_db = Path(str(DEFAULTS["state_db"]))
+    if configured == default_state and state_db != default_db:
+        return state_db.parent / default_state.name
+    return configured
+
+
 def deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
     merged: dict[str, Any] = {}
     for key, value in base.items():
@@ -375,6 +488,27 @@ def validate_config(config: Mapping[str, Any]) -> None:
     for name in ("max_file_bytes", "max_line_bytes", "fallback_correlation_seconds"):
         if int(context.get(name, 0)) < 1:
             raise CollectorError(f"abuse_context.{name} must be positive")
+    inventory = config.get("protection_inventory", {})
+    if not isinstance(inventory, Mapping):
+        raise CollectorError("protection_inventory must be an object")
+    for name in (
+        "max_file_bytes",
+        "active_max_age_seconds",
+        "stale_grace_seconds",
+    ):
+        if int(inventory.get(name, 0)) < 1:
+            raise CollectorError(f"protection_inventory.{name} must be positive")
+    if int(inventory["stale_grace_seconds"]) < int(
+        inventory["active_max_age_seconds"]
+    ):
+        raise CollectorError(
+            "protection_inventory.stale_grace_seconds must be at least "
+            "active_max_age_seconds"
+        )
+    if not isinstance(inventory.get("incoming_globs", []), list):
+        raise CollectorError("protection_inventory.incoming_globs must be a list")
+    if not str(inventory.get("state_file", "")).strip():
+        raise CollectorError("protection_inventory.state_file is required")
     network_reporting = config.get("network_reporting", {})
     for name in ("include_context_min_hostile_ips", "max_tuple_evidence"):
         if int(network_reporting.get(name, 0)) < 1:
@@ -382,7 +516,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if network_reporting.get("automatic_cidr_blocking"):
         raise CollectorError(
             "network_reporting.automatic_cidr_blocking remains disabled; "
-            "0.5.3.1 supports only audited operator-initiated CIDR decisions"
+            "0.5.4.0 supports only audited operator-initiated CIDR decisions"
         )
     sshd_policy = config.get("sshd_policy", {})
     for name in (
@@ -818,6 +952,46 @@ class StateDB:
                 ON network_review_actions(network_cidr, applied_epoch DESC);
             CREATE INDEX IF NOT EXISTS network_review_actions_operator_time
                 ON network_review_actions(operator, applied_epoch DESC);
+            CREATE TABLE IF NOT EXISTS node_protection_inventories (
+                node_id TEXT PRIMARY KEY,
+                inventory_uuid TEXT NOT NULL UNIQUE,
+                payload_sha256 TEXT NOT NULL,
+                generated_epoch INTEGER NOT NULL,
+                generated_at TEXT NOT NULL,
+                received_epoch INTEGER NOT NULL,
+                received_at TEXT NOT NULL,
+                enabled INTEGER NOT NULL,
+                configured_mode TEXT NOT NULL,
+                effective_mode TEXT NOT NULL,
+                operator_confirmed INTEGER NOT NULL,
+                selection_source TEXT,
+                status TEXT,
+                effective_cidrs_json TEXT NOT NULL,
+                addresses_json TEXT NOT NULL,
+                interfaces_json TEXT NOT NULL,
+                virtualization_json TEXT NOT NULL,
+                recommendation_json TEXT NOT NULL,
+                original_path TEXT NOT NULL,
+                archived_path TEXT,
+                raw_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS node_protection_inventory_generated
+                ON node_protection_inventories(generated_epoch DESC);
+            CREATE TABLE IF NOT EXISTS node_protection_inventory_history (
+                inventory_uuid TEXT PRIMARY KEY,
+                node_id TEXT NOT NULL,
+                payload_sha256 TEXT NOT NULL,
+                generated_epoch INTEGER NOT NULL,
+                generated_at TEXT NOT NULL,
+                received_epoch INTEGER NOT NULL,
+                received_at TEXT NOT NULL,
+                effective_cidrs_json TEXT NOT NULL,
+                original_path TEXT NOT NULL,
+                archived_path TEXT,
+                raw_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS node_protection_history_node_time
+                ON node_protection_inventory_history(node_id, generated_epoch DESC);
             CREATE TABLE IF NOT EXISTS legacy_reports (
                 marker_key TEXT PRIMARY KEY,
                 source_ip TEXT NOT NULL,
@@ -1943,9 +2117,161 @@ class StateDB:
                 ),
             )
 
+    def import_protection_inventory(
+        self,
+        inventory: Mapping[str, Any],
+        digest: str,
+        original_path: Path,
+    ) -> bool:
+        generated = parse_time(inventory.get("generated_at"))
+        generated_epoch = int(generated.timestamp())
+        received = utc_now()
+        received_epoch = int(received.timestamp())
+        received_at = utc_text(received)
+        node_id = str(inventory.get("node_id") or "").strip()
+        inventory_uuid = str(uuid.UUID(str(inventory.get("inventory_uuid") or "")))
+        raw_json = json.dumps(inventory, sort_keys=True, separators=(",", ":"))
+        effective_json = json.dumps(
+            inventory.get("effective_cidrs", []),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        addresses_json = json.dumps(
+            inventory.get("addresses", []),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        interfaces_json = json.dumps(
+            inventory.get("configured_interfaces", []),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        virtualization_json = json.dumps(
+            inventory.get("virtualization", {}),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        recommendation_json = json.dumps(
+            inventory.get("recommendation", {}),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self.conn:
+            self.conn.execute(
+                """INSERT OR IGNORE INTO node_protection_inventory_history (
+                    inventory_uuid, node_id, payload_sha256, generated_epoch,
+                    generated_at, received_epoch, received_at,
+                    effective_cidrs_json, original_path, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    inventory_uuid,
+                    node_id,
+                    digest,
+                    generated_epoch,
+                    utc_text(generated),
+                    received_epoch,
+                    received_at,
+                    effective_json,
+                    str(original_path),
+                    raw_json,
+                ),
+            )
+            current = self.conn.execute(
+                "SELECT generated_epoch FROM node_protection_inventories WHERE node_id=?",
+                (node_id,),
+            ).fetchone()
+            if current is not None and int(current[0]) > generated_epoch:
+                return False
+            self.conn.execute(
+                """INSERT INTO node_protection_inventories (
+                    node_id, inventory_uuid, payload_sha256, generated_epoch,
+                    generated_at, received_epoch, received_at, enabled,
+                    configured_mode, effective_mode, operator_confirmed,
+                    selection_source, status, effective_cidrs_json,
+                    addresses_json, interfaces_json, virtualization_json,
+                    recommendation_json, original_path, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(node_id) DO UPDATE SET
+                    inventory_uuid=excluded.inventory_uuid,
+                    payload_sha256=excluded.payload_sha256,
+                    generated_epoch=excluded.generated_epoch,
+                    generated_at=excluded.generated_at,
+                    received_epoch=excluded.received_epoch,
+                    received_at=excluded.received_at,
+                    enabled=excluded.enabled,
+                    configured_mode=excluded.configured_mode,
+                    effective_mode=excluded.effective_mode,
+                    operator_confirmed=excluded.operator_confirmed,
+                    selection_source=excluded.selection_source,
+                    status=excluded.status,
+                    effective_cidrs_json=excluded.effective_cidrs_json,
+                    addresses_json=excluded.addresses_json,
+                    interfaces_json=excluded.interfaces_json,
+                    virtualization_json=excluded.virtualization_json,
+                    recommendation_json=excluded.recommendation_json,
+                    original_path=excluded.original_path,
+                    archived_path=NULL,
+                    raw_json=excluded.raw_json""",
+                (
+                    node_id,
+                    inventory_uuid,
+                    digest,
+                    generated_epoch,
+                    utc_text(generated),
+                    received_epoch,
+                    received_at,
+                    1 if inventory.get("enabled") else 0,
+                    str(inventory.get("configured_mode") or ""),
+                    str(inventory.get("effective_mode") or ""),
+                    1 if inventory.get("operator_confirmed") else 0,
+                    clean_optional(inventory.get("selection_source"), 128),
+                    clean_optional(inventory.get("status"), 128),
+                    effective_json,
+                    addresses_json,
+                    interfaces_json,
+                    virtualization_json,
+                    recommendation_json,
+                    str(original_path),
+                    raw_json,
+                ),
+            )
+        return True
+
+    def set_protection_inventory_archive_path(
+        self,
+        inventory_uuid: str,
+        path: Path,
+    ) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE node_protection_inventory_history SET archived_path=? "
+                "WHERE inventory_uuid=?",
+                (str(path), inventory_uuid),
+            )
+            self.conn.execute(
+                "UPDATE node_protection_inventories SET archived_path=? "
+                "WHERE inventory_uuid=?",
+                (str(path), inventory_uuid),
+            )
+
+    def protection_inventories(self) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT * FROM node_protection_inventories "
+                "ORDER BY node_id"
+            )
+        )
+
     def counts(self) -> dict[str, int]:
         result: dict[str, int] = {}
-        for table in ("batches", "events", "incidents", "network_observations", "network_cases"):
+        for table in (
+            "batches",
+            "events",
+            "incidents",
+            "network_observations",
+            "network_cases",
+            "node_protection_inventories",
+        ):
             result[table] = int(self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
         result["pending_decisions"] = int(
             self.conn.execute("SELECT COUNT(*) FROM incidents WHERE decision_status IN ('pending','failed')").fetchone()[0]
@@ -2412,14 +2738,17 @@ class Collector:
                 self.reject_file(claimed or path, str(exc))
         self.evaluate_persistent_wordpress_recent()
         context_files = self.import_abuse_context_files()
+        protection_files = self.import_protection_inventory_files()
+        self.publish_effective_protection_state()
         linked = self.db.correlate_network_observations(
             int(self.config["abuse_context"]["fallback_correlation_seconds"])
         )
         self.db.sync_network_cases(self.config["policy"])
         self.retry_pending_incidents()
         LOG.info(
-            "Collector run complete: %d event batch files, %d abuse-context files, %d tuple links",
-            imported_files, context_files, linked,
+            "Collector run complete: %d event batch files, %d abuse-context files, "
+            "%d protection inventories, %d tuple links",
+            imported_files, context_files, protection_files, linked,
         )
         return imported_files
 
@@ -2457,6 +2786,223 @@ class Collector:
                 LOG.exception("Rejecting abuse-context file %s: %s", original, exc)
                 self.reject_context_file(claimed or original, str(exc))
         return imported_files
+
+    def protection_inventory_files(self) -> list[Path]:
+        paths: set[Path] = set()
+        for pattern in self.config["protection_inventory"].get(
+            "incoming_globs", []
+        ):
+            for value in glob.glob(str(pattern)):
+                path = Path(value)
+                if path.name.startswith(".") or path.suffix.lower() != ".json":
+                    continue
+                paths.add(path)
+        return sorted(paths, key=lambda item: str(item))
+
+    def import_protection_inventory_files(self) -> int:
+        imported = 0
+        for original in self.protection_inventory_files():
+            claimed: Path | None = None
+            try:
+                claimed = self.claim_protection_inventory_file(original)
+                self.process_protection_inventory_file(claimed, original)
+                imported += 1
+            except Exception as exc:
+                LOG.exception(
+                    "Rejecting protection inventory %s: %s",
+                    original,
+                    exc,
+                )
+                self.reject_protection_inventory_file(
+                    claimed or original,
+                    str(exc),
+                )
+        return imported
+
+    def claim_protection_inventory_file(self, path: Path) -> Path:
+        initial = path.lstat()
+        maximum = int(self.config["protection_inventory"]["max_file_bytes"])
+        if path.is_symlink() or not path.is_file():
+            raise CollectorError(
+                "Protection inventory input must be a regular, non-symlink file"
+            )
+        if initial.st_size <= 0 or initial.st_size > maximum:
+            raise CollectorError("Protection inventory size is outside limits")
+        processing = Path(
+            self.config["protection_inventory"]["processing_dir"]
+        )
+        processing.mkdir(parents=True, exist_ok=True, mode=0o750)
+        claimed = processing / f"{uuid.uuid4()}-{path.name}"
+        self.move_regular_file(path, claimed, initial)
+        if os.geteuid() == 0:
+            os.chown(claimed, 0, 0)
+        os.chmod(claimed, 0o400)
+        return claimed
+
+    def process_protection_inventory_file(
+        self,
+        path: Path,
+        original_path: Path,
+    ) -> None:
+        data = path.read_bytes()
+        maximum = int(self.config["protection_inventory"]["max_file_bytes"])
+        if not data or len(data) > maximum:
+            raise CollectorError("Protection inventory size is outside limits")
+        digest = hashlib.sha256(data).hexdigest()
+        try:
+            raw = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CollectorError(
+                f"Protection inventory JSON is invalid: {exc}"
+            ) from exc
+        inventory = normalize_protection_inventory(raw)
+        source_parts = original_path.parts
+        if "remote" in source_parts:
+            index = source_parts.index("remote")
+            if len(source_parts) > index + 1:
+                expected_node = source_parts[index + 1]
+                if expected_node != inventory["node_id"]:
+                    raise CollectorError(
+                        "Protection inventory node_id does not match its remote drop path"
+                    )
+        self.db.import_protection_inventory(
+            inventory,
+            digest,
+            original_path,
+        )
+        archive = self.archive_protection_inventory_file(
+            path,
+            original_path.name,
+            inventory["inventory_uuid"],
+        )
+        self.db.set_protection_inventory_archive_path(
+            inventory["inventory_uuid"],
+            archive,
+        )
+        LOG.info(
+            "Imported local-address protection inventory from %s: %s %s",
+            inventory["node_id"],
+            inventory["effective_mode"],
+            ",".join(inventory["effective_cidrs"]) or "none",
+        )
+
+    def archive_protection_inventory_file(
+        self,
+        path: Path,
+        original_name: str,
+        inventory_uuid: str,
+    ) -> Path:
+        now = utc_now()
+        destination = (
+            Path(self.config["protection_inventory"]["archive_dir"])
+            / f"{now:%Y}"
+            / f"{now:%m}"
+            / f"{now:%d}"
+        )
+        destination.mkdir(parents=True, exist_ok=True, mode=0o750)
+        final = destination / Path(original_name).name
+        if final.exists():
+            final = destination / (
+                f"{Path(original_name).stem}-{inventory_uuid}"
+                f"{Path(original_name).suffix}"
+            )
+        self.move_regular_file(path, final)
+        os.chmod(final, 0o640)
+        return final
+
+    def reject_protection_inventory_file(self, path: Path, error: str) -> None:
+        if not path.exists() or path.is_symlink():
+            return
+        destination = (
+            Path(self.config["protection_inventory"]["rejected_dir"])
+            / f"{utc_now():%Y-%m-%d}"
+        )
+        destination.mkdir(parents=True, exist_ok=True, mode=0o750)
+        final = destination / path.name
+        if final.exists():
+            final = destination / f"{path.stem}-{uuid.uuid4()}{path.suffix}"
+        self.move_regular_file(path, final)
+        os.chmod(final, 0o640)
+        final.with_suffix(final.suffix + ".error.txt").write_text(
+            clean_optional(error, 2000) or "Unknown error",
+            encoding="utf-8",
+        )
+
+    def publish_effective_protection_state(self) -> dict[str, Any]:
+        policy = self.config["protection_inventory"]
+        now = utc_now()
+        now_epoch = int(now.timestamp())
+        active_age = int(policy["active_max_age_seconds"])
+        grace_age = int(policy["stale_grace_seconds"])
+        static = [
+            str(ipaddress.ip_network(str(value), strict=False))
+            for value in self.config["enforcement_protection"]["protected_cidrs"]
+        ]
+        dynamic: list[str] = []
+        sources: dict[str, list[str]] = {}
+        nodes: list[dict[str, Any]] = []
+        for row in self.db.protection_inventories():
+            age = max(0, now_epoch - int(row["generated_epoch"]))
+            freshness = (
+                "active"
+                if age <= active_age
+                else "stale-grace"
+                if age <= grace_age
+                else "expired"
+            )
+            try:
+                cidrs = json.loads(row["effective_cidrs_json"])
+                addresses = json.loads(row["addresses_json"])
+                interfaces = json.loads(row["interfaces_json"])
+                virtualization = json.loads(row["virtualization_json"])
+                recommendation = json.loads(row["recommendation_json"])
+            except json.JSONDecodeError:
+                cidrs, addresses, interfaces = [], [], []
+                virtualization, recommendation = {}, {}
+            if freshness != "expired" and bool(row["enabled"]):
+                for value in cidrs:
+                    normalized = str(
+                        ipaddress.ip_network(str(value), strict=False)
+                    )
+                    if normalized not in dynamic:
+                        dynamic.append(normalized)
+                    sources.setdefault(normalized, []).append(str(row["node_id"]))
+            nodes.append(
+                {
+                    "node_id": row["node_id"],
+                    "generated_at": row["generated_at"],
+                    "received_at": row["received_at"],
+                    "age_seconds": age,
+                    "freshness": freshness,
+                    "enabled": bool(row["enabled"]),
+                    "configured_mode": row["configured_mode"],
+                    "effective_mode": row["effective_mode"],
+                    "operator_confirmed": bool(row["operator_confirmed"]),
+                    "selection_source": row["selection_source"],
+                    "status": row["status"],
+                    "effective_cidrs": cidrs,
+                    "addresses": addresses,
+                    "configured_interfaces": interfaces,
+                    "virtualization": virtualization,
+                    "recommendation": recommendation,
+                }
+            )
+        payload = {
+            "schema_version": 1,
+            "generated_at": utc_text(now),
+            "generated_epoch": now_epoch,
+            "active_max_age_seconds": active_age,
+            "stale_grace_seconds": grace_age,
+            "static_cidrs": sorted(set(static)),
+            "dynamic_cidrs": sorted(set(dynamic)),
+            "effective_cidrs": sorted(set(static + dynamic)),
+            "dynamic_sources": {
+                key: sorted(set(value)) for key, value in sorted(sources.items())
+            },
+            "nodes": nodes,
+        }
+        atomic_write_json(protection_state_path(self.config), payload, 0o600)
+        return payload
 
     def claim_context_file(self, path: Path) -> Path:
         initial = path.lstat()
@@ -4345,6 +4891,13 @@ def configure_logging(verbose: bool) -> None:
 
 
 def status_output(collector: Collector) -> dict[str, Any]:
+    state_path = protection_state_path(collector.config)
+    try:
+        protection_state = json.loads(
+            state_path.read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        protection_state = {}
     return {
         "counts": collector.db.counts(),
         "node": collector.config["node"],
@@ -4377,6 +4930,7 @@ def status_output(collector: Collector) -> dict[str, Any]:
         "recent_report_attempts": [dict(row) for row in collector.db.recent_report_attempts(20)],
         "network_candidates": collector.db.network_candidates(collector.config["policy"]),
         "network_cases": [dict(row) for row in collector.db.network_cases(100)],
+        "local_address_protection": protection_state,
     }
 
 
@@ -4389,6 +4943,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser("run", help="Import batches, evaluate policy, and retry actions")
     sub.add_parser("status", help="Print collector state and CIDR candidates")
     sub.add_parser("network-list", help="Print network case records")
+    sub.add_parser(
+        "protection-state-refresh",
+        help="Regenerate the effective local-address protection state",
+    )
     network_report = sub.add_parser("network-report", help="Send a manual network escalation/update report")
     network_report.add_argument("--cidr", required=True)
     network_report.add_argument("--type", default="network_escalation", choices=("network_escalation", "network_update"))
@@ -4434,6 +4992,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "database": str(state_path),
                 "backup": str(backup_path) if backup_path else None,
             }, indent=2, sort_keys=True))
+            return 0
+        if args.command == "protection-state-refresh":
+            with process_lock(Path(config["lock_file"])):
+                collector = Collector(config)
+                try:
+                    payload = collector.publish_effective_protection_state()
+                finally:
+                    collector.close()
+            print(json.dumps(payload, indent=2, sort_keys=True))
             return 0
         if args.command in {"status", "network-list", "network-set", "network-report", "legacy-import"}:
             collector = Collector(config)

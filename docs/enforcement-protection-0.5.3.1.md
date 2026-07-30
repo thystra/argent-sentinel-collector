@@ -37,7 +37,7 @@ any CrowdSec command.
 ## Dynamic protection roadmap
 
 Static CIDRs are the immediate safety layer. Version 0.5.4.0 is planned to add
-signed per-node public-address inventories and explicit `host`, `lan-prefix`,
+mTLS-authenticated per-node public-address inventories and explicit `host`, `lan-prefix`,
 `manual`, and `off` modes. Dynamic addresses will refresh without rewriting the
 main configuration. A VPS will default to public `/128` protection; a broader
 LAN prefix will require explicit operator confirmation.

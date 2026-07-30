@@ -139,6 +139,18 @@ def migrate_known_defaults(config: dict[str, Any]) -> bool:
         if web.get("incident_merge_seconds") == 1800:
             web["incident_merge_seconds"] = 86400
             changed = True
+    protection = config.get("enforcement_protection")
+    if isinstance(protection, dict):
+        for key, value in (
+            (
+                "dynamic_state_file",
+                "/var/lib/argent-sentinel/collector/effective-protected-cidrs.json",
+            ),
+            ("dynamic_state_max_age_seconds", 600),
+        ):
+            if key not in protection:
+                protection[key] = value
+                changed = True
     return changed
 
 

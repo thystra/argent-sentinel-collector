@@ -10,6 +10,7 @@ state.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import base64
 import contextlib
 import datetime as dt
@@ -27,14 +28,30 @@ import shutil
 import ssl
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import sys
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
-APP_VERSION = "0.5.3.1"
+try:
+    import local_protection
+except ModuleNotFoundError:
+    _LOCAL_PROTECTION_PATH = Path(__file__).with_name("local_protection.py")
+    _LOCAL_PROTECTION_SPEC = importlib.util.spec_from_file_location(
+        "local_protection",
+        _LOCAL_PROTECTION_PATH,
+    )
+    if _LOCAL_PROTECTION_SPEC is None or _LOCAL_PROTECTION_SPEC.loader is None:
+        raise
+    local_protection = importlib.util.module_from_spec(_LOCAL_PROTECTION_SPEC)
+    sys.modules.setdefault("local_protection", local_protection)
+    _LOCAL_PROTECTION_SPEC.loader.exec_module(local_protection)
+
+APP_VERSION = "0.5.4.0"
 UTC = dt.timezone.utc
 LOG = logging.getLogger("argent-sentinel-agent")
 
@@ -63,6 +80,17 @@ DEFAULTS: dict[str, Any] = {
         "/var/lib/argent-sentinel/drop/nginx/*/incoming/*.jsonl",
         "/var/lib/argent-sentinel/drop/nginx/*/incoming/*.json",
     ],
+    "local_address_protection": {
+        "enabled": True,
+        "mode": "host",
+        "interfaces": [],
+        "manual_cidrs": [],
+        "include_unique_local": False,
+        "selection_source": "safe-default",
+        "operator_confirmed": False,
+        "inventory_state_file": "/var/lib/argent-sentinel/agent/protection-inventory-state.json",
+        "inventory_heartbeat_seconds": 3600,
+    },
     "sshd": {
         "enabled": False,
         "unit": "ssh.service",
@@ -135,6 +163,13 @@ def validate_config(config: Mapping[str, Any]) -> None:
     destination_ip = str(sshd.get("destination_ip", "")).strip()
     if destination_ip:
         ipaddress.ip_address(destination_ip)
+    protection = config.get("local_address_protection", {})
+    if not isinstance(protection, Mapping):
+        raise AgentError("local_address_protection must be an object")
+    try:
+        local_protection.validate_local_config(protection)
+    except local_protection.ProtectionError as exc:
+        raise AgentError(str(exc)) from exc
     if config.get("enabled"):
         for name in ("ca_file", "cert_file", "key_file"):
             path = Path(str(config.get(name, "")))
@@ -183,7 +218,7 @@ def safe_claim(source: Path, destination: Path) -> None:
 
 
 def make_envelope(node_id: str, kind: str, payload: bytes, *, transport_uuid: str | None = None) -> dict[str, Any]:
-    if kind not in {"event_batch", "abuse_context"}:
+    if kind not in {"event_batch", "abuse_context", "protection_inventory"}:
         raise AgentError(f"Unsupported transport kind: {kind}")
     return {
         "schema_version": 1,
@@ -420,6 +455,76 @@ def collect_sshd(config: Mapping[str, Any]) -> int:
     return total
 
 
+def protection_inventory_digest(inventory: Mapping[str, Any]) -> str:
+    """Hash meaningful protection state while ignoring volatile lifetimes."""
+    canonical = dict(inventory)
+    canonical.pop("inventory_uuid", None)
+    canonical.pop("generated_at", None)
+    addresses: list[dict[str, Any]] = []
+    for raw in canonical.get("addresses", []):
+        if not isinstance(raw, Mapping):
+            continue
+        item = dict(raw)
+        item.pop("valid_life_time", None)
+        item.pop("preferred_life_time", None)
+        addresses.append(item)
+    canonical["addresses"] = addresses
+    return hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def stage_protection_inventory(config: Mapping[str, Any]) -> int:
+    """Stage one changed or periodic local-address protection inventory."""
+    protection = config["local_address_protection"]
+    inventory = local_protection.build_inventory(config)
+    digest = protection_inventory_digest(inventory)
+    state_path = Path(str(protection["inventory_state_file"]))
+    previous: dict[str, Any] = {}
+    try:
+        loaded = json.loads(state_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            previous = loaded
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        previous = {}
+    now_epoch = int(time.time())
+    last_epoch = int(previous.get("last_staged_epoch", 0) or 0)
+    heartbeat = int(protection["inventory_heartbeat_seconds"])
+    if previous.get("digest") == digest and now_epoch - last_epoch < heartbeat:
+        return 0
+    payload = (
+        json.dumps(inventory, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    save_envelope(
+        config,
+        make_envelope(
+            str(config["node"]["id"]),
+            "protection_inventory",
+            payload,
+        ),
+    )
+    atomic_write(
+        state_path,
+        (
+            json.dumps(
+                {
+                    "digest": digest,
+                    "last_staged_at": utc_text(),
+                    "last_staged_epoch": now_epoch,
+                    "effective_cidrs": inventory["effective_cidrs"],
+                    "configured_mode": inventory["configured_mode"],
+                    "effective_mode": inventory["effective_mode"],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode(),
+        0o600,
+    )
+    return 1
+
+
 def ssl_context(config: Mapping[str, Any]) -> ssl.SSLContext:
     context = ssl.create_default_context(cafile=str(config["ca_file"]))
     context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -461,6 +566,17 @@ def deliver_envelope(config: Mapping[str, Any], path: Path) -> tuple[str, str]:
         return "retry", str(exc)
 
 
+def pending_delivery_key(path: Path) -> tuple[int, str]:
+    """Deliver local-protection changes before ordinary telemetry backlogs."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return (2, str(path))
+    if isinstance(value, Mapping) and value.get("kind") == "protection_inventory":
+        return (0, str(path))
+    return (1, str(path))
+
+
 def archive_envelope(config: Mapping[str, Any], path: Path, category: str, detail: str) -> None:
     root = Path(str(config[f"{category}_dir"]))
     destination = root / f"{utc_now():%Y}" / f"{utc_now():%m}" / f"{utc_now():%d}"
@@ -473,7 +589,17 @@ def archive_envelope(config: Mapping[str, Any], path: Path, category: str, detai
 
 def run_agent(config: Mapping[str, Any]) -> dict[str, int]:
     if not config.get("enabled"):
-        return {"staged": 0, "sshd_events": 0, "acknowledged": 0, "rejected": 0, "retried": 0}
+        return {
+            "staged": 0,
+            "sshd_events": 0,
+            "protection_inventories": 0,
+            "acknowledged": 0,
+            "rejected": 0,
+            "retried": 0,
+        }
+    # Stage the safety inventory before telemetry producers. A malformed or
+    # oversized event file must not delay a changed local-address boundary.
+    protection_inventories = stage_protection_inventory(config)
     staged = 0
     for path in discover_files(config.get("wordpress_globs", []), {".json"}):
         stage_file(config, path, "event_batch")
@@ -482,8 +608,18 @@ def run_agent(config: Mapping[str, Any]) -> dict[str, int]:
         stage_file(config, path, "abuse_context")
         staged += 1
     sshd_events = collect_sshd(config)
-    counts = {"staged": staged, "sshd_events": sshd_events, "acknowledged": 0, "rejected": 0, "retried": 0}
-    pending = sorted(Path(str(config["pending_dir"])).glob("*.json"), key=str)
+    counts = {
+        "staged": staged,
+        "sshd_events": sshd_events,
+        "protection_inventories": protection_inventories,
+        "acknowledged": 0,
+        "rejected": 0,
+        "retried": 0,
+    }
+    pending = sorted(
+        Path(str(config["pending_dir"])).glob("*.json"),
+        key=pending_delivery_key,
+    )
     for path in pending[: int(config["max_files_per_run"])]:
         status, detail = deliver_envelope(config, path)
         if status == "acknowledged":
@@ -514,6 +650,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser("run")
     sub.add_parser("validate-config")
     sub.add_parser("status")
+    sub.add_parser("protection-discover")
+    sub.add_parser("protection-inventory")
     args = parser.parse_args(argv)
     configure_logging(args.verbose)
     try:
@@ -522,23 +660,42 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({"status": "ok", "version": APP_VERSION}, indent=2))
             return 0
         if args.command == "status":
+            inventory = local_protection.build_inventory(config)
             print(json.dumps({
                 "enabled": bool(config["enabled"]),
                 "node": config["node"],
                 "central_url": config["central_url"],
                 "sshd_enabled": bool(config["sshd"]["enabled"]),
+                "local_address_protection": inventory,
                 "pending": len(list(Path(config["pending_dir"]).glob("*.json"))),
             }, indent=2, sort_keys=True))
+            return 0
+        if args.command == "protection-discover":
+            local = config["local_address_protection"]
+            print(json.dumps(local_protection.discover(
+                configured_interfaces=local.get("interfaces", []),
+                include_unique_local=bool(local.get("include_unique_local", False)),
+            ), indent=2, sort_keys=True))
+            return 0
+        if args.command == "protection-inventory":
+            print(json.dumps(
+                local_protection.build_inventory(config),
+                indent=2,
+                sort_keys=True,
+            ))
             return 0
         with process_lock(Path(config["lock_file"])):
             counts = run_agent(config)
         LOG.info(
-            "Agent run complete: staged=%d sshd_events=%d acknowledged=%d rejected=%d retried=%d",
-            counts["staged"], counts["sshd_events"], counts["acknowledged"], counts["rejected"], counts["retried"],
+            "Agent run complete: staged=%d sshd_events=%d protection_inventories=%d "
+            "acknowledged=%d rejected=%d retried=%d",
+            counts["staged"], counts["sshd_events"],
+            counts["protection_inventories"], counts["acknowledged"],
+            counts["rejected"], counts["retried"],
         )
         print(json.dumps(counts, sort_keys=True))
         return 0
-    except (AgentError, json.JSONDecodeError) as exc:
+    except (AgentError, local_protection.ProtectionError, json.JSONDecodeError) as exc:
         LOG.error("%s", exc)
         return 1
 

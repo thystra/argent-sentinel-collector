@@ -195,7 +195,9 @@
     "192.168.0.0/16"
   ],
   "enforcement_protection": {
-    "protected_cidrs": []
+    "protected_cidrs": [],
+    "dynamic_state_file": "/var/lib/argent-sentinel/collector/effective-protected-cidrs.json",
+    "dynamic_state_max_age_seconds": 600
   },
   "web_policy": {
     "distinct_targets": 1,
@@ -214,5 +216,17 @@
     ],
     "suspicious_threshold": 3,
     "window_seconds": 600
+  },
+  "protection_inventory": {
+    "incoming_globs": [
+      "/var/lib/argent-sentinel/drop/remote/*/protection/incoming/*.json"
+    ],
+    "processing_dir": "/var/lib/argent-sentinel/collector/protection-processing",
+    "archive_dir": "/var/lib/argent-sentinel/collector/protection-archive",
+    "rejected_dir": "/var/lib/argent-sentinel/collector/protection-rejected",
+    "max_file_bytes": 1048576,
+    "active_max_age_seconds": 86400,
+    "stale_grace_seconds": 604800,
+    "state_file": "/var/lib/argent-sentinel/collector/effective-protected-cidrs.json"
   }
 }

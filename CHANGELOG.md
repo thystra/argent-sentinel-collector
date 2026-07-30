@@ -1,3 +1,33 @@
+## 0.5.4.0
+
+- Add dynamic public-IPv6 local-address protection inventories for enrolled
+  agents, with `host`, `lan-prefix`, `manual`, and `off` modes.
+- Discover qualifying addresses on selected or IPv6-default-route interfaces,
+  excluding loopback, link-local, multicast, unspecified, tentative,
+  DAD-failed, deprecated, container, and tunnel interfaces by default.
+- Recommend conservative `/128` host protection for virtualized, cloud, VPS,
+  or uncertain systems; recommend LAN-prefix protection only for physical
+  router-advertised/dynamic environments and require explicit ownership
+  confirmation before broadening protection.
+- Add Debian Debconf selection on first install or upgrade when no prior local
+  protection choice exists, plus `dpkg-reconfigure argent-sentinel-agent`.
+  Noninteractive installs use unconfirmed dynamic host mode and never silently
+  protect an entire interface prefix.
+- Send changed inventories immediately and periodic heartbeats through the
+  existing mTLS/idempotent agent transport, prioritizing protection updates
+  ahead of ordinary telemetry backlogs.
+- Add schema version 9 current and immutable history tables for per-node
+  inventories, bounded freshness/grace handling, and an atomically published
+  effective-protection state file.
+- Merge fresh and grace-period node inventories with static protected CIDRs in
+  dashboard review, while the root-owned processor independently loads the
+  current state and fails closed when that state is missing, invalid, or stale.
+- Bound remote dynamic inventory prefixes to no broader than `/24` IPv4 or
+  `/48` IPv6; unsafe connected prefixes fall back to host protection.
+- Add dashboard visibility for node mode, confirmation source, freshness,
+  discovered addresses, effective CIDRs, and publication health.
+- Keep automatic CIDR blocking disabled.
+
 ## 0.5.3.1
 
 - Add a dedicated `enforcement_protection.protected_cidrs` policy that blocks

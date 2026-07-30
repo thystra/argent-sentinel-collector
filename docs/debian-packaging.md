@@ -1,6 +1,6 @@
 # Debian packages
 
-Argent Sentinel 0.4.0 builds four architecture-independent packages:
+Argent Sentinel builds four architecture-independent packages:
 
 - `argent-sentinel-common`: collector, remote-agent and central-API engines,
   command-line interfaces, examples and documentation.
@@ -31,10 +31,10 @@ package dependencies resolve without an external repository:
 
 ```bash
 sudo apt install \
-  ./dist/deb/argent-sentinel-common_0.4.0-1_all.deb \
-  ./dist/deb/argent-sentinel-agent_0.4.0-1_all.deb \
-  ./dist/deb/argent-sentinel-server_0.4.0-1_all.deb \
-  ./dist/deb/argent-sentinel_0.4.0-1_all.deb
+  ./dist/deb/argent-sentinel-common_0.5.4.0-1_all.deb \
+  ./dist/deb/argent-sentinel-agent_0.5.4.0-1_all.deb \
+  ./dist/deb/argent-sentinel-server_0.5.4.0-1_all.deb \
+  ./dist/deb/argent-sentinel_0.5.4.0-1_all.deb
 ```
 
 Existing `/etc/argent-sentinel/collector.json` and SQLite state are preserved.
@@ -65,8 +65,8 @@ Install only `common` and `agent`:
 
 ```bash
 sudo apt install \
-  ./dist/deb/argent-sentinel-common_0.4.0-1_all.deb \
-  ./dist/deb/argent-sentinel-agent_0.4.0-1_all.deb
+  ./dist/deb/argent-sentinel-common_0.5.4.0-1_all.deb \
+  ./dist/deb/argent-sentinel-agent_0.5.4.0-1_all.deb
 ```
 
 Enroll the node with a certificate signed by the dedicated Argent Sentinel CA,
@@ -86,6 +86,38 @@ corresponding node authorization exists on the central server. The default
 `ca_file` is the operating system CA bundle used to validate the public HTTPS
 certificate for `sentinel.argentwolf.org`; the dedicated Sentinel node CA stays
 on the central server for client-certificate validation.
+
+
+## Dynamic local-address protection in 0.5.4.0
+
+The agent package uses Debconf when installed for the first time or when an
+upgrade finds no `local_address_protection` object in the preserved agent
+configuration. Discovery is embedded in the package `config` script because
+Debconf preconfiguration runs before the new package payload is unpacked.
+
+The prompt shows current qualifying public IPv6 addresses, virtualization, the
+candidate LAN prefix, and a recommendation. KVM/VPS/cloud/uncertain nodes are
+recommended for `host` mode. Physical router-advertised or dynamic environments
+may be recommended for `lan-prefix`, but a second prompt requires explicit
+confirmation that the operator owns or controls the entire displayed prefix.
+The remaining choices are `manual` and `off`.
+
+For an unattended install:
+
+```bash
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install \
+  ./argent-sentinel-common_0.5.4.0-1_all.deb \
+  ./argent-sentinel-agent_0.5.4.0-1_all.deb
+```
+
+Sentinel records unconfirmed `host` mode. It never silently broadens protection
+to an interface prefix. Reopen the prompt later with:
+
+```bash
+sudo dpkg-reconfigure argent-sentinel-agent
+```
+
+Ordinary upgrades preserve an existing selection and do not prompt again.
 
 ## Removal and retained data
 

@@ -26,7 +26,7 @@ from http.server import BaseHTTPRequestHandler
 from typing import Any, Mapping
 from review_queue import NETWORK_REVIEW_ACTIONS, REVIEW_ACTIONS
 
-APP_VERSION = "0.5.3.1"
+APP_VERSION = "0.5.4.0"
 LOG = logging.getLogger("argent-sentinel-dashboard")
 
 DEFAULTS: dict[str, Any] = {
@@ -524,7 +524,8 @@ def render_networks(
             f'<dt>Proposal basis</dt><dd>{h(row.get("proposal_basis"))}</dd>'
             f'<dt>Protection status</dt><dd>{h(row.get("protection_status"))}</dd>'
             f'<dt>Protected by</dt><dd><code>{h(row.get("protected_by_cidr"))}</code> '
-            f'({h(row.get("protection_source"))})</dd>'
+            f'({h(row.get("protection_source"))}) '
+            f'{h(row.get("protected_by_nodes"))}</dd>'
             f'<dt>Proposal hostile IPs</dt><dd>{number(row.get("proposal_hostile_ips"))}</dd>'
             f'<dt>Proposal incidents/events</dt><dd>'
             f'{number(row.get("proposal_incident_count"))} / '
@@ -595,8 +596,54 @@ def render_networks(
         ]
         for row in snapshot.get("network_review_actions", [])
     ]
+    protection = snapshot.get("local_address_protection", {})
+    node_rows: list[list[Any]] = []
+    for node in protection.get("nodes", []) if isinstance(protection, Mapping) else []:
+        cidrs = node.get("effective_cidrs", [])
+        addresses = node.get("addresses", [])
+        address_text = ", ".join(
+            f"{item.get('interface')}={item.get('address')}/{item.get('prefix_length')}"
+            for item in addresses
+            if isinstance(item, Mapping)
+        )
+        node_rows.append(
+            [
+                h(node.get("node_id")),
+                h(node.get("configured_mode")),
+                h(node.get("effective_mode")),
+                h(node.get("freshness")),
+                "yes" if node.get("operator_confirmed") else "no",
+                h(node.get("selection_source")),
+                h(address_text),
+                "<br>".join(f"<code>{h(value)}</code>" for value in cidrs),
+                when(node.get("generated_at")),
+            ]
+        )
+    state_status = protection.get("state_status", "unknown") if isinstance(
+        protection, Mapping
+    ) else "unknown"
+    state_age = protection.get("state_age_seconds") if isinstance(
+        protection, Mapping
+    ) else None
+    protection_section = (
+        '<section><h2>Dynamic local-address protection</h2>'
+        '<p class="muted">Authenticated node inventories add a dynamic '
+        'never-block boundary. Host mode protects current /128 addresses; '
+        'confirmed LAN-prefix mode follows current connected prefixes.</p>'
+        f'<p>Effective-state publication: <strong>{h(state_status)}</strong>; '
+        f'age: {h(state_age if state_age is not None else "unknown")} seconds.</p>'
+        + table(
+            [
+                "Node", "Configured", "Effective", "Freshness", "Confirmed",
+                "Source", "Discovered addresses", "Protected CIDRs", "Generated",
+            ],
+            node_rows,
+        )
+        + '</section>'
+    )
     return (
         cards
+        + protection_section
         + '<section><h2>Audited CIDR review and enforcement</h2>'
         + '<p class="muted">Registered allocations remain ownership scopes. '
         'Only the displayed most-specific bounded proposal is eligible for a '

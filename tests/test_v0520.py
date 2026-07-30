@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Source: /home/alan/src/argent-sentinel-collector/tests/test_v0520.py
-"""Regression coverage for Argent Sentinel 0.5.3.1."""
+"""Regression coverage for Argent Sentinel 0.5.4.0."""
 
 from __future__ import annotations
 
@@ -357,16 +357,16 @@ class V0520Test(unittest.TestCase):
 
     def test_release_and_packaging_markers(self) -> None:
         self.assertEqual(
-            "0.5.3.1",
+            "0.5.4.0",
             (ROOT / "VERSION").read_text(encoding="utf-8").strip(),
         )
         collector = (ROOT / "src/collector.py").read_text(encoding="utf-8")
-        self.assertIn("SCHEMA_VERSION = 8", collector)
+        self.assertIn("SCHEMA_VERSION = 9", collector)
         self.assertIn('"reason": "lock-busy"', collector)
         builder = (ROOT / "packaging/build_debs.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('upstream != "0.5.3.1"', builder)
+        self.assertIn('upstream != "0.5.4.0"', builder)
         self.assertIn('"review_queue.py"', builder)
         self.assertIn('"review_processor.py"', builder)
         self.assertIn(

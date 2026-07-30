@@ -1,0 +1,67 @@
+Template: argent-sentinel-agent/protection-discovery
+Type: note
+Description: Argent Sentinel local-address protection discovery
+ ${SUMMARY}
+ .
+ Sentinel uses this information only to prevent its own enforcement actions
+ from blocking addresses that belong to this node or an operator-controlled
+ LAN. It does not make the addresses trusted event sources.
+
+Template: argent-sentinel-agent/protection-mode
+Type: select
+Choices-C: host, lan-prefix, manual, off
+Choices: host, lan-prefix, manual, off
+Default: host
+Description: Local-address protection mode:
+ host protects each currently discovered public IPv6 address as an individual
+ /128. This is the safe choice for VPS, cloud, virtualized, or uncertain hosts.
+ .
+ lan-prefix dynamically protects the current public IPv6 prefix reported on the
+ selected interface. Choose it only when you own or control the entire prefix.
+ .
+ manual protects only CIDRs entered by the operator. off disables dynamic local
+ protection. Existing static enforcement-protected CIDRs remain in effect.
+
+Template: argent-sentinel-agent/lan-confirm
+Type: boolean
+Default: false
+Description: Do you own or control the complete detected IPv6 LAN prefix?
+ Candidate prefix or prefixes: ${PREFIXES}
+ .
+ LAN-prefix mode prevents Sentinel-managed enforcement against every address in
+ the detected prefix, not just this host. Do not confirm this merely because a
+ VPS interface displays a /64.
+
+Template: argent-sentinel-agent/manual-cidrs
+Type: string
+Description: CIDRs to protect in manual mode:
+ Enter one or more IPv4 or IPv6 CIDRs separated by spaces or commas. Dynamic
+ entries may be no broader than /24 for IPv4 or /48 for IPv6.
+
+Template: argent-sentinel-agent/protection-warning
+Type: note
+Description: The requested protection mode was not accepted
+ ${WARNING}
+
+Template: argent-sentinel-agent/protection-apply
+Type: boolean
+Default: false
+Description: Internal local-protection configuration marker
+ This value is managed by the package.
+
+Template: argent-sentinel-agent/protection-confirmed
+Type: boolean
+Default: false
+Description: Internal local-protection confirmation marker
+ This value is managed by the package.
+
+Template: argent-sentinel-agent/protection-source
+Type: string
+Default: safe-default
+Description: Internal local-protection selection source
+ This value is managed by the package.
+
+Template: argent-sentinel-agent/protection-interfaces
+Type: string
+Description: Internal local-protection interface list
+ This value is managed by the package.

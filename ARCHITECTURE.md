@@ -12,7 +12,9 @@ WordPress plugin       OpenSSH journal       Nginx structured logs
        |                      |                       |
        +---------- local immutable evidence ----------+
                               |
-                    Argent Sentinel agent/API
+               Argent Sentinel agent + IPv6 discovery
+                              |
+              mTLS events and protection inventories
                               |
                  normalized central SQLite store
                               |
@@ -51,7 +53,10 @@ the initial production review.
 
 - Producer files and journal cursors are root-controlled.
 - Remote transport uses per-node mTLS identity and idempotent envelopes.
-- The collector validates all event fields before database insertion.
+- Local-protection inventories are authenticated by the same node certificate,
+  bound to the envelope digest, validated again by the collector, and retained
+  in immutable history before contributing to the effective protection set.
+- The collector validates all event and inventory fields before database insertion.
 - Usernames, cookies, passwords, and authentication secrets are not included
   in outbound reports.
 - Test mode redirects all abuse mail to the configured override.
@@ -102,9 +107,21 @@ remain visible to telemetry and incident correlation. Dashboard suppression is a
 usability control; the root-owned review processor repeats the overlap check at
 action time and is authoritative.
 
-Dynamic host and LAN-prefix protection will be derived by enrolled agents in a
-later release. A configured interface prefix is never sufficient on its own to
-infer ownership of the whole prefix.
+Version 0.5.4.0 derives dynamic protection from enrolled-agent inventories.
+Host mode recalculates `/128` protections from every current qualifying public
+IPv6 address. Confirmed LAN-prefix mode recalculates the current connected
+prefixes; an unconfirmed LAN choice falls back to host mode. Virtualized or
+uncertain environments are recommended for host mode because a provider-visible
+`/64` does not prove operator control of that prefix.
+
+The agent sends an inventory when its canonical protection state changes and at
+a bounded heartbeat interval. The collector retains the most recent inventory
+per node plus immutable history, holds stale inventory protections through a
+configured grace period, and publishes one atomic effective-state file. The
+root-owned review processor reloads that file at action time and fails closed
+when it is missing, invalid, or older than the configured state-file limit.
+Static `protected_cidrs` and the legacy `trusted_cidrs` enforcement guard remain
+independent safety layers.
 
 ## Registered-CIDR cases
 
@@ -112,8 +129,8 @@ Network cases use `registered_cidr` returned by enrichment when available and
 fall back to the local candidate prefix otherwise. The registered allocation is
 an ownership and correlation scope, not automatically the enforcement target.
 
-Schema version 8 derives a deterministic proposal from the strongest bounded
-evidence scope: `/24` for IPv4 or `/48` for IPv6 by default. Within that scope,
+Schema version 9 retains the schema-8 deterministic proposal from the
+strongest bounded evidence scope: `/24` for IPv4 or `/48` for IPv6 by default. Within that scope,
 the proposal is narrowed to the smallest common prefix containing the selected
 hostile addresses. The case records the proposal revision, distinct hostile
 addresses, incidents, events, active days, address-space coverage, and

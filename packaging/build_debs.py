@@ -105,6 +105,7 @@ def make_common(root: Path, version: str) -> dict[str, str]:
         ("review_processor.py", "review_processor.py"),
         ("wordpress_sites.py", "wordpress_sites.py"),
         ("agent.py", "agent.py"),
+        ("local_protection.py", "local_protection.py"),
         ("server_api.py", "server_api.py"),
         ("fail2ban_export.py", "fail2ban_export.py"),
         ("review_digest.py", "review_digest.py"),
@@ -125,6 +126,10 @@ def make_common(root: Path, version: str) -> dict[str, str]:
             "usr/sbin/argent-sentinel-wordpress-sites",
         ),
         ("argent-sentinel-agent", "usr/bin/argent-sentinel-agent"),
+        (
+            "argent-sentinel-local-protection",
+            "usr/sbin/argent-sentinel-local-protection",
+        ),
         ("argent-sentinel-api", "usr/sbin/argent-sentinel-api"),
         ("argent-sentinel-fail2ban-export", "usr/sbin/argent-sentinel-fail2ban-export"),
         ("argent-sentinel-review-digest", "usr/sbin/argent-sentinel-review-digest"),
@@ -167,8 +172,8 @@ def make_agent(root: Path, version: str) -> dict[str, str]:
     install_file(ROOT / "packaging/systemd/argent-sentinel-agent.timer", root / "usr/lib/systemd/system/argent-sentinel-agent.timer")
     add_doc(root, "argent-sentinel-agent", ROOT / "docs/debian-packaging.md")
     return {
-        "description": "Argent Sentinel authenticated remote node agent\nStages WordPress and Nginx events, captures privacy-preserving OpenSSH failures,\nand delivers idempotent mTLS batches to sentinel.argentwolf.org.",
-        "depends": f"argent-sentinel-common (= {version}), adduser, openssl, systemd | systemd-sysv",
+        "description": "Argent Sentinel authenticated remote node agent\nStages WordPress and Nginx events, captures privacy-preserving OpenSSH failures,\nand delivers idempotent mTLS events and local-protection inventories.",
+        "depends": f"argent-sentinel-common (= {version}), adduser, debconf (>= 0.5) | debconf-2.0, iproute2, openssl, systemd | systemd-sysv",
         "suggests": "wp-cli",
         "provides": "argent-sentinel-client",
     }
@@ -244,6 +249,8 @@ PACKAGE_BUILDERS = {
 
 MAINTAINER_SCRIPTS = {
     "argent-sentinel-agent": {
+        "config": ROOT / "packaging/deb/agent.config",
+        "templates": ROOT / "packaging/deb/agent.templates",
         "preinst": ROOT / "packaging/deb/agent.preinst",
         "postinst": ROOT / "packaging/deb/agent.postinst",
         "prerm": ROOT / "packaging/deb/agent.prerm",
@@ -281,7 +288,11 @@ def build_package(package: str, full_version: str, output_dir: Path, work_dir: P
     debian.mkdir(mode=0o755)
     for name, source in MAINTAINER_SCRIPTS.get(package, {}).items():
         content = source.read_text(encoding="utf-8").replace("@PACKAGE_VERSION@", full_version)
-        write_file(debian / name, content, 0o755)
+        write_file(
+            debian / name,
+            content,
+            0o644 if name == "templates" else 0o755,
+        )
     write_file(debian / "md5sums", md5sums(root))
     control = control_text(
         package,
@@ -307,8 +318,8 @@ def main() -> int:
     if shutil.which("dpkg-deb") is None:
         parser.error("dpkg-deb is required (install dpkg-dev/build-essential)")
     upstream = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    if upstream != "0.5.3.1":
-        parser.error(f"VERSION must be 0.5.3.1, found {upstream!r}")
+    if upstream != "0.5.4.0":
+        parser.error(f"VERSION must be 0.5.4.0, found {upstream!r}")
     if not args.revision.isdigit() or int(args.revision) < 1:
         parser.error("--revision must be a positive integer")
     full_version = f"{upstream}-{args.revision}"
@@ -316,9 +327,9 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not args.skip_tests:
-        for source in ("collector.py", "report_batcher.py", "reporting_view.py", "review_queue.py", "review_processor.py", "wordpress_sites.py", "agent.py", "server_api.py", "fail2ban_export.py", "review_digest.py", "nginx_429_export.py", "dashboard.py", "dashboard_snapshot.py", "awstats_manager.py"):
+        for source in ("collector.py", "report_batcher.py", "reporting_view.py", "review_queue.py", "review_processor.py", "wordpress_sites.py", "agent.py", "local_protection.py", "server_api.py", "fail2ban_export.py", "review_digest.py", "nginx_429_export.py", "dashboard.py", "dashboard_snapshot.py", "awstats_manager.py"):
             run(sys.executable, "-m", "py_compile", str(ROOT / "src" / source))
-        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_v045.py", "test_v046.py", "test_v047.py", "test_v048.py", "test_v049.py", "test_v0410.py", "test_v050.py", "test_v0501.py", "test_v0503.py", "test_v0504.py", "test_v0505.py", "test_v0510.py", "test_v0511.py", "test_v0511_revision2.py", "test_v0520.py", "test_v0521.py", "test_v0530.py", "test_packaging.py"):
+        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_v045.py", "test_v046.py", "test_v047.py", "test_v048.py", "test_v049.py", "test_v0410.py", "test_v050.py", "test_v0501.py", "test_v0502.py", "test_v0503.py", "test_v0504.py", "test_v0505.py", "test_v0510.py", "test_v0511.py", "test_v0511_revision2.py", "test_v0520.py", "test_v0521.py", "test_v0530.py", "test_v0531.py", "test_v0540.py", "test_packaging.py"):
             run(sys.executable, str(ROOT / "tests" / test), cwd=ROOT)
         for script in sorted((ROOT / "scripts").glob("*.sh")):
             run("bash", "-n", str(script))

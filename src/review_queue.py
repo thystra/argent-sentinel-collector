@@ -12,7 +12,7 @@ import uuid
 from typing import Any, Mapping
 
 UTC = dt.timezone.utc
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 OPEN_REPORT_STATES = ("failed", "no-contact")
 CREDENTIAL_SPRAY_RULES = (
     "wordpress-credential-spray",
@@ -180,17 +180,19 @@ def install_review_schema(connection: sqlite3.Connection) -> None:
 
 def _configured_protection_sets(
     config: Mapping[str, Any] | None,
-) -> tuple[list[Any], list[Any]]:
+) -> tuple[list[Any], list[Any], list[Any]]:
     if not isinstance(config, Mapping):
-        return [], []
+        return [], [], []
     trusted = config.get("trusted_cidrs", [])
     protection = config.get("enforcement_protection", {})
     protected = config.get("protected_cidrs", [])
     if isinstance(protection, Mapping):
         protected = protection.get("protected_cidrs", protected)
+    dynamic = config.get("dynamic_protected_cidrs", [])
     return (
         list(trusted) if isinstance(trusted, list) else [],
         list(protected) if isinstance(protected, list) else [],
+        list(dynamic) if isinstance(dynamic, list) else [],
     )
 
 
@@ -205,10 +207,11 @@ def network_protection_match(
         proposal = ipaddress.ip_network(value, strict=False)
     except ValueError:
         return None
-    trusted, protected = _configured_protection_sets(config)
+    trusted, protected, dynamic = _configured_protection_sets(config)
     for source, values in (
         ("trusted-cidrs", trusted),
         ("protected-cidrs", protected),
+        ("dynamic-node-inventory", dynamic),
     ):
         for configured in values:
             try:
@@ -216,11 +219,21 @@ def network_protection_match(
             except ValueError:
                 continue
             if network.version == proposal.version and network.overlaps(proposal):
-                return {
+                result = {
                     "protection_status": "protected-overlap",
                     "protection_source": source,
                     "protected_by_cidr": str(network),
                 }
+                if source == "dynamic-node-inventory" and isinstance(
+                    config, Mapping
+                ):
+                    sources = config.get("dynamic_protection_sources", {})
+                    if isinstance(sources, Mapping):
+                        result["protected_by_nodes"] = ", ".join(
+                            str(item)
+                            for item in sources.get(str(network), [])
+                        )
+                return result
     return None
 
 
@@ -232,6 +245,7 @@ def annotate_network_protection(
     row["protection_status"] = None
     row["protection_source"] = None
     row["protected_by_cidr"] = None
+    row["protected_by_nodes"] = None
     if match:
         row.update(match)
     return row

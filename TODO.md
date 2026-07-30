@@ -320,7 +320,69 @@ Required work:
 - [x] Suppress range-block actions for overlapping protected proposals.
 - [x] Retain authoritative protected-overlap refusal in the root processor.
 - [x] Add audited acknowledgment for protected proposal revisions.
-- [ ] Add dynamic signed node address inventories and host/LAN protection modes
+- [x] Add dynamic mTLS-authenticated node address inventories and host/LAN protection modes
   in 0.5.4.0.
-- [ ] Add Debian debconf selection with conservative noninteractive `/128`
+- [x] Add Debian debconf selection with conservative noninteractive `/128`
   fallback in 0.5.4.0.
+
+## Implemented in 0.5.4.0 — dynamic local-address protection
+
+- [x] Discover current qualifying public IPv6 addresses on selected or
+  default-route interfaces on every agent run.
+- [x] Add `host`, `lan-prefix`, `manual`, and `off` modes.
+- [x] Recommend host mode for virtualized/VPS/cloud/uncertain nodes.
+- [x] Recommend LAN-prefix mode only for physical RA/dynamic environments and
+  require explicit ownership confirmation before protecting a whole prefix.
+- [x] Use unconfirmed `/128` host mode for unattended installation.
+- [x] Add first-install/missing-config Debconf selection and
+  `dpkg-reconfigure argent-sentinel-agent` support.
+- [x] Send changed inventories and periodic heartbeats through authenticated
+  mTLS transport, ahead of ordinary telemetry backlog.
+- [x] Add schema version 9 current/history inventory storage and atomic
+  effective-protection publication.
+- [x] Retain stale inventories through a bounded grace period and fail closed
+  for operator CIDR enforcement when the effective-state file is stale.
+- [x] Show node mode, freshness, discovered addresses, confirmation, and
+  effective CIDRs on the dashboard.
+- [ ] Validate the interactive KVM/VPS recommendation and host-mode choice when
+  installing the client node on a newly enrolled KVM/VPS client node.
+- [ ] Validate dynamic prefix replacement on a controlled residential-LAN
+  address change without creating any CrowdSec decision.
+
+## After 0.5.4.0 — distributed abusive crawler campaigns
+
+Motivating production campaign observed 2026-07-29 across two hosts:
+
+- `meta-externalagent/1.1` Windows wrapper: 55,002 requests from 250 IPs,
+  including 489 HTTP 429 and 53,332 HTTP 444 responses.
+- macOS wrapper: 28,343 requests from 250 IPs, including 257 HTTP 429 and
+  27,433 HTTP 444 responses.
+- Linux wrapper: 6,161 requests from 249 IPs, including 44 HTTP 429 and
+  5,997 HTTP 444 responses.
+- Combined normalized campaign: approximately 89,506 requests distributed
+  across roughly 250 addresses rather than one abusive source IP.
+
+Required work:
+
+- [ ] Normalize browser/OS wrappers into one crawler token/signature so the
+  three variants do not fragment campaign evidence.
+- [ ] Aggregate request volume, distinct IPs, affected hosts, response-code
+  mix, first/last seen, and current enforcement across a configurable rolling
+  window.
+- [ ] Detect distributed campaigns that remain below individual-IP thresholds.
+- [ ] Separate campaign observation/reporting from enforcement and require an
+  auditable review before broad suppression.
+- [ ] Support temporary User-Agent/campaign denial without blindly or
+  permanently blocking an entire provider ASN or all Meta infrastructure.
+- [ ] Keep global `http`-context maps and generated campaign state in a
+  package-managed file such as
+  `/etc/nginx/conf.d/argent-sentinel-abuse-control.conf`.
+- [ ] Where `return 444` cannot be applied at `http` scope, install one stable
+  package-managed include inside each protected `server` block or an existing
+  common server include; never dynamically rewrite complete vhost files.
+- [ ] Atomically replace generated Nginx policy, run `nginx -t`, reload only
+  after validation, and provide rollback/audit records.
+- [ ] Consider selective temporary IP/CIDR or CrowdSec enforcement only where
+  independent evidence supports it.
+- [ ] Sample or separately count traffic already receiving 444 so repeated
+  denied requests do not overwhelm logs and dashboard processing.
