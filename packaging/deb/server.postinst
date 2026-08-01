@@ -39,9 +39,9 @@ detect_legacy_unbound_watchdog() {
         return 0
     fi
     if [ ! -f "$service" ] || [ ! -f "$timer" ] || [ ! -f "$script" ] ||
-       ! grep -q '^ExecStart=/usr/local/sbin/unbound-watchdog.sh$' "$service" ||
-       ! grep -q '^OnUnitActiveSec=5min$' "$timer" ||
-       ! grep -q '^LOGROOT="/var/log/unbound-watchdog"$' "$script" ||
+       ! grep -Eq '^[[:space:]]*ExecStart[[:space:]]*=[[:space:]]*/usr/local/sbin/unbound-watchdog\.sh[[:space:]]*$' "$service" ||
+       ! grep -Eq '^[[:space:]]*OnUnitActiveSec[[:space:]]*=[[:space:]]*5min[[:space:]]*$' "$timer" ||
+       ! grep -Eq '^[[:space:]]*LOGROOT[[:space:]]*=[[:space:]]*"/var/log/unbound-watchdog"[[:space:]]*$' "$script" ||
        ! grep -q 'DNS health check FAILED' "$script"; then
         echo "WARNING: custom legacy Unbound watchdog was left unchanged." >&2
         return 0

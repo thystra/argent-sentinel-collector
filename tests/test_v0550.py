@@ -370,6 +370,8 @@ class V0550Test(unittest.TestCase):
         self.assertIn("LEGACY_UNBOUND_EMAIL", postinst)
         self.assertIn("LEGACY_UNBOUND_OVERRIDE", postinst)
         self.assertIn("argent-sentinel-watchdog.timer", postinst)
+        self.assertIn("OnUnitActiveSec[[:space:]]*=[[:space:]]*5min", postinst)
+        self.assertIn("unbound-watchdog\\.sh[[:space:]]*$", postinst)
         service = (
             ROOT / "packaging/systemd/argent-sentinel-watchdog.service"
         ).read_text()

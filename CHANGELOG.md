@@ -9,6 +9,9 @@
 - Migrate the existing five-minute Unbound watchdog into the framework while
   preserving pre-restart evidence collection, bounded restart, recovery
   verification, retention, and administrative reporting.
+- Accept harmless horizontal whitespace in the recognized legacy Unbound
+  systemd/configuration directives so migration matches the actual production
+  units without weakening the known-implementation guard.
 - Add an observe-only PHP-FPM 8.5 watchdog for master/service health, zombies,
   FastCGI queues, event mechanism, incremental rapid-exit/epoll log analysis,
   and local application probes.
