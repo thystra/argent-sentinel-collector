@@ -16,6 +16,9 @@
   not enable automatic PHP recovery in this release.
 - Add root-only current state and transition history plus a sanitized watchdog
   snapshot and read-only Watchdogs dashboard page with stale-state detection.
+- Present the Debconf local-protection recommendation as the prominent note
+  heading and render discovery details as real paragraphs instead of literal
+  escaped newline sequences.
 - Fix the time-sensitive network-candidate unit fixture so the complete test
   suite remains deterministic after its original July 2026 evidence window.
 - Defer Prometheus/Grafana export and PHP automatic remediation until the native

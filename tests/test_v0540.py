@@ -668,6 +668,18 @@ class V0540Test(unittest.TestCase):
         self.assertIn("network.prefixlen < minimum", config_script)
         self.assertIn("Choices-C: host, lan-prefix, manual, off", templates)
         self.assertIn("lan-confirm", templates)
+        self.assertIn(
+            "Description: Recommended local-address protection mode: ${RECOMMENDATION}",
+            templates,
+        )
+        self.assertIn("Environment: ${ENVIRONMENT}", templates)
+        self.assertIn("Detected public IPv6 addresses: ${ADDRESSES}", templates)
+        self.assertNotIn("${SUMMARY}", templates)
+        self.assertNotIn('print("\\\\n".join(lines))', config_script)
+        self.assertIn(
+            'db_subst argent-sentinel-agent/protection-discovery RECOMMENDATION',
+            config_script,
+        )
         self.assertIn("local_protection.py apply-config", postinst)
         self.assertIn('"config": ROOT / "packaging/deb/agent.config"', builder)
         self.assertIn('"templates": ROOT / "packaging/deb/agent.templates"', builder)

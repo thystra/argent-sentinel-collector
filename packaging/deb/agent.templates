@@ -1,7 +1,15 @@
 Template: argent-sentinel-agent/protection-discovery
 Type: note
-Description: Argent Sentinel local-address protection discovery
- ${SUMMARY}
+Description: Recommended local-address protection mode: ${RECOMMENDATION}
+ Argent Sentinel local-address protection discovery
+ .
+ Environment: ${ENVIRONMENT}
+ .
+ Detected public IPv6 addresses: ${ADDRESSES}
+ .
+ Candidate LAN prefixes: ${PREFIXES}
+ .
+ ${REASON}
  .
  Sentinel uses this information only to prevent its own enforcement actions
  from blocking addresses that belong to this node or an operator-controlled
