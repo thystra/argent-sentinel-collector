@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Source: /home/alan/src/argent-sentinel-collector/tests/test_v0511.py
-"""Regression coverage for Argent Sentinel 0.5.4.0."""
+"""Regression coverage for Argent Sentinel 0.5.5.0."""
 
 from __future__ import annotations
 
@@ -268,7 +268,7 @@ class V0511Test(unittest.TestCase):
         self.assertIn("Recent outbound messages", rendered)
 
     def test_release_versions_and_packaging(self) -> None:
-        expected = "0.5.4.0"
+        expected = "0.5.5.0"
         self.assertEqual(
             expected,
             (ROOT / "VERSION").read_text(encoding="utf-8").strip(),
@@ -288,7 +288,7 @@ class V0511Test(unittest.TestCase):
         builder = (ROOT / "packaging/build_debs.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('upstream != "0.5.4.0"', builder)
+        self.assertIn('upstream != "0.5.5.0"', builder)
         self.assertIn('"reporting_view.py"', builder)
         self.assertIn('"test_v0511.py"', builder)
 

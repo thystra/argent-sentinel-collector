@@ -51,6 +51,8 @@ Important live paths:
 /var/lib/argent-sentinel/                   private state and publication root
 /var/lib/argent-sentinel/dashboard/         sanitized dashboard snapshot
 /var/lib/argent-sentinel/dashboard/awstats/ static AWStats reports
+/var/lib/argent-sentinel/watchdogs/        private watchdog state and incidents
+/etc/argent-sentinel/watchdog.d/           operator watchdog overrides
 /run/argent-sentinel-api/                   API Unix socket runtime directory
 /run/argent-sentinel-dashboard/             dashboard Unix socket runtime directory
 /etc/awstats/                               generated AWStats site configuration
@@ -134,8 +136,8 @@ After implementation or deployment decisions, review and update:
   commented EOF marker when the format supports comments.
 
 ## Current reporting checkpoint
-- Version 0.5.4.0 is the current development target; 0.5.3.1 is the verified
-  production enforcement-protection baseline.
+- Version 0.5.5.0 is the current development target; 0.5.4.0 is the current
+  source baseline pending the first watchdog-framework package validation.
 - The 2026-07-29 production cutover retired the legacy Nginx sender and
   validated the first hourly provider delivery.
 - Immediate per-IP enforcement remains independent of hourly provider email.
@@ -188,3 +190,20 @@ After implementation or deployment decisions, review and update:
 - Range decisions require an authenticated operator, a nonempty justification,
   a current proposal revision, trusted-prefix checks, and an approved 180- or
   365-day duration. Automatic CIDR and VPN-endpoint blocking remain disabled.
+
+## Current watchdog checkpoint
+
+- Version 0.5.5.0 introduces the package-managed modular watchdog framework.
+- Package watchdog definitions ship disabled. Enable and customize modules only
+  through `/etc/argent-sentinel/watchdog.d/*.json`; do not edit package defaults.
+- The existing Unbound timer/script is migrated only when its known production
+  signatures match; custom local units are left untouched with a warning.
+- Watchdog status and incident evidence are root-only. Dashboard publication must
+  copy only `public_details`, sanitized history, and recipient-free delivery counts.
+- PHP-FPM is observe-only. Do not enable automatic PHP restart until production
+  thresholds, cooldowns, evidence capture, and failure-limit behavior are
+  explicitly validated.
+- Administrative and emergency recipient groups support multiple addresses.
+  Emergency recipients may be email-to-SMS gateways and receive concise mail.
+- The duplicate Nextcloud-specific `application/wasm` Nginx MIME warning is a
+  known benign exception; prior attempts to remove it broke Nextcloud.

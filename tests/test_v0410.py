@@ -20,9 +20,9 @@ import review_digest  # noqa: E402
 
 class V0410Test(unittest.TestCase):
     def test_release_versions(self) -> None:
-        self.assertEqual("0.5.4.0", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.5.0", (ROOT / "VERSION").read_text().strip())
         for module in (collector, nginx_429_export, review_digest):
-            self.assertEqual("0.5.4.0", module.APP_VERSION)
+            self.assertEqual("0.5.5.0", module.APP_VERSION)
 
     def test_extended_nginx_429_line_parser(self) -> None:
         line = (

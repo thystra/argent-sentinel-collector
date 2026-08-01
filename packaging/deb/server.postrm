@@ -8,7 +8,7 @@ if [ -d /run/systemd/system ] &&
 fi
 
 if [ "$1" = purge ]; then
-    rm -f         /etc/argent-sentinel/collector.json         /etc/argent-sentinel/server-api.json         /etc/logrotate.d/argent-sentinel-nginx         /var/lib/logrotate/status-argent-sentinel-nginx
+    rm -f         /etc/argent-sentinel/collector.json         /etc/argent-sentinel/server-api.json         /etc/argent-sentinel/watchdog.json         /etc/logrotate.d/argent-sentinel-nginx         /var/lib/logrotate/status-argent-sentinel-nginx
     # Enrollment records and CA private material are intentionally retained.
 fi
 

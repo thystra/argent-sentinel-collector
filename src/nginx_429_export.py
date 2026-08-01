@@ -16,7 +16,7 @@ import tempfile
 import uuid
 from typing import Any, Mapping
 
-APP_VERSION = "0.5.4.0"
+APP_VERSION = "0.5.5.0"
 UTC = dt.timezone.utc
 
 ACCESS_RE = re.compile(

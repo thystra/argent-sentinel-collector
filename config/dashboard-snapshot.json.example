@@ -13,5 +13,6 @@
   "snapshot_file": "/var/lib/argent-sentinel/dashboard/snapshot.json",
   "snapshot_group": "www-data",
   "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",
-  "traffic_sites_config": "/etc/argent-sentinel/traffic-sites.json"
+  "traffic_sites_config": "/etc/argent-sentinel/traffic-sites.json",
+  "watchdog_state_dir": "/var/lib/argent-sentinel/watchdogs"
 }

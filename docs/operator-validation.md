@@ -49,3 +49,52 @@ journalctl   -u argent-sentinel-review-digest.service   --since '5 minutes ago' 
 The systemd unit grants write access only to the collector state directory and
 runtime lock directory. The SQLite connection remains URI read-only and enables
 `PRAGMA query_only=ON`.
+
+## Modular watchdogs
+
+Validate global configuration and merged package/local definitions before
+starting the timer:
+
+```bash
+/usr/sbin/argent-sentinel-watchdog \
+  --config /etc/argent-sentinel/watchdog.json \
+  validate-config
+```
+
+Package definitions are disabled. Enable a module with a local override, then
+run it once without mail:
+
+```bash
+/usr/sbin/argent-sentinel-watchdog \
+  --config /etc/argent-sentinel/watchdog.json \
+  run --force --watchdog php_fpm --no-notify
+
+/usr/sbin/argent-sentinel-watchdog \
+  --config /etc/argent-sentinel/watchdog.json \
+  status --json
+```
+
+After reviewing the root-only state beneath
+`/var/lib/argent-sentinel/watchdogs/status`, start the packaged scheduler and
+refresh the sanitized dashboard publication:
+
+```bash
+systemctl enable --now argent-sentinel-watchdog.timer
+systemctl start argent-sentinel-watchdog.service
+systemctl start argent-sentinel-dashboard-snapshot.service
+
+systemctl status \
+  argent-sentinel-watchdog.timer \
+  argent-sentinel-watchdog.service \
+  --no-pager --full
+
+journalctl \
+  -u argent-sentinel-watchdog.service \
+  --since '10 minutes ago' \
+  --no-pager
+```
+
+Confirm that the dashboard snapshot contains no recipient addresses or private
+module diagnostics before exposing a new module through the Watchdogs page.
+
+<!-- EOF: /home/alan/src/argent-sentinel-collector/docs/operator-validation.md -->

@@ -1,0 +1,4 @@
+#!/bin/sh
+# /home/alan/src/argent-sentinel-collector/packaging/bin/argent-sentinel-watchdog
+exec /usr/bin/python3 /usr/lib/argent-sentinel/watchdog.py "$@"
+# EOF: /home/alan/src/argent-sentinel-collector/packaging/bin/argent-sentinel-watchdog

@@ -1,0 +1,16 @@
+# /home/alan/src/argent-sentinel-collector/packaging/systemd/argent-sentinel-watchdog.timer
+[Unit]
+Description=Run Argent Sentinel watchdog scheduler every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+RandomizedDelaySec=5s
+Persistent=true
+Unit=argent-sentinel-watchdog.service
+
+[Install]
+WantedBy=timers.target
+
+# EOF: /home/alan/src/argent-sentinel-collector/packaging/systemd/argent-sentinel-watchdog.timer

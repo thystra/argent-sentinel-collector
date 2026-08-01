@@ -1,3 +1,16 @@
+
+## Implemented in 0.5.5.0 — modular watchdog framework
+
+- [x] Add package/local `watchdog.d` discovery and per-module intervals.
+- [x] Add administrative and emergency recipient groups with multiple addresses.
+- [x] Migrate the existing Unbound watchdog without weakening evidence capture or recovery verification.
+- [x] Add an observe-only PHP-FPM watchdog using the production `poll` baseline.
+- [x] Add current watchdog state to the sanitized snapshot and dashboard.
+- [ ] Observe PHP-FPM behavior under normal production load before enabling any automatic recovery.
+- [ ] Add a bounded PHP-FPM two-stage recovery module only after thresholds and cooldowns are validated.
+- [ ] Add Prometheus-compatible metrics for watchdog state and Activity-Relay correlation.
+- [ ] Evaluate Grafana on a separate host so loss of nidhoggur does not remove monitoring history.
+
 # Argent Sentinel Roadmap
 
 ## Stabilization

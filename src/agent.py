@@ -51,7 +51,7 @@ except ModuleNotFoundError:
     sys.modules.setdefault("local_protection", local_protection)
     _LOCAL_PROTECTION_SPEC.loader.exec_module(local_protection)
 
-APP_VERSION = "0.5.4.0"
+APP_VERSION = "0.5.5.0"
 UTC = dt.timezone.utc
 LOG = logging.getLogger("argent-sentinel-agent")
 

@@ -1,3 +1,26 @@
+## 0.5.5.0
+
+- Add a package-managed modular watchdog runner with disabled package defaults
+  under `/usr/lib/argent-sentinel/watchdog.d/`, opt-in operator overrides under
+  `/etc/argent-sentinel/watchdog.d/`, and bounded per-module process isolation.
+- Add independent multi-address administrative and emergency notification
+  categories, transition deduplication, concise individual emergency delivery,
+  and daily administrative summaries.
+- Migrate the existing five-minute Unbound watchdog into the framework while
+  preserving pre-restart evidence collection, bounded restart, recovery
+  verification, retention, and administrative reporting.
+- Add an observe-only PHP-FPM 8.5 watchdog for master/service health, zombies,
+  FastCGI queues, event mechanism, incremental rapid-exit/epoll log analysis,
+  and local application probes.
+- Require two consecutive unhealthy PHP-FPM samples before notification and do
+  not enable automatic PHP recovery in this release.
+- Add root-only current state and transition history plus a sanitized watchdog
+  snapshot and read-only Watchdogs dashboard page with stale-state detection.
+- Fix the time-sensitive network-candidate unit fixture so the complete test
+  suite remains deterministic after its original July 2026 evidence window.
+- Defer Prometheus/Grafana export and PHP automatic remediation until the native
+  watchdog framework has production history.
+
 ## 0.5.4.0
 
 - Add dynamic public-IPv6 local-address protection inventories for enrolled

@@ -26,7 +26,7 @@ from http.server import BaseHTTPRequestHandler
 from typing import Any, Mapping
 from review_queue import NETWORK_REVIEW_ACTIONS, REVIEW_ACTIONS
 
-APP_VERSION = "0.5.4.0"
+APP_VERSION = "0.5.5.0"
 LOG = logging.getLogger("argent-sentinel-dashboard")
 
 DEFAULTS: dict[str, Any] = {
@@ -245,9 +245,9 @@ th{{background:var(--panel2);color:#cbd7ea;position:sticky;top:0}}
 tr:last-child td{{border-bottom:0}}
 .muted{{color:var(--muted)}}
 .status{{display:inline-block;padding:2px 8px;border-radius:999px;background:#26324b}}
-.status-sent,.status-blocked{{color:var(--good)}}
-.status-failed,.status-deferred,.status-long-block-review{{color:var(--bad)}}
-.status-review,.status-escalation-review,.status-suppressed{{color:var(--warn)}}
+.status-sent,.status-blocked,.status-healthy,.status-recovered{{color:var(--good)}}
+.status-failed,.status-deferred,.status-long-block-review,.status-critical,.status-error{{color:var(--bad)}}
+.status-review,.status-escalation-review,.status-suppressed,.status-warning{{color:var(--warn)}}
 code{{white-space:pre-wrap;overflow-wrap:anywhere;color:#cde7ff}}
 a{{color:var(--accent)}}
 .review-form{{display:grid;gap:7px;min-width:240px}}
@@ -270,6 +270,7 @@ footer{{padding:20px 28px;color:var(--muted);border-top:1px solid var(--line)}}
 <a href="/networks">Networks</a>
 <a href="/reports">Reports</a>
 <a href="/reviews">Reviews</a>
+<a href="/watchdogs">Watchdogs</a>
 <a href="/api/snapshot">JSON</a>
 </nav>
 </header>
@@ -320,6 +321,11 @@ def render_overview(snapshot: Mapping[str, Any]) -> str:
             "CIDR reviews",
             overview.get("network_reviews"),
             "/networks",
+        ),
+        (
+            "Unhealthy watchdogs",
+            overview.get("watchdogs_unhealthy"),
+            "/watchdogs",
         ),
     ]
     card_html = "".join(
@@ -381,6 +387,67 @@ def render_overview(snapshot: Mapping[str, Any]) -> str:
         + table(["Site", "Aliases", "Report", "Updated"], awstats_rows)
         + "</section>"
     )
+
+def render_watchdogs(snapshot: Mapping[str, Any]) -> str:
+    watchdogs = snapshot.get("watchdogs", [])
+    rows_data: list[list[Any]] = []
+    details_html: list[str] = []
+    for item in watchdogs:
+        status = item.get("status", "unknown")
+        metrics = item.get("metrics", {})
+        details = item.get("details", {})
+        rows_data.append(
+            [
+                h(item.get("display_name", item.get("id"))),
+                f'<span class="{status_class(status)}">{h(status)}</span>',
+                h(item.get("mode")),
+                when(item.get("checked_at")),
+                number(item.get("consecutive_failures")),
+                h(item.get("summary")),
+            ]
+        )
+        history_rows = [
+            [
+                when(event.get("checked_at")),
+                f'<span class="{status_class(event.get("status"))}">{h(event.get("status"))}</span>',
+                h(event.get("event")),
+                h(event.get("summary")),
+            ]
+            for event in reversed(item.get("history", [])[-10:])
+        ]
+        details_html.append(
+            '<div class="card">'
+            f'<h2>{h(item.get("display_name", item.get("id")))}</h2>'
+            '<dl>'
+            f'<dt>ID</dt><dd><code>{h(item.get("id"))}</code></dd>'
+            f'<dt>Module</dt><dd>{h(item.get("module"))}</dd>'
+            f'<dt>Enabled</dt><dd>{h(item.get("enabled"))}</dd>'
+            f'<dt>Mode</dt><dd>{h(item.get("mode"))}</dd>'
+            f'<dt>Interval</dt><dd>{number(item.get("interval_seconds"))} seconds</dd>'
+            f'<dt>Stale</dt><dd>{h(item.get("stale", False))}</dd>'
+            f'<dt>Reported state</dt><dd>{h(item.get("reported_status", status))}</dd>'
+            f'<dt>Last healthy</dt><dd>{when(item.get("last_healthy_at"))}</dd>'
+            f'<dt>Last failure</dt><dd>{when(item.get("last_failure_at"))}</dd>'
+            f'<dt>Last transition</dt><dd>{when(item.get("last_transition_at"))}</dd>'
+            f'<dt>Duration</dt><dd>{number(item.get("duration_ms"))} ms</dd>'
+            f'<dt>Notification failure</dt><dd>{h(item.get("notification_delivery_failed", False))}</dd>'
+            '</dl>'
+            '<h3>Metrics</h3>'
+            f'<code>{h(json.dumps(metrics, indent=2, sort_keys=True, default=str))}</code>'
+            '<h3>Details</h3>'
+            f'<code>{h(json.dumps(details, indent=2, sort_keys=True, default=str))}</code>'
+            '<h3>Recent events</h3>'
+            + table(["Time", "State", "Event", "Summary"], history_rows)
+            + '</div>'
+        )
+    return (
+        '<section><h2>Watchdog status</h2>'
+        + table(["Watchdog", "State", "Mode", "Last check", "Failures", "Summary"], rows_data)
+        + '</section><section><h2>Module details</h2><div class="grid">'
+        + ''.join(details_html)
+        + '</div></section>'
+    )
+
 
 def render_traffic(snapshot: Mapping[str, Any]) -> str:
     source_rows = [
@@ -1216,6 +1283,8 @@ class Handler(BaseHTTPRequestHandler):
                     snapshot,
                     self.app_config,
                 )
+            elif path == "/watchdogs":
+                title, body = "Watchdogs", render_watchdogs(snapshot)
             else:
                 self.send_payload(404, b"Not found\n", "text/plain")
                 return

@@ -40,7 +40,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.5.4.0"
+APP_VERSION = "0.5.5.0"
 SCHEMA_VERSION = 9
 
 DEFAULTS: dict[str, Any] = {
@@ -516,7 +516,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if network_reporting.get("automatic_cidr_blocking"):
         raise CollectorError(
             "network_reporting.automatic_cidr_blocking remains disabled; "
-            "0.5.4.0 supports only audited operator-initiated CIDR decisions"
+            "0.5.5.0 supports only audited operator-initiated CIDR decisions"
         )
     sshd_policy = config.get("sshd_policy", {})
     for name in (

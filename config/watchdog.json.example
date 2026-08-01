@@ -1,0 +1,17 @@
+{
+  "config_dir": "/etc/argent-sentinel/watchdog.d",
+  "incident_dir": "/var/lib/argent-sentinel/watchdogs/incidents",
+  "lock_file": "/run/argent-sentinel/watchdog.lock",
+  "notifications": {
+    "admin_recipients": [],
+    "emergency_recipients": [],
+    "enabled": true,
+    "hostname": "",
+    "mail_command": "/usr/bin/mail"
+  },
+  "package_config_dir": "/usr/lib/argent-sentinel/watchdog.d",
+  "retention_days": 30,
+  "routine_summary_hours": 24,
+  "schema_version": 1,
+  "state_dir": "/var/lib/argent-sentinel/watchdogs"
+}

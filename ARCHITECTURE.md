@@ -1,5 +1,29 @@
 # Argent Sentinel Architecture
 
+## Modular watchdog plane
+
+Argent Sentinel 0.5.5.0 adds a root-owned local watchdog plane that is separate
+from event ingestion and abuse-reporting policy. A one-minute systemd timer runs
+the common scheduler. Package and local JSON definitions select dynamically
+imported, package-owned modules and their independent intervals. Package
+definitions ship disabled and local overrides opt services into monitoring. Each
+module executes in a separately bounded process group. Modules return versioned
+state objects; the runner owns locking, persistence, recipient routing, retention,
+history, and transition suppression.
+
+Unbound retains bounded automatic recovery and captures evidence before restart.
+PHP-FPM is observe-only and uses an inode/offset log cursor so historical churn
+is not reclassified as a new incident. Current state is stored privately beneath
+`/var/lib/argent-sentinel/watchdogs`. The root snapshot process publishes only
+sanitized status, metrics, recent transitions, and public diagnostic summaries
+to the existing dashboard publication tree. Private diagnostics and recipient
+addresses remain in root-only state. The unprivileged dashboard has no systemd,
+mail, service restart, or watchdog-configuration access.
+
+Prometheus/Grafana integration is a future read-only export layer; local checks
+and recovery must remain functional without that stack.
+
+
 ## Purpose
 
 Argent Sentinel separates immediate local protection from evidence retention,

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import contextlib
+import datetime as dt
 import errno
 import io
 import json
@@ -220,7 +221,14 @@ class CollectorPolicyTest(unittest.TestCase):
             self.write_batch(5, 2, source_ip=f"198.199.90.{suffix}")
             self.collector.run()
 
-        candidates = self.collector.db.network_candidates(self.collector.config["policy"])
+        with mock.patch.object(
+            collector_module,
+            "utc_now",
+            return_value=dt.datetime(2026, 7, 24, tzinfo=dt.timezone.utc),
+        ):
+            candidates = self.collector.db.network_candidates(
+                self.collector.config["policy"]
+            )
         self.assertEqual(1, len(candidates))
         self.assertEqual("198.199.90.0/24", candidates[0]["network_cidr"])
         self.assertEqual(3, candidates[0]["hostile_ips"])

@@ -1,0 +1,21 @@
+{
+  "critical_failed_probes": 2,
+  "critical_rapid_exits": 100,
+  "critical_socket_queue": 1000,
+  "display_name": "PHP-FPM",
+  "enabled": false,
+  "expected_event_mechanism": "poll",
+  "id": "php_fpm",
+  "interval_seconds": 60,
+  "log_file": "/var/log/php8.5-fpm.log",
+  "mode": "observe",
+  "module": "php_fpm",
+  "notification_failure_threshold": 2,
+  "php_fpm_command": "/usr/sbin/php-fpm8.5",
+  "probes": [],
+  "service": "php8.5-fpm.service",
+  "socket_prefix": "/run/php/",
+  "timeout_seconds": 90,
+  "warning_rapid_exits": 20,
+  "warning_socket_queue": 100
+}

@@ -28,7 +28,7 @@ from review_queue import (
     recent_network_review_actions,
 )
 
-APP_VERSION = "0.5.4.0"
+APP_VERSION = "0.5.5.0"
 UTC = dt.timezone.utc
 
 DEFAULTS: dict[str, Any] = {
@@ -42,6 +42,7 @@ DEFAULTS: dict[str, Any] = {
     "max_rows": 50,
     "traffic_sites_config": "/etc/argent-sentinel/traffic-sites.json",
     "awstats_root": "/var/lib/argent-sentinel/dashboard/awstats",
+    "watchdog_state_dir": "/var/lib/argent-sentinel/watchdogs",
     "review": {
         "deferred_overdue_minutes": 60,
         "deferred_attempt_threshold": 3,
@@ -188,6 +189,91 @@ def load_sites(path: Path, awstats_root: Path) -> list[dict[str, Any]]:
             }
         )
     return sorted(result, key=lambda item: item["domain"])
+
+
+def _watchdog_notification_summary(value: Mapping[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    deliveries = value.get("notification_deliveries", {})
+    if not isinstance(deliveries, Mapping):
+        return result
+    for category, attempts in deliveries.items():
+        if not isinstance(attempts, list):
+            continue
+        valid = [item for item in attempts if isinstance(item, Mapping)]
+        result[str(category)] = {
+            "attempted": len(valid),
+            "successful": sum(1 for item in valid if item.get("success")),
+        }
+    return result
+
+
+def load_watchdog_statuses(root: Path) -> list[dict[str, Any]]:
+    status_dir = root / "status"
+    result: list[dict[str, Any]] = []
+    if not status_dir.is_dir():
+        return result
+    now_epoch = int(utc_now().timestamp())
+    for path in sorted(status_dir.glob("*.json")):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        enabled = bool(value.get("enabled", False))
+        reported_status = str(value.get("status", "unknown"))
+        interval = max(60, int(value.get("interval_seconds", 60) or 60))
+        checked_epoch = int(value.get("checked_epoch", 0) or 0)
+        stale_after = max(180, interval * 3)
+        stale = enabled and checked_epoch > 0 and now_epoch - checked_epoch > stale_after
+        status = "error" if stale else reported_status
+        summary = str(value.get("summary", ""))
+        if stale:
+            summary = (
+                f"Watchdog state is stale by {now_epoch - checked_epoch} seconds; "
+                f"last report: {summary}"
+            )
+        history = [
+            {
+                "checked_at": item.get("checked_at"),
+                "status": item.get("status"),
+                "severity": item.get("severity"),
+                "summary": item.get("summary"),
+                "event": item.get("event", ""),
+            }
+            for item in value.get("history", [])[-50:]
+            if isinstance(item, Mapping)
+        ]
+        result.append(
+            {
+                "id": value.get("id", path.stem),
+                "display_name": value.get("display_name", path.stem),
+                "module": value.get("module"),
+                "enabled": enabled,
+                "mode": value.get("mode", "observe"),
+                "interval_seconds": interval,
+                "status": status,
+                "reported_status": reported_status,
+                "stale": stale,
+                "severity": "critical" if stale else value.get("severity", "unknown"),
+                "summary": summary,
+                "checked_at": value.get("checked_at"),
+                "duration_ms": value.get("duration_ms"),
+                "consecutive_failures": value.get("consecutive_failures", 0),
+                "last_healthy_at": value.get("last_healthy_at"),
+                "last_failure_at": value.get("last_failure_at"),
+                "last_transition_at": value.get("last_transition_at"),
+                "metrics": value.get("metrics", {}),
+                "details": value.get("public_details", {}),
+                "history": history,
+                "event": value.get("event", ""),
+                "notification_delivery": _watchdog_notification_summary(value),
+                "notification_delivery_failed": bool(
+                    value.get("notification_delivery_failed", False)
+                ),
+            }
+        )
+    return sorted(result, key=lambda item: str(item.get("display_name", "")).casefold())
 
 
 def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -493,6 +579,11 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
         awstats_root,
     )
     database_path = Path(str(config["state_db"]))
+    watchdogs = load_watchdog_statuses(Path(str(config["watchdog_state_dir"])))
+    overview["watchdogs_total"] = len(watchdogs)
+    overview["watchdogs_unhealthy"] = sum(
+        1 for item in watchdogs if item.get("status") in {"warning", "critical", "error"}
+    )
     return {
         "version": APP_VERSION,
         "generated_at": utc_text(),
@@ -526,6 +617,7 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
         "top_user_agents": top_user_agents,
         "crawler_groups": crawler_groups[:max_rows],
         "awstats_sites": sites,
+        "watchdogs": watchdogs,
         "health": {
             "database": str(database_path),
             "database_exists": database_path.is_file(),

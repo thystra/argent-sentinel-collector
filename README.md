@@ -3,7 +3,7 @@
 Argent Sentinel is a self-hosted security event collector, correlation engine,
 CrowdSec decision bridge, and guarded abuse-reporting system.
 
-Version 0.5.4.0 combines authenticated event transport, central policy,
+Version 0.5.5.0 combines authenticated event transport, central policy,
 a read-only dashboard, and per-site traffic analytics:
 
 ```text
@@ -28,8 +28,8 @@ agent package and submit immutable event batches to the central API.
   programs, configuration examples, and documentation.
 - `argent-sentinel-agent`: node timer, WordPress/Nginx staging helpers, SSH
   journald collection, and enrollment helpers.
-- `argent-sentinel-server`: ingestion API, collector timer, Nginx log rotation,
-  PKI helpers, config migration, and reporting cutover tools.
+- `argent-sentinel-server`: ingestion API, collector and watchdog timers, Nginx
+  log rotation, PKI helpers, config migration, and reporting cutover tools.
 - `argent-sentinel`: combined agent/server metapackage.
 
 Installing packages never enables provider abuse reporting automatically.
@@ -47,6 +47,8 @@ Validate redirected test mode before production delivery.
 | `/etc/nginx/conf.d/argent-sentinel-log-format.conf` | Dedicated structured Nginx format and conditional logging maps | JSON fields and suspicious-request conditions |
 | `/etc/argent-sentinel/agent-privacy.key` | HMAC secret used to pseudonymize SSH account names | root-readable, at least 32 bytes |
 | `/etc/argent-sentinel/pki/` | Sentinel CA, node certificate, and private key material | protect private keys as root-only |
+| `/etc/argent-sentinel/watchdog.json` | Global watchdog scheduling, retention, and notification policy | administrative and emergency recipient groups |
+| `/etc/argent-sentinel/watchdog.d/*.json` | Local watchdog enable/disable and threshold overrides | merge by watchdog `id` |
 
 Package examples are installed under `/usr/share/argent-sentinel/`.
 
@@ -74,6 +76,28 @@ Package examples are installed under `/usr/share/argent-sentinel/`.
 
 The v0.4.7 server package appends missing required paths to preserved
 configurations without replacing custom settings.
+
+## Modular watchdogs
+
+Version 0.5.5.0 adds a common one-minute scheduler with independently timed,
+process-isolated modules. Package definitions live in
+`/usr/lib/argent-sentinel/watchdog.d/`; operator overrides live in
+`/etc/argent-sentinel/watchdog.d/`. Packaged modules are disabled until locally
+enabled. The first upgrade migrates the recognized Unbound automatic-recovery
+watchdog and provides an observe-only PHP-FPM health module.
+
+Configure administrative and emergency recipients separately in
+`/etc/argent-sentinel/watchdog.json`. Emergency recipients may include
+email-to-SMS gateway addresses and receive concise critical messages only.
+
+```bash
+sudo argent-sentinel-watchdog --config /etc/argent-sentinel/watchdog.json validate-config
+sudo argent-sentinel-watchdog --config /etc/argent-sentinel/watchdog.json status --json
+```
+
+The read-only dashboard publishes a Watchdogs page from sanitized status files.
+See `docs/watchdogs.md` for module behavior and override examples.
+
 
 ## New combined server installation
 

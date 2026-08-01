@@ -113,8 +113,16 @@ def make_common(root: Path, version: str) -> dict[str, str]:
         ("dashboard.py", "dashboard.py"),
         ("dashboard_snapshot.py", "dashboard_snapshot.py"),
         ("awstats_manager.py", "awstats_manager.py"),
+        ("watchdog.py", "watchdog.py"),
+        ("watchdog_runtime.py", "watchdog_runtime.py"),
     ):
         install_file(ROOT / "src" / source, root / "usr/lib/argent-sentinel" / target, 0o755)
+    for module in sorted((ROOT / "src" / "watchdogs").glob("*.py")):
+        install_file(
+            module,
+            root / "usr/lib/argent-sentinel/watchdogs" / module.name,
+            0o755 if module.name != "__init__.py" else 0o644,
+        )
     for source, target in (
         ("argent-sentinel", "usr/bin/argent-sentinel"),
         (
@@ -138,14 +146,20 @@ def make_common(root: Path, version: str) -> dict[str, str]:
         ("argent-sentinel-dashboard-snapshot", "usr/sbin/argent-sentinel-dashboard-snapshot"),
         ("argent-sentinel-review-processor", "usr/sbin/argent-sentinel-review-processor"),
         ("argent-sentinel-awstats", "usr/sbin/argent-sentinel-awstats"),
+        ("argent-sentinel-watchdog", "usr/sbin/argent-sentinel-watchdog"),
         (
             "argent-sentinel-config-migrate",
             "usr/sbin/argent-sentinel-config-migrate",
         ),
     ):
         install_file(ROOT / "packaging/bin" / source, root / target, 0o755)
-    for name in ("collector.json.example", "agent.json.example", "server-api.json.example", "node.json.example", "nginx-sentinel.conf.example", "dashboard.json.example", "dashboard-snapshot.json.example", "review-processor.json.example", "traffic-sites.json.example", "nginx-site-access-log-format.conf.example", "nginx-crawler-map.conf.example", "nginx-crawler-enforcement.conf.example", "nginx-sentinel-dashboard.conf.example"):
+    for name in ("collector.json.example", "agent.json.example", "server-api.json.example", "node.json.example", "nginx-sentinel.conf.example", "dashboard.json.example", "dashboard-snapshot.json.example", "review-processor.json.example", "traffic-sites.json.example", "nginx-site-access-log-format.conf.example", "nginx-crawler-map.conf.example", "nginx-crawler-enforcement.conf.example", "nginx-sentinel-dashboard.conf.example", "watchdog.json.example"):
         install_file(ROOT / "config" / name, root / "usr/share/argent-sentinel" / name)
+    for definition in sorted((ROOT / "config" / "watchdog.d").glob("*.json")):
+        install_file(
+            definition,
+            root / "usr/lib/argent-sentinel/watchdog.d" / definition.name,
+        )
     install_file(ROOT / "VERSION", root / "usr/share/argent-sentinel/VERSION")
     docs = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "ARCHITECTURE.md", ROOT / "TODO.md", ROOT / "AGENTS.md", ROOT / "AGENTS-PROFILE.md", ROOT / "docs-abuse-context.md", ROOT / "docs/debian-packaging.md"]
     docs.extend(sorted((ROOT / "docs").glob("*.md")))
@@ -202,6 +216,8 @@ def make_server(root: Path, version: str) -> dict[str, str]:
         "argent-sentinel-review-processor.path",
         "argent-sentinel-awstats.service",
         "argent-sentinel-awstats.timer",
+        "argent-sentinel-watchdog.service",
+        "argent-sentinel-watchdog.timer",
     ):
         install_file(
             ROOT / "packaging/systemd" / unit,
@@ -223,7 +239,7 @@ def make_server(root: Path, version: str) -> dict[str, str]:
     add_doc(root, "argent-sentinel-server", ROOT / "docs/debian-packaging.md")
     return {
         "description": "Argent Sentinel central ingestion and policy server\nRuns the mTLS ingestion API and scheduled collector, correlates WordPress,\nNginx, and OpenSSH incidents, manages CrowdSec decisions, and sends reports.",
-        "depends": f"argent-sentinel-common (= {version}), argent-sentinel-agent (= {version}), init-system-helpers (>= 1.18~), systemd | systemd-sysv, adduser, acl, openssl, logrotate",
+        "depends": f"argent-sentinel-common (= {version}), argent-sentinel-agent (= {version}), init-system-helpers (>= 1.18~), systemd | systemd-sysv, adduser, acl, openssl, logrotate, curl, dnsutils, iproute2, procps",
         "recommends": "nginx, awstats, crowdsec, sqlite3, default-mta | mail-transport-agent",
         "provides": "argent-sentinel-collector",
     }
@@ -318,8 +334,8 @@ def main() -> int:
     if shutil.which("dpkg-deb") is None:
         parser.error("dpkg-deb is required (install dpkg-dev/build-essential)")
     upstream = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    if upstream != "0.5.4.0":
-        parser.error(f"VERSION must be 0.5.4.0, found {upstream!r}")
+    if upstream != "0.5.5.0":
+        parser.error(f"VERSION must be 0.5.5.0, found {upstream!r}")
     if not args.revision.isdigit() or int(args.revision) < 1:
         parser.error("--revision must be a positive integer")
     full_version = f"{upstream}-{args.revision}"
@@ -327,9 +343,9 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not args.skip_tests:
-        for source in ("collector.py", "report_batcher.py", "reporting_view.py", "review_queue.py", "review_processor.py", "wordpress_sites.py", "agent.py", "local_protection.py", "server_api.py", "fail2ban_export.py", "review_digest.py", "nginx_429_export.py", "dashboard.py", "dashboard_snapshot.py", "awstats_manager.py"):
+        for source in ("collector.py", "report_batcher.py", "reporting_view.py", "review_queue.py", "review_processor.py", "wordpress_sites.py", "agent.py", "local_protection.py", "server_api.py", "fail2ban_export.py", "review_digest.py", "nginx_429_export.py", "dashboard.py", "dashboard_snapshot.py", "awstats_manager.py", "watchdog.py", "watchdog_runtime.py", "watchdogs/__init__.py", "watchdogs/unbound.py", "watchdogs/php_fpm.py"):
             run(sys.executable, "-m", "py_compile", str(ROOT / "src" / source))
-        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_v045.py", "test_v046.py", "test_v047.py", "test_v048.py", "test_v049.py", "test_v0410.py", "test_v050.py", "test_v0501.py", "test_v0502.py", "test_v0503.py", "test_v0504.py", "test_v0505.py", "test_v0510.py", "test_v0511.py", "test_v0511_revision2.py", "test_v0520.py", "test_v0521.py", "test_v0530.py", "test_v0531.py", "test_v0540.py", "test_packaging.py"):
+        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_v045.py", "test_v046.py", "test_v047.py", "test_v048.py", "test_v049.py", "test_v0410.py", "test_v050.py", "test_v0501.py", "test_v0502.py", "test_v0503.py", "test_v0504.py", "test_v0505.py", "test_v0510.py", "test_v0511.py", "test_v0511_revision2.py", "test_v0520.py", "test_v0521.py", "test_v0530.py", "test_v0531.py", "test_v0540.py", "test_v0550.py", "test_packaging.py"):
             run(sys.executable, str(ROOT / "tests" / test), cwd=ROOT)
         for script in sorted((ROOT / "scripts").glob("*.sh")):
             run("bash", "-n", str(script))
