@@ -5,7 +5,12 @@
 - [x] Add administrative and emergency recipient groups with multiple addresses.
 - [x] Migrate the existing Unbound watchdog without weakening evidence capture or recovery verification.
 - [x] Add an observe-only PHP-FPM watchdog using the production `poll` baseline.
+- [x] Separate PHP-FPM incremental log analysis by positive master-PID epoch so
+  old-master shutdown churn is not attributed to a replacement master.
 - [x] Add current watchdog state to the sanitized snapshot and dashboard.
+- [ ] Deploy the corrected `0.5.5.0-2` packages to nidhoggur, validate a natural
+  healthy timer cycle, refresh the dashboard snapshot, and verify notification
+  routing before tagging the release.
 - [ ] Observe PHP-FPM behavior under normal production load before enabling any automatic recovery.
 - [ ] Add a bounded PHP-FPM two-stage recovery module only after thresholds and cooldowns are validated.
 - [ ] Add Prometheus-compatible metrics for watchdog state and Activity-Relay correlation.

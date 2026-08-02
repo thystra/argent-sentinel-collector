@@ -98,7 +98,23 @@ def _event_mechanism(command: str) -> tuple[str, dict[str, Any]]:
     return (match.group(1).lower() if match else "unknown"), result
 
 
-def _read_log_delta(path: Path, previous: Mapping[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
+def _previous_main_pid(previous: Mapping[str, Any]) -> int:
+    metrics = previous.get("metrics", {})
+    if not isinstance(metrics, Mapping):
+        return 0
+    try:
+        value = int(metrics.get("main_pid", 0))
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
+def _read_log_delta(
+    path: Path,
+    previous: Mapping[str, Any],
+    *,
+    rebase: bool = False,
+) -> tuple[dict[str, int], dict[str, int]]:
     try:
         stat = path.stat()
     except OSError:
@@ -107,9 +123,9 @@ def _read_log_delta(path: Path, previous: Mapping[str, Any]) -> tuple[dict[str, 
     try:
         old_inode = int(cursor.get("inode", 0))
         old_offset = int(cursor.get("offset", 0))
-    except (TypeError, ValueError):
+    except (AttributeError, TypeError, ValueError):
         old_inode, old_offset = 0, 0
-    if old_inode == 0:
+    if rebase or old_inode == 0:
         return {"code0": 0, "short": 0, "epoll": 0}, {"inode": stat.st_ino, "offset": stat.st_size}
     start = old_offset if old_inode == stat.st_ino and stat.st_size >= old_offset else 0
     counts = {"code0": 0, "short": 0, "epoll": 0}
@@ -174,10 +190,22 @@ def check(
     del context
     started = time.monotonic()
     properties = _systemd_properties(str(config.get("service", "php8.5-fpm.service")))
+    current_main_pid = int(properties.get("MainPID", 0) or 0)
+    previous_main_pid = _previous_main_pid(previous)
+    master_changed = (
+        previous_main_pid > 0
+        and current_main_pid > 0
+        and previous_main_pid != current_main_pid
+    )
     zombies = _zombies()
     maximum_queue = _maximum_socket_queue(str(config.get("socket_prefix", "/run/php/")))
     mechanism, mechanism_result = _event_mechanism(str(config.get("php_fpm_command", "/usr/sbin/php-fpm8.5")))
-    counts, cursor = _read_log_delta(Path(str(config.get("log_file", "/var/log/php8.5-fpm.log"))), previous)
+    counts, cursor = _read_log_delta(
+        Path(str(config.get("log_file", "/var/log/php8.5-fpm.log"))),
+        previous,
+        rebase=master_changed,
+    )
+    log_cursor_rebased = master_changed and cursor.get("inode", 0) > 0
     probes = [_probe(item) for item in config.get("probes", []) if isinstance(item, Mapping)]
     failed_probes = [item for item in probes if not item["allowed"]]
 
@@ -225,7 +253,7 @@ def check(
         "severity": severity,
         "summary": summary,
         "metrics": {
-            "main_pid": properties.get("MainPID", 0),
+            "main_pid": current_main_pid,
             "memory_bytes": properties.get("MemoryCurrent", 0),
             "tasks": properties.get("TasksCurrent", 0),
             "zombies": zombies,
@@ -240,6 +268,10 @@ def check(
             "sub_state": properties.get("SubState", "unknown"),
             "event_mechanism": mechanism,
             "mechanism_command_ok": command_ok(mechanism_result),
+            "previous_main_pid": previous_main_pid,
+            "current_main_pid": current_main_pid,
+            "master_changed": master_changed,
+            "log_cursor_rebased": log_cursor_rebased,
             "probes": probes,
             "warnings": warnings,
             "critical_reasons": critical,
@@ -248,6 +280,10 @@ def check(
             "active_state": properties.get("ActiveState", "unknown"),
             "sub_state": properties.get("SubState", "unknown"),
             "event_mechanism": mechanism,
+            "previous_main_pid": previous_main_pid,
+            "current_main_pid": current_main_pid,
+            "master_changed": master_changed,
+            "log_cursor_rebased": log_cursor_rebased,
             "probes": [
                 {
                     "name": item.get("name"),

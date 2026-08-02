@@ -13,7 +13,10 @@ history, and transition suppression.
 
 Unbound retains bounded automatic recovery and captures evidence before restart.
 PHP-FPM is observe-only and uses an inode/offset log cursor so historical churn
-is not reclassified as a new incident. Current state is stored privately beneath
+is not reclassified as a new incident. Positive systemd master-PID changes begin
+a new log-analysis epoch and rebase the cursor at the current log end; current
+service, zombie, queue, mechanism, and probe checks still run during that same
+sample. Current state is stored privately beneath
 `/var/lib/argent-sentinel/watchdogs`. The root snapshot process publishes only
 sanitized status, metrics, recent transitions, and public diagnostic summaries
 to the existing dashboard publication tree. Private diagnostics and recipient

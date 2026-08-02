@@ -133,6 +133,270 @@ class V0550Test(unittest.TestCase):
         self.assertEqual({"code0": 2, "short": 1, "epoll": 1}, counts)
         self.assertGreater(updated["offset"], cursor["offset"])
 
+    def test_php_log_rotation_restarts_at_beginning_for_same_master(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "php.log"
+            log.write_text(
+                "[rotated] child exited with code 0 after 0.10 seconds from start\n"
+                "[rotated] epoll: unable to remove fd 7\n"
+            )
+            expected_inode = log.stat().st_ino
+            counts, cursor = php_fpm._read_log_delta(
+                log,
+                {
+                    "metrics": {"main_pid": 123},
+                    "runtime": {
+                        "log_cursor": {
+                            "inode": expected_inode + 1,
+                            "offset": 99999,
+                        }
+                    },
+                },
+            )
+        self.assertEqual({"code0": 1, "short": 1, "epoll": 1}, counts)
+        self.assertEqual(expected_inode, cursor["inode"])
+
+    def test_php_master_change_rebases_old_shutdown_churn(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "php.log"
+            log.write_text(
+                "[old master] child exited with code 0 after 0.10 seconds from start\n"
+                "[old master] epoll: unable to remove fd 9\n"
+            )
+            config = json.loads(
+                (ROOT / "config/watchdog.d/20-php_fpm.json").read_text()
+            )
+            config.update(
+                {
+                    "enabled": True,
+                    "log_file": str(log),
+                    "probes": [],
+                }
+            )
+            previous = {
+                "metrics": {"main_pid": 111},
+                "runtime": {
+                    "log_cursor": {
+                        "inode": log.stat().st_ino,
+                        "offset": 0,
+                    }
+                },
+            }
+            with mock.patch.object(
+                php_fpm,
+                "_systemd_properties",
+                return_value={
+                    "ActiveState": "active",
+                    "SubState": "running",
+                    "MainPID": 222,
+                    "MemoryCurrent": 1024,
+                    "TasksCurrent": 12,
+                },
+            ), mock.patch.object(
+                php_fpm,
+                "_zombies",
+                return_value=0,
+            ), mock.patch.object(
+                php_fpm,
+                "_maximum_socket_queue",
+                return_value=0,
+            ), mock.patch.object(
+                php_fpm,
+                "_event_mechanism",
+                return_value=("poll", {"returncode": 0, "timed_out": False}),
+            ):
+                result = php_fpm.check({}, config, previous)
+            expected_offset = log.stat().st_size
+        self.assertEqual("healthy", result["status"])
+        self.assertEqual(0, result["metrics"]["code0_exits"])
+        self.assertEqual(0, result["metrics"]["rapid_exits"])
+        self.assertEqual(0, result["metrics"]["epoll_remove_failures"])
+        self.assertEqual(111, result["details"]["previous_main_pid"])
+        self.assertEqual(222, result["details"]["current_main_pid"])
+        self.assertTrue(result["details"]["master_changed"])
+        self.assertTrue(result["details"]["log_cursor_rebased"])
+        self.assertTrue(result["public_details"]["master_changed"])
+        self.assertEqual(expected_offset, result["runtime"]["log_cursor"]["offset"])
+
+    def test_php_master_change_still_reports_current_zombies(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "php.log"
+            log.write_text(
+                "[old master] child exited with code 0 after 0.10 seconds from start\n"
+            )
+            config = json.loads(
+                (ROOT / "config/watchdog.d/20-php_fpm.json").read_text()
+            )
+            config.update(
+                {
+                    "enabled": True,
+                    "log_file": str(log),
+                    "probes": [],
+                }
+            )
+            previous = {
+                "metrics": {"main_pid": 111},
+                "runtime": {
+                    "log_cursor": {
+                        "inode": log.stat().st_ino,
+                        "offset": 0,
+                    }
+                },
+            }
+            with mock.patch.object(
+                php_fpm,
+                "_systemd_properties",
+                return_value={
+                    "ActiveState": "active",
+                    "SubState": "running",
+                    "MainPID": 222,
+                    "MemoryCurrent": 1024,
+                    "TasksCurrent": 12,
+                },
+            ), mock.patch.object(
+                php_fpm,
+                "_zombies",
+                return_value=2,
+            ), mock.patch.object(
+                php_fpm,
+                "_maximum_socket_queue",
+                return_value=0,
+            ), mock.patch.object(
+                php_fpm,
+                "_event_mechanism",
+                return_value=("poll", {"returncode": 0, "timed_out": False}),
+            ):
+                result = php_fpm.check({}, config, previous)
+        self.assertEqual("critical", result["status"])
+        self.assertIn("2 zombie process(es)", result["summary"])
+        self.assertEqual(0, result["metrics"]["rapid_exits"])
+        self.assertTrue(result["details"]["master_changed"])
+        self.assertTrue(result["details"]["log_cursor_rebased"])
+
+    def test_php_same_master_after_rebase_detects_appended_fault(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "php.log"
+            log.write_text(
+                "[old master] child exited with code 0 after 0.10 seconds from start\n"
+            )
+            config = json.loads(
+                (ROOT / "config/watchdog.d/20-php_fpm.json").read_text()
+            )
+            config.update(
+                {
+                    "enabled": True,
+                    "log_file": str(log),
+                    "probes": [],
+                    "critical_rapid_exits": 1,
+                }
+            )
+            previous = {
+                "metrics": {"main_pid": 111},
+                "runtime": {
+                    "log_cursor": {
+                        "inode": log.stat().st_ino,
+                        "offset": 0,
+                    }
+                },
+            }
+            properties = {
+                "ActiveState": "active",
+                "SubState": "running",
+                "MainPID": 222,
+                "MemoryCurrent": 1024,
+                "TasksCurrent": 12,
+            }
+            with mock.patch.object(
+                php_fpm,
+                "_systemd_properties",
+                return_value=properties,
+            ), mock.patch.object(
+                php_fpm,
+                "_zombies",
+                return_value=0,
+            ), mock.patch.object(
+                php_fpm,
+                "_maximum_socket_queue",
+                return_value=0,
+            ), mock.patch.object(
+                php_fpm,
+                "_event_mechanism",
+                return_value=("poll", {"returncode": 0, "timed_out": False}),
+            ):
+                rebased = php_fpm.check({}, config, previous)
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write(
+                        "[new master] child exited with code 0 after 0.20 seconds from start\n"
+                        "[new master] epoll: unable to remove fd 10\n"
+                    )
+                result = php_fpm.check({}, config, rebased)
+        self.assertEqual("critical", result["status"])
+        self.assertFalse(result["details"]["master_changed"])
+        self.assertFalse(result["details"]["log_cursor_rebased"])
+        self.assertEqual(1, result["metrics"]["code0_exits"])
+        self.assertEqual(1, result["metrics"]["rapid_exits"])
+        self.assertEqual(1, result["metrics"]["epoll_remove_failures"])
+
+    def test_php_zero_current_pid_does_not_rebase_or_hide_faults(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "php.log"
+            prefix = "[before] ordinary line\n"
+            log.write_text(
+                prefix
+                + "[current] child exited with code 0 after 0.10 seconds from start\n"
+                + "[current] epoll: unable to remove fd 11\n"
+            )
+            config = json.loads(
+                (ROOT / "config/watchdog.d/20-php_fpm.json").read_text()
+            )
+            config.update(
+                {
+                    "enabled": True,
+                    "log_file": str(log),
+                    "probes": [],
+                    "critical_rapid_exits": 1,
+                }
+            )
+            previous = {
+                "metrics": {"main_pid": 111},
+                "runtime": {
+                    "log_cursor": {
+                        "inode": log.stat().st_ino,
+                        "offset": len(prefix.encode()),
+                    }
+                },
+            }
+            with mock.patch.object(
+                php_fpm,
+                "_systemd_properties",
+                return_value={
+                    "ActiveState": "inactive",
+                    "SubState": "dead",
+                    "MainPID": 0,
+                    "MemoryCurrent": 0,
+                    "TasksCurrent": 0,
+                },
+            ), mock.patch.object(
+                php_fpm,
+                "_zombies",
+                return_value=0,
+            ), mock.patch.object(
+                php_fpm,
+                "_maximum_socket_queue",
+                return_value=0,
+            ), mock.patch.object(
+                php_fpm,
+                "_event_mechanism",
+                return_value=("poll", {"returncode": 0, "timed_out": False}),
+            ):
+                result = php_fpm.check({}, config, previous)
+        self.assertEqual("critical", result["status"])
+        self.assertIn("master process is not active", result["summary"])
+        self.assertFalse(result["details"]["master_changed"])
+        self.assertFalse(result["details"]["log_cursor_rebased"])
+        self.assertEqual(1, result["metrics"]["rapid_exits"])
+        self.assertEqual(1, result["metrics"]["epoll_remove_failures"])
+
     def test_php_watchdog_healthy_result_is_observe_only(self) -> None:
         config = json.loads(
             (ROOT / "config/watchdog.d/20-php_fpm.json").read_text()

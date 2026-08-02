@@ -96,8 +96,19 @@ The package definition is disabled and has no site-specific probes. The
 production nidhoggur override supplies the Nextcloud, Friendica, and Wolf & Raven
 probes and enables the module. The log cursor starts at the current end of the
 FPM log, so installation does not alert on historical failures. Cursor rotation
-is inode-aware. PHP-FPM warnings or critical results must persist for two
-consecutive checks before email is sent. No PHP restart is available in 0.5.5.0.
+is inode-aware.
+
+The module also treats each positive systemd master PID as a separate
+log-analysis epoch. When the current positive `MainPID` differs from the prior
+state's positive `metrics.main_pid`, the module records the PID transition and
+rebases the log cursor at the current end of the file. This prevents a former
+master's controlled shutdown lines from being charged to its replacement.
+Service state, zombies, FastCGI queues, event mechanism, and application probes
+are still evaluated during the transition check, and lines appended during
+later same-master checks are analyzed normally.
+
+PHP-FPM warnings or critical results must persist for two consecutive checks
+before email is sent. No PHP restart is available in 0.5.5.0.
 
 ## Commands
 

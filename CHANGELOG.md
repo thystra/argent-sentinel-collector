@@ -15,6 +15,10 @@
 - Add an observe-only PHP-FPM 8.5 watchdog for master/service health, zombies,
   FastCGI queues, event mechanism, incremental rapid-exit/epoll log analysis,
   and local application probes.
+- Treat each positive PHP-FPM master PID as a separate log-analysis epoch:
+  rebase the incremental log cursor when the master changes while continuing
+  current-state checks, so a former master shutdown is not attributed to its
+  replacement.
 - Require two consecutive unhealthy PHP-FPM samples before notification and do
   not enable automatic PHP recovery in this release.
 - Add root-only current state and transition history plus a sanitized watchdog

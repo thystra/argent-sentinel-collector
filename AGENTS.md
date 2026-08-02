@@ -203,6 +203,10 @@ After implementation or deployment decisions, review and update:
 - PHP-FPM is observe-only. Do not enable automatic PHP restart until production
   thresholds, cooldowns, evidence capture, and failure-limit behavior are
   explicitly validated.
+- Incremental PHP-FPM log analysis is scoped to a positive master-PID epoch.
+  A positive PID change rebases the cursor to current EOF while current-state
+  checks continue; never attribute a former master's shutdown churn to the
+  replacement master.
 - Administrative and emergency recipient groups support multiple addresses.
   Emergency recipients may be email-to-SMS gateways and receive concise mail.
 - The duplicate Nextcloud-specific `application/wasm` Nginx MIME warning is a
