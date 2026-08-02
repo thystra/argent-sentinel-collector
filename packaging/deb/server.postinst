@@ -284,7 +284,8 @@ PY
         /usr/sbin/argent-sentinel-config-migrate \
             --config "$WATCHDOG_CONFIG" \
             --example "$WATCHDOG_EXAMPLE" \
-            --backup "$BACKUP/watchdog.json.pre-v0550"
+            --backup "$BACKUP/watchdog.json.pre-v0550" \
+            --top-level-only
 
         archive_legacy_unit argent-sentinel-collector.service
         archive_legacy_unit argent-sentinel-collector.timer
