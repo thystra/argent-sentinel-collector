@@ -1,3 +1,21 @@
+## Implemented in 0.5.5.1 — version-aware PHP-FPM observation
+
+- [x] Discover the active versioned PHP-FPM systemd service in auto mode.
+- [x] Derive matching command, log path, and process name while preserving
+  explicit operator overrides.
+- [x] Scope zombie detection to direct children of the selected master/version.
+- [x] Rebase incremental log analysis on target changes as well as positive
+  master-PID changes.
+- [x] Make event-mechanism expectations optional while retaining explicit
+  mismatch warnings.
+- [x] Keep PHP-FPM observe-only and preserve Unbound remediation behavior.
+- [ ] Build and deploy `0.5.5.1-1` to nidhoggur with the common watchdog timer
+  stopped, then force one no-notify PHP and Unbound acceptance run.
+- [ ] Clear the obsolete PHP 8.5 critical state through a healthy PHP 8.4 run,
+  refresh the dashboard snapshot, and then enable the common timer for a
+  monitored soak.
+- [ ] Tag and publish only after the timer soak and notification routing pass.
+
 
 ## Implemented in 0.5.5.0 — modular watchdog framework
 
@@ -8,9 +26,8 @@
 - [x] Separate PHP-FPM incremental log analysis by positive master-PID epoch so
   old-master shutdown churn is not attributed to a replacement master.
 - [x] Add current watchdog state to the sanitized snapshot and dashboard.
-- [ ] Deploy the corrected `0.5.5.0-2` packages to nidhoggur, validate a natural
-  healthy timer cycle, refresh the dashboard snapshot, and verify notification
-  routing before tagging the release.
+- [x] Deploy the corrected `0.5.5.0-2` packages to nidhoggur; the common timer
+  remains stopped pending the PHP 8.4-aware 0.5.5.1 upgrade.
 - [ ] Observe PHP-FPM behavior under normal production load before enabling any automatic recovery.
 - [ ] Add a bounded PHP-FPM two-stage recovery module only after thresholds and cooldowns are validated.
 - [ ] Add Prometheus-compatible metrics for watchdog state and Activity-Relay correlation.

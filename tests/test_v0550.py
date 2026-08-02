@@ -24,10 +24,10 @@ from watchdogs import php_fpm, unbound  # noqa: E402
 
 class V0550Test(unittest.TestCase):
     def test_release_version(self) -> None:
-        self.assertEqual("0.5.5.0", (ROOT / "VERSION").read_text().strip())
-        self.assertEqual("0.5.5.0", watchdog.APP_VERSION)
-        self.assertEqual("0.5.5.0", dashboard.APP_VERSION)
-        self.assertEqual("0.5.5.0", dashboard_snapshot.APP_VERSION)
+        self.assertEqual("0.5.5.1", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.5.1", watchdog.APP_VERSION)
+        self.assertEqual("0.5.5.1", dashboard.APP_VERSION)
+        self.assertEqual("0.5.5.1", dashboard_snapshot.APP_VERSION)
 
     def test_packaged_watchdog_assets_exist(self) -> None:
         required = (
@@ -169,7 +169,10 @@ class V0550Test(unittest.TestCase):
             config.update(
                 {
                     "enabled": True,
+                    "service": "php8.4-fpm.service",
+                    "php_fpm_command": "/usr/sbin/php-fpm8.4",
                     "log_file": str(log),
+                    "process_name": "php-fpm8.4",
                     "probes": [],
                 }
             )
@@ -230,7 +233,10 @@ class V0550Test(unittest.TestCase):
             config.update(
                 {
                     "enabled": True,
+                    "service": "php8.4-fpm.service",
+                    "php_fpm_command": "/usr/sbin/php-fpm8.4",
                     "log_file": str(log),
+                    "process_name": "php-fpm8.4",
                     "probes": [],
                 }
             )
@@ -285,7 +291,10 @@ class V0550Test(unittest.TestCase):
             config.update(
                 {
                     "enabled": True,
+                    "service": "php8.4-fpm.service",
+                    "php_fpm_command": "/usr/sbin/php-fpm8.4",
                     "log_file": str(log),
+                    "process_name": "php-fpm8.4",
                     "probes": [],
                     "critical_rapid_exits": 1,
                 }
@@ -352,7 +361,10 @@ class V0550Test(unittest.TestCase):
             config.update(
                 {
                     "enabled": True,
+                    "service": "php8.4-fpm.service",
+                    "php_fpm_command": "/usr/sbin/php-fpm8.4",
                     "log_file": str(log),
+                    "process_name": "php-fpm8.4",
                     "probes": [],
                     "critical_rapid_exits": 1,
                 }
@@ -401,8 +413,16 @@ class V0550Test(unittest.TestCase):
         config = json.loads(
             (ROOT / "config/watchdog.d/20-php_fpm.json").read_text()
         )
-        config["enabled"] = True
-        config["probes"] = [{"name": "site"}]
+        config.update(
+            {
+                "enabled": True,
+                "service": "php8.4-fpm.service",
+                "php_fpm_command": "/usr/sbin/php-fpm8.4",
+                "log_file": "/var/log/php8.4-fpm.log",
+                "process_name": "php-fpm8.4",
+                "probes": [{"name": "site"}],
+            }
+        )
         with mock.patch.object(
             php_fpm,
             "_systemd_properties",

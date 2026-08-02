@@ -3,7 +3,7 @@
 Argent Sentinel is a self-hosted security event collector, correlation engine,
 CrowdSec decision bridge, and guarded abuse-reporting system.
 
-Version 0.5.5.0 combines authenticated event transport, central policy,
+Version 0.5.5.1 combines authenticated event transport, central policy,
 a read-only dashboard, and per-site traffic analytics:
 
 ```text
@@ -84,11 +84,13 @@ process-isolated modules. Package definitions live in
 `/usr/lib/argent-sentinel/watchdog.d/`; operator overrides live in
 `/etc/argent-sentinel/watchdog.d/`. Packaged modules are disabled until locally
 enabled. The first upgrade migrates the recognized Unbound automatic-recovery
-watchdog and provides an observe-only PHP-FPM health module. Incremental
-PHP-FPM log analysis is separated by positive master PID: when systemd reports
-a replacement master, the module rebases its log cursor at the current end of
-the log while still evaluating service state, zombies, queues, event mechanism,
-and application probes on that check.
+watchdog and provides an observe-only PHP-FPM health module. Version 0.5.5.1
+discovers the active versioned PHP-FPM systemd service and derives its matching
+binary, process name, and log path unless the operator supplies explicit
+overrides. Incremental log analysis is separated by selected target and positive
+master PID: a target or master change rebases the cursor at the current log end
+while service state, target-scoped zombies, queues, event mechanism, and
+application probes remain active on that check.
 
 Configure administrative and emergency recipients separately in
 `/etc/argent-sentinel/watchdog.json`. Emergency recipients may include

@@ -136,8 +136,8 @@ After implementation or deployment decisions, review and update:
   commented EOF marker when the format supports comments.
 
 ## Current reporting checkpoint
-- Version 0.5.5.0 is the current development target; 0.5.4.0 is the current
-  source baseline pending the first watchdog-framework package validation.
+- Version 0.5.5.1 is the current development target; 0.5.5.0-2 remains the
+  installed production baseline pending PHP 8.4-aware watchdog validation.
 - The 2026-07-29 production cutover retired the legacy Nginx sender and
   validated the first hourly provider delivery.
 - Immediate per-IP enforcement remains independent of hourly provider email.
@@ -193,7 +193,7 @@ After implementation or deployment decisions, review and update:
 
 ## Current watchdog checkpoint
 
-- Version 0.5.5.0 introduces the package-managed modular watchdog framework.
+- Version 0.5.5.1 is the current watchdog source target; 0.5.5.0-2 remains the installed production baseline until upgrade validation.
 - Package watchdog definitions ship disabled. Enable and customize modules only
   through `/etc/argent-sentinel/watchdog.d/*.json`; do not edit package defaults.
 - The existing Unbound timer/script is migrated only when its known production
@@ -203,10 +203,15 @@ After implementation or deployment decisions, review and update:
 - PHP-FPM is observe-only. Do not enable automatic PHP restart until production
   thresholds, cooldowns, evidence capture, and failure-limit behavior are
   explicitly validated.
-- Incremental PHP-FPM log analysis is scoped to a positive master-PID epoch.
-  A positive PID change rebases the cursor to current EOF while current-state
-  checks continue; never attribute a former master's shutdown churn to the
-  replacement master.
+- PHP-FPM target selection is version-aware. Auto mode discovers the active
+  `phpX.Y-fpm.service` and derives the matching binary, log, and process name;
+  explicit operator overrides remain authoritative.
+- Incremental PHP-FPM log analysis is scoped to both the selected target and a
+  positive master-PID epoch. A target or positive PID change rebases the cursor
+  to current EOF while current-state checks continue; never attribute a former
+  target/master shutdown churn to its replacement.
+- Event-mechanism enforcement is optional. Record the effective mechanism, but
+  warn only when `expected_event_mechanism` is explicitly configured.
 - Administrative and emergency recipient groups support multiple addresses.
   Emergency recipients may be email-to-SMS gateways and receive concise mail.
 - The duplicate Nextcloud-specific `application/wasm` Nginx MIME warning is a

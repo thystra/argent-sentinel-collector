@@ -1,7 +1,7 @@
 <!-- Source: /home/alan/src/argent-sentinel-collector/docs/watchdogs.md -->
 # Modular watchdog framework
 
-Argent Sentinel 0.5.5.0 adds a package-managed watchdog runner for local
+Argent Sentinel 0.5.5.1 provides a package-managed watchdog runner for local
 service-health checks, evidence capture, bounded remediation, notifications,
 and dashboard publication.
 
@@ -80,12 +80,16 @@ assets match the known production implementation does it create a local enable
 override, migrate `EMAIL_TO` into the administrative recipient list, disable the
 old timer, and archive the old assets. Custom legacy watchdogs are left intact.
 
-### PHP-FPM 8.5
+### PHP-FPM
 
-The first PHP-FPM module is intentionally observe-only. It checks:
+The PHP-FPM module is intentionally observe-only. In auto mode it discovers the
+active `phpX.Y-fpm.service`, then derives the matching `/usr/sbin/php-fpmX.Y`
+command, `/var/log/phpX.Y-fpm.log`, and `php-fpmX.Y` process name. Operators may
+pin any of those values in the local override. It checks:
 
 - service state and master PID;
-- zombie PHP-FPM processes;
+- zombie workers that are direct children of the selected master and use the
+  selected versioned process name;
 - maximum FastCGI socket receive queue;
 - effective FPM event mechanism;
 - new rapid worker exits since the prior check;
@@ -98,17 +102,45 @@ probes and enables the module. The log cursor starts at the current end of the
 FPM log, so installation does not alert on historical failures. Cursor rotation
 is inode-aware.
 
-The module also treats each positive systemd master PID as a separate
-log-analysis epoch. When the current positive `MainPID` differs from the prior
-state's positive `metrics.main_pid`, the module records the PID transition and
-rebases the log cursor at the current end of the file. This prevents a former
-master's controlled shutdown lines from being charged to its replacement.
-Service state, zombies, FastCGI queues, event mechanism, and application probes
-are still evaluated during the transition check, and lines appended during
-later same-master checks are analyzed normally.
+The module treats both the selected target and each positive systemd master PID
+as log-analysis epoch boundaries. When the selected service/binary/log/process
+identity changes, or the current positive `MainPID` differs from the prior
+state's positive `metrics.main_pid`, the module records the transition and
+rebases the log cursor at the current end of the selected log. This prevents a
+former version or master shutdown from being charged to its replacement.
+Service state, selected-master zombies, FastCGI queues, event mechanism, and
+application probes are still evaluated during the transition check, and lines
+appended during later same-target/same-master checks are analyzed normally.
+
+The effective event mechanism is always recorded. It becomes a warning policy
+only when a local override explicitly sets `expected_event_mechanism`; omitting
+that key accepts either `epoll`, `poll`, or another valid platform mechanism.
+
+Example auto-discovery override:
+
+```json
+{
+  "id": "php_fpm",
+  "enabled": true,
+  "mode": "observe"
+}
+```
+
+Example explicitly pinned target:
+
+```json
+{
+  "id": "php_fpm",
+  "service": "php8.4-fpm.service",
+  "php_fpm_command": "/usr/sbin/php-fpm8.4",
+  "log_file": "/var/log/php8.4-fpm.log",
+  "process_name": "php-fpm8.4",
+  "expected_event_mechanism": "epoll"
+}
+```
 
 PHP-FPM warnings or critical results must persist for two consecutive checks
-before email is sent. No PHP restart is available in 0.5.5.0.
+before email is sent. No PHP restart is available in 0.5.5.1.
 
 ## Commands
 

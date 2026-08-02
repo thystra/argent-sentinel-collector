@@ -28,7 +28,7 @@ from review_queue import (
     recent_network_review_actions,
 )
 
-APP_VERSION = "0.5.5.0"
+APP_VERSION = "0.5.5.1"
 UTC = dt.timezone.utc
 
 DEFAULTS: dict[str, Any] = {

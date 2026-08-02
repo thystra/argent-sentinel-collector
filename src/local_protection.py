@@ -23,7 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-APP_VERSION = "0.5.5.0"
+APP_VERSION = "0.5.5.1"
 UTC = dt.timezone.utc
 PUBLIC_IPV6 = ipaddress.ip_network("2000::/3")
 UNIQUE_LOCAL_IPV6 = ipaddress.ip_network("fc00::/7")

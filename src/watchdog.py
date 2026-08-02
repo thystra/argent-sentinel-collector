@@ -27,7 +27,7 @@ from watchdog_runtime import (
     utc_text,
 )
 
-APP_VERSION = "0.5.5.0"
+APP_VERSION = "0.5.5.1"
 MODULE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+$")
 STATUS_RANK = {"disabled": 0, "healthy": 1, "warning": 2, "critical": 3, "error": 4}

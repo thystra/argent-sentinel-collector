@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # File: /home/alan/src/argent-sentinel-collector/tests/test_v0540.py
-"""Regression coverage for Argent Sentinel 0.5.5.0."""
+"""Regression coverage for Argent Sentinel 0.5.5.1."""
 
 from __future__ import annotations
 
@@ -53,11 +53,11 @@ class FakeRunner:
 
 class V0540Test(unittest.TestCase):
     def test_release_and_schema_markers(self) -> None:
-        self.assertEqual("0.5.5.0", (ROOT / "VERSION").read_text().strip())
-        self.assertEqual("0.5.5.0", agent.APP_VERSION)
-        self.assertEqual("0.5.5.0", local_protection.APP_VERSION)
-        self.assertEqual("0.5.5.0", collector.APP_VERSION)
-        self.assertEqual("0.5.5.0", server_api.APP_VERSION)
+        self.assertEqual("0.5.5.1", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.5.1", agent.APP_VERSION)
+        self.assertEqual("0.5.5.1", local_protection.APP_VERSION)
+        self.assertEqual("0.5.5.1", collector.APP_VERSION)
+        self.assertEqual("0.5.5.1", server_api.APP_VERSION)
         self.assertEqual(9, collector.SCHEMA_VERSION)
         self.assertEqual(9, review_queue.SCHEMA_VERSION)
 

@@ -15,6 +15,171 @@ from watchdog_runtime import command_ok, run_command
 
 EXIT_RE = re.compile(r"exited with code 0 after ([0-9.]+) seconds from start")
 EPOLL_TEXT = "epoll: unable to remove fd"
+SERVICE_RE = re.compile(r"^php(?P<major>[0-9]+)[.](?P<minor>[0-9]+)-fpm[.]service$")
+AUTO_VALUES = {"", "auto"}
+ANY_MECHANISM_VALUES = {"", "auto", "any"}
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _service_version(service: str) -> tuple[int, int] | None:
+    match = SERVICE_RE.fullmatch(service)
+    if not match:
+        return None
+    return int(match.group("major")), int(match.group("minor"))
+
+
+def _service_sort_key(service: str) -> tuple[int, int, str]:
+    version = _service_version(service)
+    if version is None:
+        return (-1, -1, service)
+    return (*version, service)
+
+
+def _service_names(text: str) -> list[str]:
+    values: set[str] = set()
+    for line in text.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        service = fields[0]
+        if SERVICE_RE.fullmatch(service):
+            values.add(service)
+    return sorted(values, key=_service_sort_key, reverse=True)
+
+
+def _enabled_service_names(text: str) -> list[str]:
+    values: set[str] = set()
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        service, state = fields[0], fields[1]
+        if SERVICE_RE.fullmatch(service) and state in {
+            "enabled",
+            "enabled-runtime",
+            "static",
+        }:
+            values.add(service)
+    return sorted(values, key=_service_sort_key, reverse=True)
+
+
+def _discover_service() -> dict[str, Any]:
+    active_result = run_command(
+        [
+            "/usr/bin/systemctl",
+            "list-units",
+            "--type=service",
+            "--state=running",
+            "--no-legend",
+            "--plain",
+            "php*-fpm.service",
+        ],
+        timeout=15,
+    )
+    installed_result = run_command(
+        [
+            "/usr/bin/systemctl",
+            "list-unit-files",
+            "--type=service",
+            "--no-legend",
+            "php*-fpm.service",
+        ],
+        timeout=15,
+    )
+
+    active = _service_names(str(active_result.get("stdout", "")))
+    installed = _service_names(str(installed_result.get("stdout", "")))
+    enabled = _enabled_service_names(str(installed_result.get("stdout", "")))
+
+    if active:
+        service, source = active[0], "auto-active"
+    elif enabled:
+        service, source = enabled[0], "auto-enabled"
+    elif installed:
+        service, source = installed[0], "auto-installed"
+    else:
+        service, source = "", "auto-unresolved"
+
+    return {
+        "service": service,
+        "source": source,
+        "active_services": active,
+        "enabled_services": enabled,
+        "installed_services": installed,
+        "active_command_ok": command_ok(active_result),
+        "installed_command_ok": command_ok(installed_result),
+    }
+
+
+def _resolve_target(config: Mapping[str, Any]) -> dict[str, Any]:
+    configured_service = _text(config.get("service"))
+    if configured_service.lower() not in AUTO_VALUES:
+        discovery: dict[str, Any] = {
+            "service": configured_service,
+            "source": "explicit",
+            "active_services": [],
+            "enabled_services": [],
+            "installed_services": [],
+            "active_command_ok": True,
+            "installed_command_ok": True,
+        }
+    else:
+        discovery = _discover_service()
+
+    service = _text(discovery.get("service"))
+    version = _service_version(service)
+    version_text = f"{version[0]}.{version[1]}" if version else ""
+
+    configured_command = _text(config.get("php_fpm_command"))
+    configured_log = _text(config.get("log_file"))
+    configured_process = _text(config.get("process_name"))
+
+    command = (
+        configured_command
+        if configured_command.lower() not in AUTO_VALUES
+        else (f"/usr/sbin/php-fpm{version_text}" if version_text else "")
+    )
+    log_file = (
+        configured_log
+        if configured_log.lower() not in AUTO_VALUES
+        else (f"/var/log/php{version_text}-fpm.log" if version_text else "")
+    )
+    process_name = (
+        configured_process
+        if configured_process.lower() not in AUTO_VALUES
+        else (f"php-fpm{version_text}" if version_text else "")
+    )
+
+    target_id = "|".join((service, command, log_file, process_name))
+    errors: list[str] = []
+    if not service:
+        errors.append("No PHP-FPM systemd service could be resolved")
+    if not command:
+        errors.append("No PHP-FPM command could be resolved")
+    if not log_file:
+        errors.append("No PHP-FPM log file could be resolved")
+    if not process_name:
+        errors.append("No PHP-FPM process name could be resolved")
+
+    return {
+        **discovery,
+        "service": service,
+        "version": version_text,
+        "command": command,
+        "log_file": log_file,
+        "process_name": process_name,
+        "id": target_id,
+        "errors": errors,
+        "overrides": {
+            "service": configured_service.lower() not in AUTO_VALUES,
+            "command": configured_command.lower() not in AUTO_VALUES,
+            "log_file": configured_log.lower() not in AUTO_VALUES,
+            "process_name": configured_process.lower() not in AUTO_VALUES,
+        },
+    }
 
 
 def validate(config: Mapping[str, Any]) -> list[str]:
@@ -26,10 +191,17 @@ def validate(config: Mapping[str, Any]) -> list[str]:
     if not isinstance(config.get("probes", []), list):
         errors.append("probes must be a list")
     if config.get("enabled"):
-        command = Path(str(config.get("php_fpm_command", "/usr/sbin/php-fpm8.5")))
-        if not command.is_file():
+        target = _resolve_target(config)
+        errors.extend(str(item) for item in target.get("errors", []))
+        command = Path(str(target.get("command", "")))
+        if str(command) and not command.is_file():
             errors.append(f"PHP-FPM command does not exist: {command}")
-        for required in ("/usr/bin/curl", "/usr/bin/ps", "/usr/bin/ss"):
+        for required in (
+            "/usr/bin/curl",
+            "/usr/bin/ps",
+            "/usr/bin/ss",
+            "/usr/bin/systemctl",
+        ):
             if not Path(required).is_file():
                 errors.append(f"required command does not exist: {required}")
     return errors
@@ -41,6 +213,7 @@ def _systemd_properties(service: str) -> dict[str, Any]:
             "/usr/bin/systemctl",
             "show",
             service,
+            "--property=LoadState",
             "--property=ActiveState",
             "--property=SubState",
             "--property=MainPID",
@@ -62,15 +235,28 @@ def _systemd_properties(service: str) -> dict[str, Any]:
     return values
 
 
-def _zombies() -> int:
-    result = run_command(["/usr/bin/ps", "-eo", "stat=,comm="], timeout=15)
+def _zombies(main_pid: int, process_name: str) -> int:
+    if main_pid < 1 or not process_name:
+        return 0
+    result = run_command(
+        ["/usr/bin/ps", "-eo", "ppid=,stat=,comm="],
+        timeout=15,
+    )
     if not command_ok(result):
         return -1
-    return sum(
-        1
-        for line in str(result.get("stdout", "")).splitlines()
-        if line.strip().startswith("Z") and "php-fpm" in line
-    )
+    count = 0
+    for line in str(result.get("stdout", "")).splitlines():
+        fields = line.split(None, 2)
+        if len(fields) != 3:
+            continue
+        try:
+            parent = int(fields[0])
+        except ValueError:
+            continue
+        state, command = fields[1], fields[2]
+        if parent == main_pid and state.startswith("Z") and command == process_name:
+            count += 1
+    return count
 
 
 def _maximum_socket_queue(prefix: str) -> int:
@@ -92,9 +278,16 @@ def _maximum_socket_queue(prefix: str) -> int:
 
 
 def _event_mechanism(command: str) -> tuple[str, dict[str, Any]]:
+    if not command:
+        return "unknown", {
+            "returncode": 1,
+            "timed_out": False,
+            "stdout": "",
+            "stderr": "PHP-FPM command was not resolved",
+        }
     result = run_command([command, "-tt"], timeout=20)
     text = f"{result.get('stdout', '')}\n{result.get('stderr', '')}"
-    match = re.search(r"events\.mechanism\s*=\s*([A-Za-z0-9_-]+)", text)
+    match = re.search(r"events[.]mechanism\s*=\s*([A-Za-z0-9_-]+)", text)
     return (match.group(1).lower() if match else "unknown"), result
 
 
@@ -107,6 +300,25 @@ def _previous_main_pid(previous: Mapping[str, Any]) -> int:
     except (TypeError, ValueError):
         return 0
     return value if value > 0 else 0
+
+
+def _previous_target_id(previous: Mapping[str, Any]) -> str:
+    runtime = previous.get("runtime", {})
+    if isinstance(runtime, Mapping):
+        target = runtime.get("target", {})
+        if isinstance(target, Mapping):
+            value = _text(target.get("id"))
+            if value:
+                return value
+    details = previous.get("details", {})
+    if isinstance(details, Mapping):
+        service = _text(details.get("selected_service"))
+        command = _text(details.get("selected_command"))
+        log_file = _text(details.get("selected_log_file"))
+        process_name = _text(details.get("selected_process_name"))
+        if any((service, command, log_file, process_name)):
+            return "|".join((service, command, log_file, process_name))
+    return ""
 
 
 def _read_log_delta(
@@ -126,7 +338,10 @@ def _read_log_delta(
     except (AttributeError, TypeError, ValueError):
         old_inode, old_offset = 0, 0
     if rebase or old_inode == 0:
-        return {"code0": 0, "short": 0, "epoll": 0}, {"inode": stat.st_ino, "offset": stat.st_size}
+        return {"code0": 0, "short": 0, "epoll": 0}, {
+            "inode": stat.st_ino,
+            "offset": stat.st_size,
+        }
     start = old_offset if old_inode == stat.st_ino and stat.st_size >= old_offset else 0
     counts = {"code0": 0, "short": 0, "epoll": 0}
     with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -189,32 +404,58 @@ def check(
 ) -> dict[str, Any]:
     del context
     started = time.monotonic()
-    properties = _systemd_properties(str(config.get("service", "php8.5-fpm.service")))
+    target = _resolve_target(config)
+    properties = _systemd_properties(str(target.get("service", "")))
     current_main_pid = int(properties.get("MainPID", 0) or 0)
     previous_main_pid = _previous_main_pid(previous)
+    previous_target_id = _previous_target_id(previous)
+    current_target_id = _text(target.get("id"))
+    target_changed = bool(
+        previous_target_id
+        and current_target_id
+        and previous_target_id != current_target_id
+    )
     master_changed = (
         previous_main_pid > 0
         and current_main_pid > 0
         and previous_main_pid != current_main_pid
     )
-    zombies = _zombies()
+    epoch_changed = master_changed or target_changed
+
+    zombies = _zombies(current_main_pid, str(target.get("process_name", "")))
     maximum_queue = _maximum_socket_queue(str(config.get("socket_prefix", "/run/php/")))
-    mechanism, mechanism_result = _event_mechanism(str(config.get("php_fpm_command", "/usr/sbin/php-fpm8.5")))
+    mechanism, mechanism_result = _event_mechanism(str(target.get("command", "")))
     counts, cursor = _read_log_delta(
-        Path(str(config.get("log_file", "/var/log/php8.5-fpm.log"))),
+        Path(str(target.get("log_file", ""))),
         previous,
-        rebase=master_changed,
+        rebase=epoch_changed,
     )
-    log_cursor_rebased = master_changed and cursor.get("inode", 0) > 0
-    probes = [_probe(item) for item in config.get("probes", []) if isinstance(item, Mapping)]
+    log_cursor_rebased = epoch_changed and cursor.get("inode", 0) > 0
+    probes = [
+        _probe(item)
+        for item in config.get("probes", [])
+        if isinstance(item, Mapping)
+    ]
     failed_probes = [item for item in probes if not item["allowed"]]
 
     warnings: list[str] = []
     critical: list[str] = []
-    if properties.get("ActiveState") != "active" or properties.get("SubState") != "running" or properties.get("MainPID", 0) < 1:
+    target_errors = [str(item) for item in target.get("errors", [])]
+    if target_errors:
+        critical.extend(target_errors)
+    if len(target.get("active_services", [])) > 1:
+        warnings.append(
+            "Multiple active PHP-FPM services were discovered: "
+            + ", ".join(str(item) for item in target.get("active_services", []))
+        )
+    if (
+        properties.get("ActiveState") != "active"
+        or properties.get("SubState") != "running"
+        or current_main_pid < 1
+    ):
         critical.append("PHP-FPM service or master process is not active")
     if zombies < 0:
-        warnings.append("Unable to count PHP-FPM zombies")
+        warnings.append("Unable to count selected PHP-FPM zombies")
     elif zombies > 0:
         critical.append(f"PHP-FPM has {zombies} zombie process(es)")
     warning_queue = int(config.get("warning_socket_queue", 100))
@@ -225,9 +466,13 @@ def check(
         critical.append(f"FastCGI socket queue reached {maximum_queue}")
     elif maximum_queue >= warning_queue:
         warnings.append(f"FastCGI socket queue reached {maximum_queue}")
-    expected = str(config.get("expected_event_mechanism", "poll")).lower()
-    if mechanism != expected:
+
+    expected = _text(config.get("expected_event_mechanism")).lower()
+    if not command_ok(mechanism_result) or mechanism == "unknown":
+        warnings.append("Unable to determine PHP-FPM event mechanism")
+    elif expected not in ANY_MECHANISM_VALUES and mechanism != expected:
         warnings.append(f"PHP-FPM event mechanism is {mechanism}, expected {expected}")
+
     if counts["epoll"] > 0:
         critical.append(f"Observed {counts['epoll']} new epoll remove failure(s)")
     warning_short = int(config.get("warning_rapid_exits", 20))
@@ -241,12 +486,29 @@ def check(
     elif failed_probes:
         warnings.append(f"Application probe failed: {failed_probes[0]['name']}")
 
+    version_label = str(target.get("version", "")).strip()
     if critical:
         status, severity, summary = "critical", "critical", "; ".join(critical)
     elif warnings:
         status, severity, summary = "warning", "warning", "; ".join(warnings)
     else:
-        status, severity, summary = "healthy", "info", "PHP-FPM functional health checks succeeded"
+        status, severity = "healthy", "info"
+        summary = (
+            f"PHP-FPM {version_label} functional health checks succeeded"
+            if version_label
+            else "PHP-FPM functional health checks succeeded"
+        )
+
+    target_details = {
+        "selected_service": target.get("service", ""),
+        "selected_version": target.get("version", ""),
+        "selected_command": target.get("command", ""),
+        "selected_log_file": target.get("log_file", ""),
+        "selected_process_name": target.get("process_name", ""),
+        "target_source": target.get("source", "unknown"),
+        "active_php_fpm_services": target.get("active_services", []),
+        "target_changed": target_changed,
+    }
 
     return {
         "status": status,
@@ -264,9 +526,11 @@ def check(
             "failed_probes": len(failed_probes),
         },
         "details": {
+            **target_details,
             "active_state": properties.get("ActiveState", "unknown"),
             "sub_state": properties.get("SubState", "unknown"),
             "event_mechanism": mechanism,
+            "expected_event_mechanism": expected or "any",
             "mechanism_command_ok": command_ok(mechanism_result),
             "previous_main_pid": previous_main_pid,
             "current_main_pid": current_main_pid,
@@ -277,9 +541,11 @@ def check(
             "critical_reasons": critical,
         },
         "public_details": {
+            **target_details,
             "active_state": properties.get("ActiveState", "unknown"),
             "sub_state": properties.get("SubState", "unknown"),
             "event_mechanism": mechanism,
+            "expected_event_mechanism": expected or "any",
             "previous_main_pid": previous_main_pid,
             "current_main_pid": current_main_pid,
             "master_changed": master_changed,
@@ -296,7 +562,14 @@ def check(
             "warnings": warnings,
             "critical_reasons": critical,
         },
-        "runtime": {"log_cursor": cursor},
+        "runtime": {
+            "log_cursor": cursor,
+            "target": {
+                "id": current_target_id,
+                "service": target.get("service", ""),
+                "version": target.get("version", ""),
+            },
+        },
         "notify_admin": status in {"warning", "critical"},
         "notify_emergency": status == "critical",
         "duration_ms": round((time.monotonic() - started) * 1000),

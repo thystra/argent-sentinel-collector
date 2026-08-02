@@ -1,3 +1,18 @@
+## 0.5.5.1
+
+- Discover the active versioned PHP-FPM systemd service instead of assuming
+  PHP 8.5, and derive the matching command, log path, and process name.
+- Preserve explicit operator overrides for the PHP-FPM service, command, log,
+  process name, and expected event mechanism.
+- Scope zombie detection to direct children of the selected PHP-FPM master and
+  version rather than counting unrelated PHP-FPM processes system-wide.
+- Rebase incremental log analysis when either the positive master PID or the
+  selected PHP-FPM target changes, preventing cross-version shutdown churn from
+  contaminating the replacement epoch.
+- Treat the event mechanism as diagnostic unless an operator explicitly sets
+  `expected_event_mechanism`; retain mismatch warnings for explicit policy.
+- Keep PHP-FPM observe-only and retain the migrated Unbound remediation module.
+
 ## 0.5.5.0
 
 - Add a package-managed modular watchdog runner with disabled package defaults

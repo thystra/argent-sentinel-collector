@@ -2,7 +2,7 @@
 
 ## Modular watchdog plane
 
-Argent Sentinel 0.5.5.0 adds a root-owned local watchdog plane that is separate
+Argent Sentinel 0.5.5.1 retains the root-owned local watchdog plane that is separate
 from event ingestion and abuse-reporting policy. A one-minute systemd timer runs
 the common scheduler. Package and local JSON definitions select dynamically
 imported, package-owned modules and their independent intervals. Package
@@ -12,11 +12,14 @@ state objects; the runner owns locking, persistence, recipient routing, retentio
 history, and transition suppression.
 
 Unbound retains bounded automatic recovery and captures evidence before restart.
-PHP-FPM is observe-only and uses an inode/offset log cursor so historical churn
-is not reclassified as a new incident. Positive systemd master-PID changes begin
-a new log-analysis epoch and rebase the cursor at the current log end; current
-service, zombie, queue, mechanism, and probe checks still run during that same
-sample. Current state is stored privately beneath
+PHP-FPM is observe-only and resolves the active versioned FPM service unless an
+operator pins an explicit target. The selected service determines the default
+binary, process name, and log path. Zombie inspection is limited to direct
+children of that master. An inode/offset cursor prevents historical churn from
+being reclassified as a new incident; either a selected-target change or a
+positive master-PID change begins a new log-analysis epoch and rebases the
+cursor at the current log end. Current service, zombie, queue, mechanism, and
+probe checks still run during that same sample. Current state is stored privately beneath
 `/var/lib/argent-sentinel/watchdogs`. The root snapshot process publishes only
 sanitized status, metrics, recent transitions, and public diagnostic summaries
 to the existing dashboard publication tree. Private diagnostics and recipient
