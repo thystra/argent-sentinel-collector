@@ -1,4 +1,16 @@
 ## 0.5.5.1
+### Debian revision 0.5.5.1-2
+
+- Do not execute the PHP-FPM event-mechanism configuration probe when the
+  operator accepts any mechanism. The hardened watchdog service cannot open the
+  PHP-FPM main and pool log paths under `ProtectSystem=strict`, and a diagnostic
+  probe must not make otherwise healthy service checks fail.
+- Preserve explicit event-mechanism enforcement. A failed or indeterminate
+  enforced probe remains a warning, and private status records include bounded
+  return-code, timeout, and stderr-tail diagnostics.
+- Retain observe-only PHP-FPM behavior and the hardened systemd filesystem
+  boundary; no PHP-FPM or Sentinel service recovery behavior is added.
+
 
 - Discover the active versioned PHP-FPM systemd service instead of assuming
   PHP 8.5, and derive the matching command, log path, and process name.

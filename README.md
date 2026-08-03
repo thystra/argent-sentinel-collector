@@ -89,8 +89,10 @@ discovers the active versioned PHP-FPM systemd service and derives its matching
 binary, process name, and log path unless the operator supplies explicit
 overrides. Incremental log analysis is separated by selected target and positive
 master PID: a target or master change rebases the cursor at the current log end
-while service state, target-scoped zombies, queues, event mechanism, and
-application probes remain active on that check.
+while service state, target-scoped zombies, queues, and application
+probes remain active on that check. Event-mechanism verification runs only when
+an operator explicitly requires a mechanism; an omitted, `auto`, or `any`
+expectation skips the sandbox-incompatible PHP-FPM configuration command.
 
 Configure administrative and emergency recipients separately in
 `/etc/argent-sentinel/watchdog.json`. Emergency recipients may include

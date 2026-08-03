@@ -136,8 +136,9 @@ After implementation or deployment decisions, review and update:
   commented EOF marker when the format supports comments.
 
 ## Current reporting checkpoint
-- Version 0.5.5.1 is the current development target; 0.5.5.0-2 remains the
-  installed production baseline pending PHP 8.4-aware watchdog validation.
+- Version 0.5.5.1 is the current development target. Debian revision
+  `0.5.5.1-1` is installed on nidhoggur; corrected revision `0.5.5.1-2` is
+  pending build and deployment after the event-mechanism sandbox diagnosis.
 - The 2026-07-29 production cutover retired the legacy Nginx sender and
   validated the first hourly provider delivery.
 - Immediate per-IP enforcement remains independent of hourly provider email.
@@ -193,7 +194,9 @@ After implementation or deployment decisions, review and update:
 
 ## Current watchdog checkpoint
 
-- Version 0.5.5.1 is the current watchdog source target; 0.5.5.0-2 remains the installed production baseline until upgrade validation.
+- Version 0.5.5.1 is the current watchdog source target. Revision
+  `0.5.5.1-1` is installed; revision `0.5.5.1-2` must preserve the hardened
+  watchdog sandbox and skip optional PHP-FPM mechanism probing.
 - Package watchdog definitions ship disabled. Enable and customize modules only
   through `/etc/argent-sentinel/watchdog.d/*.json`; do not edit package defaults.
 - The existing Unbound timer/script is migrated only when its known production
@@ -210,8 +213,9 @@ After implementation or deployment decisions, review and update:
   positive master-PID epoch. A target or positive PID change rebases the cursor
   to current EOF while current-state checks continue; never attribute a former
   target/master shutdown churn to its replacement.
-- Event-mechanism enforcement is optional. Record the effective mechanism, but
-  warn only when `expected_event_mechanism` is explicitly configured.
+- Event-mechanism enforcement is optional. Do not run `php-fpm -tt` when the
+  expectation is absent, `auto`, or `any`; the hardened service cannot open
+  configured `/var/log` targets. Warn only for an explicitly enforced mechanism.
 - Administrative and emergency recipient groups support multiple addresses.
   Emergency recipients may be email-to-SMS gateways and receive concise mail.
 - The duplicate Nextcloud-specific `application/wasm` Nginx MIME warning is a

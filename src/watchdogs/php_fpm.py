@@ -291,6 +291,18 @@ def _event_mechanism(command: str) -> tuple[str, dict[str, Any]]:
     return (match.group(1).lower() if match else "unknown"), result
 
 
+def _event_mechanism_diagnostics(
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return bounded private diagnostics for an enforced mechanism check."""
+    return {
+        "mechanism_command_ok": command_ok(result),
+        "mechanism_command_returncode": result.get("returncode"),
+        "mechanism_command_timed_out": bool(result.get("timed_out", False)),
+        "mechanism_command_stderr_tail": str(result.get("stderr", ""))[-1000:],
+    }
+
+
 def _previous_main_pid(previous: Mapping[str, Any]) -> int:
     metrics = previous.get("metrics", {})
     if not isinstance(metrics, Mapping):
@@ -424,7 +436,24 @@ def check(
 
     zombies = _zombies(current_main_pid, str(target.get("process_name", "")))
     maximum_queue = _maximum_socket_queue(str(config.get("socket_prefix", "/run/php/")))
-    mechanism, mechanism_result = _event_mechanism(str(target.get("command", "")))
+    expected = _text(config.get("expected_event_mechanism")).lower()
+    mechanism_check_enforced = expected not in ANY_MECHANISM_VALUES
+    if mechanism_check_enforced:
+        mechanism, mechanism_result = _event_mechanism(
+            str(target.get("command", ""))
+        )
+    else:
+        mechanism = "not_checked"
+        mechanism_result = {
+            "args": [],
+            "duration_ms": 0,
+            "returncode": 0,
+            "timed_out": False,
+            "stdout": "",
+            "stderr": "",
+            "skipped": True,
+        }
+    mechanism_diagnostics = _event_mechanism_diagnostics(mechanism_result)
     counts, cursor = _read_log_delta(
         Path(str(target.get("log_file", ""))),
         previous,
@@ -467,11 +496,13 @@ def check(
     elif maximum_queue >= warning_queue:
         warnings.append(f"FastCGI socket queue reached {maximum_queue}")
 
-    expected = _text(config.get("expected_event_mechanism")).lower()
-    if not command_ok(mechanism_result) or mechanism == "unknown":
-        warnings.append("Unable to determine PHP-FPM event mechanism")
-    elif expected not in ANY_MECHANISM_VALUES and mechanism != expected:
-        warnings.append(f"PHP-FPM event mechanism is {mechanism}, expected {expected}")
+    if mechanism_check_enforced:
+        if not mechanism_diagnostics["mechanism_command_ok"] or mechanism == "unknown":
+            warnings.append("Unable to determine PHP-FPM event mechanism")
+        elif mechanism != expected:
+            warnings.append(
+                f"PHP-FPM event mechanism is {mechanism}, expected {expected}"
+            )
 
     if counts["epoll"] > 0:
         critical.append(f"Observed {counts['epoll']} new epoll remove failure(s)")
@@ -531,7 +562,9 @@ def check(
             "sub_state": properties.get("SubState", "unknown"),
             "event_mechanism": mechanism,
             "expected_event_mechanism": expected or "any",
-            "mechanism_command_ok": command_ok(mechanism_result),
+            "mechanism_check_enforced": mechanism_check_enforced,
+            "mechanism_check_skipped": not mechanism_check_enforced,
+            **mechanism_diagnostics,
             "previous_main_pid": previous_main_pid,
             "current_main_pid": current_main_pid,
             "master_changed": master_changed,
@@ -546,6 +579,8 @@ def check(
             "sub_state": properties.get("SubState", "unknown"),
             "event_mechanism": mechanism,
             "expected_event_mechanism": expected or "any",
+            "mechanism_check_enforced": mechanism_check_enforced,
+            "mechanism_check_skipped": not mechanism_check_enforced,
             "previous_main_pid": previous_main_pid,
             "current_main_pid": current_main_pid,
             "master_changed": master_changed,

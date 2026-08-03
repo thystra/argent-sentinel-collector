@@ -9,12 +9,18 @@
 - [x] Make event-mechanism expectations optional while retaining explicit
   mismatch warnings.
 - [x] Keep PHP-FPM observe-only and preserve Unbound remediation behavior.
-- [ ] Build and deploy `0.5.5.1-1` to nidhoggur with the common watchdog timer
-  stopped, then force one no-notify PHP and Unbound acceptance run.
-- [ ] Clear the obsolete PHP 8.5 critical state through a healthy PHP 8.4 run,
-  refresh the dashboard snapshot, and then enable the common timer for a
-  monitored soak.
-- [ ] Tag and publish only after the timer soak and notification routing pass.
+- [x] Build and deploy `0.5.5.1-1` to nidhoggur with the common watchdog
+  timer stopped; validate PHP 8.4 fallback, PHP 8.5 roll-forward, all-pool
+  `catch_workers_output = no`, and a clean PHP 8.5 `epoll` generation.
+- [x] Prove the intermittent mechanism warning is caused by the hardened
+  watchdog service: `php-fpm -tt` cannot open the configured main and pool log
+  paths under `ProtectSystem=strict`.
+- [ ] Build and deploy corrected Debian revision `0.5.5.1-2`, preserving the
+  systemd sandbox and skipping mechanism detection when the expectation is
+  absent, `auto`, or `any`.
+- [ ] Rebase the PHP-FPM watchdog, enable the common timer, and complete the
+  monitored soak and notification-routing acceptance.
+- [ ] Tag and publish only after the corrected timer soak passes.
 
 
 ## Implemented in 0.5.5.0 — modular watchdog framework

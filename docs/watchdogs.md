@@ -91,7 +91,7 @@ pin any of those values in the local override. It checks:
 - zombie workers that are direct children of the selected master and use the
   selected versioned process name;
 - maximum FastCGI socket receive queue;
-- effective FPM event mechanism;
+- effective FPM event mechanism when explicit enforcement is configured;
 - new rapid worker exits since the prior check;
 - new `epoll: unable to remove fd` records;
 - configured local HTTPS application probes.
@@ -108,13 +108,17 @@ identity changes, or the current positive `MainPID` differs from the prior
 state's positive `metrics.main_pid`, the module records the transition and
 rebases the log cursor at the current end of the selected log. This prevents a
 former version or master shutdown from being charged to its replacement.
-Service state, selected-master zombies, FastCGI queues, event mechanism, and
-application probes are still evaluated during the transition check, and lines
-appended during later same-target/same-master checks are analyzed normally.
-
-The effective event mechanism is always recorded. It becomes a warning policy
-only when a local override explicitly sets `expected_event_mechanism`; omitting
-that key accepts either `epoll`, `poll`, or another valid platform mechanism.
+Service state, selected-master zombies, FastCGI queues, and application
+probes are still evaluated during the transition check, and lines appended
+during later same-target/same-master checks are analyzed normally.
+Event-mechanism verification runs only when a local override explicitly sets
+`expected_event_mechanism` to a concrete value such as `epoll` or `poll`.
+Omitting the key, or setting it to `auto` or `any`, accepts the platform
+mechanism and skips the PHP-FPM configuration command. This preserves the
+hardened watchdog filesystem sandbox, because a full `php-fpm -tt` validation
+attempts to open configured main logs and pool slowlogs under `/var/log`.
+When enforcement is explicit, a mismatch or an indeterminate command remains a
+warning and bounded command diagnostics are retained in private state.
 
 Example auto-discovery override:
 

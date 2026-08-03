@@ -162,7 +162,9 @@ class V0551Test(unittest.TestCase):
         self.assertTrue(result["details"]["log_cursor_rebased"])
         self.assertEqual(0, result["metrics"]["rapid_exits"])
 
-    def test_event_mechanism_is_diagnostic_when_expectation_is_absent(self) -> None:
+    def test_event_mechanism_check_is_skipped_when_expectation_is_absent(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / "php.log"
             log.write_text("")
@@ -196,15 +198,62 @@ class V0551Test(unittest.TestCase):
             ), mock.patch.object(
                 php_fpm,
                 "_event_mechanism",
-                return_value=(
-                    "epoll",
-                    {"returncode": 0, "timed_out": False},
-                ),
-            ):
+                side_effect=AssertionError("optional mechanism check must be skipped"),
+            ) as detector:
                 result = php_fpm.check({}, config, {})
+        detector.assert_not_called()
         self.assertEqual("healthy", result["status"])
-        self.assertEqual("epoll", result["details"]["event_mechanism"])
+        self.assertEqual("not_checked", result["details"]["event_mechanism"])
         self.assertEqual("any", result["details"]["expected_event_mechanism"])
+        self.assertFalse(result["details"]["mechanism_check_enforced"])
+        self.assertTrue(result["details"]["mechanism_check_skipped"])
+        self.assertTrue(result["details"]["mechanism_command_ok"])
+        self.assertFalse(result["notify_admin"])
+
+    def test_event_mechanism_check_is_skipped_for_explicit_any(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "php.log"
+            log.write_text("")
+            config = {
+                "service": "php8.4-fpm.service",
+                "php_fpm_command": "/usr/sbin/php-fpm8.4",
+                "log_file": str(log),
+                "process_name": "php-fpm8.4",
+                "expected_event_mechanism": "any",
+                "mode": "observe",
+                "interval_seconds": 60,
+                "probes": [],
+            }
+            with mock.patch.object(
+                php_fpm,
+                "_systemd_properties",
+                return_value={
+                    "ActiveState": "active",
+                    "SubState": "running",
+                    "MainPID": 333,
+                    "MemoryCurrent": 1024,
+                    "TasksCurrent": 10,
+                },
+            ), mock.patch.object(
+                php_fpm,
+                "_zombies",
+                return_value=0,
+            ), mock.patch.object(
+                php_fpm,
+                "_maximum_socket_queue",
+                return_value=0,
+            ), mock.patch.object(
+                php_fpm,
+                "_event_mechanism",
+                side_effect=AssertionError(
+                    "sandbox-incompatible detector must not run for any"
+                ),
+            ) as detector:
+                result = php_fpm.check({}, config, {})
+        detector.assert_not_called()
+        self.assertEqual("healthy", result["status"])
+        self.assertEqual("not_checked", result["details"]["event_mechanism"])
+        self.assertFalse(result["notify_admin"])
 
     def test_explicit_event_mechanism_mismatch_remains_warning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -249,6 +298,118 @@ class V0551Test(unittest.TestCase):
                 result = php_fpm.check({}, config, {})
         self.assertEqual("warning", result["status"])
         self.assertIn("expected poll", result["summary"])
+
+    def test_explicit_event_mechanism_unknown_remains_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "php.log"
+            log.write_text("")
+            config = {
+                "service": "php8.4-fpm.service",
+                "php_fpm_command": "/usr/sbin/php-fpm8.4",
+                "log_file": str(log),
+                "process_name": "php-fpm8.4",
+                "expected_event_mechanism": "poll",
+                "mode": "observe",
+                "interval_seconds": 60,
+                "probes": [],
+            }
+            stderr = "x" * 1200 + "Read-only file system"
+            with mock.patch.object(
+                php_fpm,
+                "_systemd_properties",
+                return_value={
+                    "ActiveState": "active",
+                    "SubState": "running",
+                    "MainPID": 333,
+                    "MemoryCurrent": 1024,
+                    "TasksCurrent": 10,
+                },
+            ), mock.patch.object(
+                php_fpm,
+                "_zombies",
+                return_value=0,
+            ), mock.patch.object(
+                php_fpm,
+                "_maximum_socket_queue",
+                return_value=0,
+            ), mock.patch.object(
+                php_fpm,
+                "_event_mechanism",
+                return_value=(
+                    "unknown",
+                    {
+                        "returncode": 78,
+                        "timed_out": False,
+                        "stdout": "",
+                        "stderr": stderr,
+                    },
+                ),
+            ):
+                result = php_fpm.check({}, config, {})
+        self.assertEqual("warning", result["status"])
+        self.assertIn("Unable to determine", result["summary"])
+        self.assertTrue(result["details"]["mechanism_check_enforced"])
+        self.assertFalse(result["details"]["mechanism_check_skipped"])
+        self.assertFalse(result["details"]["mechanism_command_ok"])
+        self.assertEqual(78, result["details"]["mechanism_command_returncode"])
+        self.assertFalse(result["details"]["mechanism_command_timed_out"])
+        tail = result["details"]["mechanism_command_stderr_tail"]
+        self.assertLessEqual(len(tail), 1000)
+        self.assertTrue(tail.endswith("Read-only file system"))
+        self.assertTrue(result["notify_admin"])
+
+    def test_explicit_event_mechanism_match_is_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "php.log"
+            log.write_text("")
+            config = {
+                "service": "php8.4-fpm.service",
+                "php_fpm_command": "/usr/sbin/php-fpm8.4",
+                "log_file": str(log),
+                "process_name": "php-fpm8.4",
+                "expected_event_mechanism": "epoll",
+                "mode": "observe",
+                "interval_seconds": 60,
+                "probes": [],
+            }
+            with mock.patch.object(
+                php_fpm,
+                "_systemd_properties",
+                return_value={
+                    "ActiveState": "active",
+                    "SubState": "running",
+                    "MainPID": 333,
+                    "MemoryCurrent": 1024,
+                    "TasksCurrent": 10,
+                },
+            ), mock.patch.object(
+                php_fpm,
+                "_zombies",
+                return_value=0,
+            ), mock.patch.object(
+                php_fpm,
+                "_maximum_socket_queue",
+                return_value=0,
+            ), mock.patch.object(
+                php_fpm,
+                "_event_mechanism",
+                return_value=(
+                    "epoll",
+                    {
+                        "returncode": 0,
+                        "timed_out": False,
+                        "stdout": "",
+                        "stderr": "",
+                    },
+                ),
+            ):
+                result = php_fpm.check({}, config, {})
+        self.assertEqual("healthy", result["status"])
+        self.assertEqual("epoll", result["details"]["event_mechanism"])
+        self.assertTrue(result["details"]["mechanism_check_enforced"])
+        self.assertFalse(result["details"]["mechanism_check_skipped"])
+        self.assertTrue(result["details"]["mechanism_command_ok"])
+        self.assertFalse(result["notify_admin"])
 
     def test_multiple_active_services_are_visible_and_warn(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
