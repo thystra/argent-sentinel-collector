@@ -1,0 +1,58 @@
+# .forgejo/workflows/ci.yml
+# Argent Sentinel validation: lint, full unit suite, and a build-only Debian
+# package job. Nothing is installed or deployed.
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint and unit tests
+    runs-on: forgejo-workstation
+    timeout-minutes: 20
+    container:
+      # node is required by the checkout action; the Debian bookworm image
+      # also ships python3 (3.11), git, and dpkg-deb, which is all CI needs.
+      image: node:24-bookworm
+    steps:
+      - name: Check out repository
+        uses: https://data.forgejo.org/actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Trust workspace for git
+        run: git config --global --add safe.directory "$PWD"
+
+      - name: Lint and run unit tests
+        run: bash scripts/ci-check.sh
+
+  packages:
+    name: Debian package build (no install)
+    runs-on: forgejo-workstation
+    timeout-minutes: 20
+    needs: test
+    container:
+      # node is required by the checkout action; the Debian bookworm image
+      # also ships python3 (3.11), git, and dpkg-deb, which is all CI needs.
+      image: node:24-bookworm
+    steps:
+      - name: Check out repository
+        uses: https://data.forgejo.org/actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Trust workspace for git
+        run: git config --global --add safe.directory "$PWD"
+
+      - name: Build packages into a temporary directory
+        run: bash scripts/ci-check.sh --packages
+# EOF .forgejo/workflows/ci.yml

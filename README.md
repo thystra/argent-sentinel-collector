@@ -543,6 +543,23 @@ during the same collector run.
 See `docs/` for packaging, remote enrollment, SSH privacy, web-probe policy,
 XARF reporting, production reporting, and legacy migration.
 
+## Continuous integration
+
+Forgejo Actions runs `.forgejo/workflows/ci.yml` on every pull request and on
+pushes to `main` (runner label `forgejo-workstation`, container
+`node:24-bookworm`: the checkout action needs node, and the image's Debian
+python3 3.11 also checks the `python3 (>= 3.10)` package floor). Both jobs call
+`scripts/ci-check.sh`, which can be run identically on fafnir:
+
+```bash
+cd ~/src/argent-sentinel/argent-sentinel
+scripts/ci-check.sh            # whitespace, MANIFEST.sha256, bash/sh -n, py_compile, JSON examples, every tests/test_*.py
+scripts/ci-check.sh --packages # additionally build all .debs into a temporary directory (build-only, nothing installed)
+```
+
+CI never installs packages on, or deploys to, any host. When a source file
+listed in `MANIFEST.sha256` changes, regenerate its line or CI fails.
+
 ## Architecture and roadmap
 
 See `ARCHITECTURE.md`, `TODO.md`, and `docs/fail2ban-review-policy.md`.
