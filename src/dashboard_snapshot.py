@@ -29,7 +29,7 @@ from review_queue import (
     recent_network_review_actions,
 )
 
-APP_VERSION = "0.5.6.1"
+APP_VERSION = "0.5.7.0"
 UTC = dt.timezone.utc
 
 DEFAULTS: dict[str, Any] = {
@@ -485,24 +485,43 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
         )
         # Account tokens are deliberately not selected: only the export-safe
         # campaign_id, operator label, counts, and review-only proposals.
+        # 0.5.7.0 columns (campaign_kind, ...) are added by the collector's
+        # schema migration; before its first run fall back to the old shape.
+        campaign_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(mail_account_campaigns)")
+        } if scalar(
+            connection,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mail_account_campaigns'",
+        ) else set()
+        has_kind = "campaign_kind" in campaign_columns
+        kind_columns = (
+            "campaign_kind, source_ip, distinct_accounts, known_failures, probe_failures"
+            if has_kind else
+            "'unresolved' AS campaign_kind, NULL AS source_ip, 1 AS distinct_accounts, "
+            "0 AS known_failures, 0 AS probe_failures"
+        )
+        campaign_order = collector.MAIL_CAMPAIGN_ORDER if has_kind else (
+            "protected DESC, CASE status WHEN 'enforcing' THEN 0 ELSE 1 END, "
+            "distinct_source_ips DESC, last_seen_epoch DESC"
+        )
         mail_account_campaigns = rows(
             connection,
-            """
+            f"""
             SELECT campaign_id, site_id, protected, protected_label, status,
                    failures, distinct_source_ips, enforced_source_ips,
                    failure_threshold, distinct_ip_threshold, window_seconds,
                    first_seen, last_seen, protocols, sample_source_ips_json,
-                   prefix_proposals_json, asn_summary_json, review_status
+                   prefix_proposals_json, asn_summary_json, review_status,
+                   {kind_columns}
             FROM mail_account_campaigns
             WHERE last_seen_epoch >= ?
-            ORDER BY protected DESC,
-                     CASE status WHEN 'enforcing' THEN 0 ELSE 1 END,
-                     distinct_source_ips DESC, last_seen DESC
+            ORDER BY {campaign_order}
             LIMIT ?
             """,
             (start_epoch, max_rows),
         )
         for item in mail_account_campaigns:
+            item["campaign_label"] = collector.mail_campaign_label(item.get("campaign_kind"))
             for name in ("sample_source_ips_json", "prefix_proposals_json", "asn_summary_json"):
                 try:
                     item[name[:-5]] = json.loads(str(item.pop(name) or "[]"))
@@ -511,6 +530,12 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
             item["protected"] = bool(item["protected"])
             item["automatic_block"] = False
         overview["mail_account_campaigns"] = len(mail_account_campaigns)
+        overview["mail_known_account_campaigns"] = sum(
+            1 for item in mail_account_campaigns if item.get("campaign_kind") == "known"
+        )
+        overview["mail_probe_campaigns"] = sum(
+            1 for item in mail_account_campaigns if item.get("campaign_kind") in {"probe", "mixed"}
+        )
         # Access Guard registration_abuse campaigns are computed (not stored)
         # by the collector; reuse its read-only helper so the dashboard shows
         # exactly what ``argent-sentinel status`` reports. Review-only.
@@ -527,6 +552,26 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
             "AND service = 'mail' AND event_type = 'mail_auth_failed'",
             (start_epoch,),
         )
+        # Split by ingest classification (account_exists true / false / null).
+        split = rows(
+            connection,
+            """
+            SELECT COALESCE(SUM(CASE WHEN json_extract(metadata_json, '$.account_exists') = 1
+                                     THEN 1 ELSE 0 END), 0) AS known,
+                   COALESCE(SUM(CASE WHEN json_extract(metadata_json, '$.account_exists') = 0
+                                     THEN 1 ELSE 0 END), 0) AS nonexistent
+            FROM events
+            WHERE occurred_epoch >= ? AND service = 'mail' AND event_type = 'mail_auth_failed'
+            """,
+            (start_epoch,),
+        )
+        known_failures = int((split[0] if split else {}).get("known") or 0)
+        nonexistent_failures = int((split[0] if split else {}).get("nonexistent") or 0)
+        overview["mail_auth_failures_known"] = known_failures
+        overview["mail_auth_failures_nonexistent"] = nonexistent_failures
+        overview["mail_auth_failures_unresolved"] = max(
+            0, int(overview["mail_auth_failures"]) - known_failures - nonexistent_failures
+        )
         # Raw mail_auth_failed evidence grouped per source so the Overview
         # "Mail auth failures" card deep-links to something mail specific even
         # while mail_account_policy is disabled or dry-run (no incidents yet).
@@ -538,6 +583,12 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
                    COALESCE(NULLIF(UPPER(application_protocol), ''), '-') AS protocol,
                    COUNT(*) AS failures,
                    COUNT(DISTINCT account_key) AS distinct_accounts,
+                   SUM(CASE WHEN json_extract(metadata_json, '$.account_exists') = 1
+                            THEN 1 ELSE 0 END) AS known_failures,
+                   SUM(CASE WHEN json_extract(metadata_json, '$.account_exists') = 0
+                            THEN 1 ELSE 0 END) AS nonexistent_failures,
+                   COUNT(DISTINCT CASE WHEN json_extract(metadata_json, '$.account_exists') = 0
+                                       THEN account_key END) AS nonexistent_accounts,
                    MIN(occurred_at) AS first_seen,
                    MAX(occurred_at) AS last_seen
             FROM events
@@ -584,6 +635,12 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
                 "destination_port": item.get("destination_port"),
                 "auth_mechanism": metadata.get("auth_mechanism"),
                 "account_class": metadata.get("account_class"),
+                # Local dashboard only (never in reports, XARF, CrowdSec, digest).
+                "account_exists": metadata.get("account_exists")
+                if isinstance(metadata.get("account_exists"), bool) else None,
+                "failure_reason": metadata.get("failure_reason")
+                if metadata.get("failure_reason") in {"unknown_user", "bad_password", "unknown"}
+                else "unknown",
                 "mail_component": metadata.get("mail_component"),
                 "postfix_service": metadata.get("postfix_service"),
                 "attempts": metadata.get("attempts"),

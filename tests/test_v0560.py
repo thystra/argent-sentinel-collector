@@ -244,6 +244,10 @@ class MailAgentTest(unittest.TestCase):
                 "cursor_file": str(self.root / "mail.cursor"),
                 "destination_ip": "203.0.113.10",
                 "max_events_per_batch": 2,
+                # 0.5.7.0: file tail and userdb lookups are covered by
+                # tests/test_v0570_mail_account_exists.py.
+                "log_files": [],
+                "account_lookup": {"enabled": False},
             },
         })
         agent.validate_config(self.config)
@@ -391,8 +395,8 @@ class MailCentralTest(unittest.TestCase):
 
 class MailReleaseTest(unittest.TestCase):
     def test_release_version(self) -> None:
-        self.assertEqual("0.5.6.1", (ROOT / "VERSION").read_text().strip())
-        self.assertEqual("0.5.6.1", agent.APP_VERSION)
+        self.assertEqual("0.5.7.0", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.7.0", agent.APP_VERSION)
         self.assertIn('"test_v0560.py"', (ROOT / "packaging/build_debs.py").read_text())
 
 

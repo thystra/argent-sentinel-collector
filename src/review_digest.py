@@ -21,7 +21,7 @@ import urllib.parse
 
 import collector
 
-APP_VERSION = "0.5.6.1"
+APP_VERSION = "0.5.7.0"
 UTC = dt.timezone.utc
 CRAWLER_IDENTITIES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("crawler:meta-externalagent", re.compile(r"(?:meta-externalagent|facebookexternalhit)", re.I)),
@@ -244,17 +244,37 @@ def render_digest(
     try:
         mail_campaigns = query_rows(
             connection,
-            """SELECT campaign_id, site_id, protected, protected_label, status, failures,
+            f"""SELECT campaign_id, site_id, protected, protected_label, status, failures,
                       distinct_source_ips, enforced_source_ips, first_seen, last_seen,
-                      protocols, prefix_proposals_json, asn_summary_json
+                      protocols, prefix_proposals_json, asn_summary_json,
+                      campaign_kind, distinct_accounts
                FROM mail_account_campaigns
                WHERE last_seen_epoch>=? AND last_seen_epoch<?
-               ORDER BY protected DESC, CASE status WHEN 'enforcing' THEN 0 ELSE 1 END,
-                        distinct_source_ips DESC, last_seen DESC LIMIT ?""",
+               ORDER BY {collector.MAIL_CAMPAIGN_ORDER} LIMIT ?""",
             (start_epoch, end_epoch, int(review.get("max_rows", 20))),
         )
     except sqlite3.OperationalError:
-        mail_campaigns = []
+        try:  # collector has not migrated the 0.5.7.0 columns yet
+            mail_campaigns = query_rows(
+                connection,
+                """SELECT campaign_id, site_id, protected, protected_label, status, failures,
+                          distinct_source_ips, enforced_source_ips, first_seen, last_seen,
+                          protocols, prefix_proposals_json, asn_summary_json,
+                          'unresolved' AS campaign_kind, 1 AS distinct_accounts
+                   FROM mail_account_campaigns
+                   WHERE last_seen_epoch>=? AND last_seen_epoch<?
+                   ORDER BY protected DESC, CASE status WHEN 'enforcing' THEN 0 ELSE 1 END,
+                            distinct_source_ips DESC, last_seen DESC LIMIT ?""",
+                (start_epoch, end_epoch, int(review.get("max_rows", 20))),
+            )
+        except sqlite3.OperationalError:
+            mail_campaigns = []
+    # Aggregates only: counts per campaign kind, never per-event existence.
+    mail_kind_counts: dict[str, list[int]] = {}
+    for row in mail_campaigns:
+        bucket = mail_kind_counts.setdefault(str(row["campaign_kind"] or "unresolved"), [0, 0])
+        bucket[0] += 1
+        bucket[1] += int(row["failures"] or 0)
     registration_view = collector.read_registration_abuse_campaigns(connection, config, end_epoch)
     registration_campaigns = registration_view["campaigns"][: int(review.get("max_rows", 20))]
 
@@ -262,6 +282,14 @@ def render_digest(
         "Argent Sentinel daily operator review",
         f"Version: {APP_VERSION}",
         f"UTC interval: {dt.datetime.fromtimestamp(start_epoch, UTC).isoformat()} through {dt.datetime.fromtimestamp(end_epoch, UTC).isoformat()}",
+        "",
+        "Mail attacks (valid mailbox attacks first; aggregate counts only):",
+        *(
+            f"  {collector.mail_campaign_label(kind)}: "
+            f"{mail_kind_counts.get(kind, [0, 0])[0]} campaign(s), "
+            f"{mail_kind_counts.get(kind, [0, 0])[1]} failure(s)"
+            for kind in collector.MAIL_CAMPAIGN_KINDS
+        ),
         "",
         "HTTP 429 pressure:",
         f"  Total rejected requests: {len(rows_429)}",
@@ -336,7 +364,7 @@ def render_digest(
             )
     else:
         body.append("  none")
-    body.extend(["", "Mail account slow-burn campaigns (prefix/ASN proposals are review-only):"])
+    body.extend(["", "Mail account slow-burn campaigns and account probes, valid mailbox attacks first (prefix/ASN proposals are review-only):"])
     if mail_campaigns:
         for row in mail_campaigns:
             try:
@@ -344,11 +372,17 @@ def render_digest(
                 asns = json.loads(str(row["asn_summary_json"] or "[]"))
             except json.JSONDecodeError:
                 prefixes, asns = [], []
-            protected = f"protected ({row['protected_label']})" if int(row["protected"] or 0) else "unlisted account"
+            if int(row["protected"] or 0):
+                protected = f"protected ({row['protected_label']})"
+            elif row["campaign_kind"] in ("probe", "mixed"):
+                protected = f"{int(row['distinct_accounts'] or 0)} nonexistent accounts from one source"
+            else:
+                protected = "unlisted account"
             body.extend(
                 [
                     "",
                     f"  Campaign: {row['campaign_id']} on {row['site_id']} [{protected}]",
+                    f"  Kind: {collector.mail_campaign_label(row['campaign_kind'])}",
                     f"  Status: {row['status']}",
                     f"  Failures / distinct source IPs / per-IP incidents: {row['failures']} / {row['distinct_source_ips']} / {row['enforced_source_ips']}",
                     f"  Protocols: {row['protocols'] or '-'}",

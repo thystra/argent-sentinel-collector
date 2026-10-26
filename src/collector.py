@@ -43,7 +43,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.5.6.1"
+APP_VERSION = "0.5.7.0"
 SCHEMA_VERSION = 9
 
 DEFAULTS: dict[str, Any] = {
@@ -150,6 +150,18 @@ DEFAULTS: dict[str, Any] = {
         "protected_account_tokens": [],
         "protected_accounts_file": "",
         "privacy_key_file": "/etc/argent-sentinel/agent-privacy.key",
+        # 0.5.7.0 account-probe rule: keyed by *source IP*, counting distinct
+        # accounts the agent classified as nonexistent (account_exists false).
+        # Events with existence unknown keep the account-keyed slow-burn
+        # behaviour above. CrowdSec for probes has its own operator gate.
+        "probe_enabled": True,
+        "probe_crowdsec_enforcement": False,
+        "probe_window_seconds": 86400,
+        "probe_distinct_accounts": 5,
+        "probe_failure_threshold": 5,
+        "probe_review_distinct_accounts": 3,
+        "probe_ban_duration": "72h",
+        "probe_abuse_reporting_enabled": False,
     },
     # ArgentWolf Access Guard ``registration_abuse`` evidence carried in ordinary
     # WordPress batches. Site agnostic: any site under drop/wordpress/<site>/
@@ -744,6 +756,16 @@ MAIL_PRIVACY_DOMAIN = "mail"
 MAIL_ACCOUNT_KEY_RE = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}:account:)?[0-9a-f]{64}$")
 MAIL_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:-]{0,63}$")
 MAIL_RULES = ("mail-account-slow-burn", "mail-protected-account-slow-burn")
+MAIL_PROBE_RULE = "mail-account-probe"
+ALL_MAIL_RULES = (*MAIL_RULES, MAIL_PROBE_RULE)
+# Campaign kinds. Account-keyed campaigns are "known" (existence confirmed)
+# or "unresolved" (no lookup answer: pre-0.5.7.0 behaviour); source-IP probe
+# campaigns are "probe" (only nonexistent accounts) or "mixed" (the source
+# also failed against existing mailboxes in the window).
+MAIL_CAMPAIGN_KINDS = ("known", "unresolved", "mixed", "probe")
+# Ingest classification that is local-dashboard only: never copied into
+# abuse reports, XARF, CrowdSec reasons, or the review digest.
+MAIL_PRIVATE_METADATA = frozenset({"account_exists", "failure_reason", "account_class", "account_lookup"})
 REGISTRATION_RULES = (
     "wordpress-registration-abuse",
     "wordpress-registration-abuse-high-confidence",
@@ -761,6 +783,54 @@ def mail_privacy_token(secret: bytes, node_id: str, account: str) -> str:
     """
     material = f"{MAIL_PRIVACY_DOMAIN}\0{node_id}\0{account.casefold()}".encode("utf-8", "replace")
     return hmac.new(secret, material, hashlib.sha256).hexdigest()
+
+
+MAIL_CAMPAIGN_DEFAULTS: dict[str, Any] = {
+    "campaign_kind": "unresolved",
+    "source_ip": None,
+    "distinct_accounts": 1,
+    "known_failures": 0,
+    "probe_failures": 0,
+}
+# Known-account (valid mailbox) attacks lead every listing, then unresolved
+# account campaigns, then source-IP probes.
+MAIL_CAMPAIGN_ORDER = (
+    "protected DESC, "
+    "CASE campaign_kind WHEN 'known' THEN 0 WHEN 'unresolved' THEN 1 "
+    "WHEN 'mixed' THEN 2 ELSE 3 END, "
+    "CASE status WHEN 'enforcing' THEN 0 ELSE 1 END, "
+    "distinct_source_ips DESC, last_seen_epoch DESC"
+)
+
+
+def mail_event_exists(row: Any) -> bool | None:
+    """``account_exists`` from a stored mail event (None when absent/invalid)."""
+    try:
+        raw = row["metadata_json"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    try:
+        metadata = json.loads(str(raw or "{}"))
+    except json.JSONDecodeError:
+        return None
+    value = metadata.get("account_exists") if isinstance(metadata, Mapping) else None
+    return value if isinstance(value, bool) else None
+
+
+MAIL_CAMPAIGN_LABELS = {
+    "known": "Valid mailbox attack",
+    "unresolved": "Mailbox attack (existence unknown)",
+    "mixed": "Account probing (also hit valid mailboxes)",
+    "probe": "Account probing",
+}
+
+
+def mail_campaign_label(kind: Any) -> str:
+    return MAIL_CAMPAIGN_LABELS.get(str(kind or "unresolved"), MAIL_CAMPAIGN_LABELS["unresolved"])
+
+
+def mail_probe_campaign_key(site_id: str, source_ip: str) -> str:
+    return f"{site_id}:probe-ip:{source_ip}"
 
 
 def mail_campaign_id(account_key: str) -> str:
@@ -813,6 +883,10 @@ def validate_mail_account_policy(policy: Mapping[str, Any]) -> None:
         "campaign_review_distinct_ips",
         "campaign_prefix_min_ips",
         "max_campaign_sample_ips",
+        "probe_window_seconds",
+        "probe_distinct_accounts",
+        "probe_failure_threshold",
+        "probe_review_distinct_accounts",
     ):
         try:
             value = int(policy.get(name, 0))
@@ -820,9 +894,19 @@ def validate_mail_account_policy(policy: Mapping[str, Any]) -> None:
             raise CollectorError(f"mail_account_policy.{name} must be an integer") from exc
         if value < 1:
             raise CollectorError(f"mail_account_policy.{name} must be positive")
-    for name in ("enabled", "crowdsec_enforcement", "abuse_reporting_enabled"):
+    for name in (
+        "enabled", "crowdsec_enforcement", "abuse_reporting_enabled",
+        "probe_enabled", "probe_crowdsec_enforcement", "probe_abuse_reporting_enabled",
+    ):
         if not isinstance(policy.get(name), bool):
             raise CollectorError(f"mail_account_policy.{name} must be boolean")
+    if int(policy["probe_distinct_accounts"]) < 2:
+        raise CollectorError(
+            "mail_account_policy.probe_distinct_accounts must be at least 2; "
+            "one mistyped mailbox name is not a probe"
+        )
+    if not re.fullmatch(r"[1-9][0-9]*[smh]", str(policy.get("probe_ban_duration", ""))):
+        raise CollectorError("mail_account_policy.probe_ban_duration must look like 72h")
     if int(policy["distinct_source_ips"]) < 2 or int(policy["protected_distinct_source_ips"]) < 2:
         raise CollectorError(
             "mail_account_policy distinct source IP thresholds must be at least 2; "
@@ -1269,6 +1353,11 @@ class StateDB:
                 sample_source_ips_json TEXT NOT NULL DEFAULT '[]',
                 prefix_proposals_json TEXT NOT NULL DEFAULT '[]',
                 asn_summary_json TEXT NOT NULL DEFAULT '[]',
+                campaign_kind TEXT NOT NULL DEFAULT 'unresolved',
+                source_ip TEXT,
+                distinct_accounts INTEGER NOT NULL DEFAULT 1,
+                known_failures INTEGER NOT NULL DEFAULT 0,
+                probe_failures INTEGER NOT NULL DEFAULT 0,
                 automatic_block INTEGER NOT NULL DEFAULT 0,
                 review_status TEXT NOT NULL DEFAULT 'open',
                 updated_at TEXT NOT NULL,
@@ -1288,6 +1377,14 @@ class StateDB:
             """
         )
         self.ensure_column("events", "service", "TEXT NOT NULL DEFAULT 'wordpress'")
+        for name, definition in (
+            ("campaign_kind", "TEXT NOT NULL DEFAULT 'unresolved'"),
+            ("source_ip", "TEXT"),
+            ("distinct_accounts", "INTEGER NOT NULL DEFAULT 1"),
+            ("known_failures", "INTEGER NOT NULL DEFAULT 0"),
+            ("probe_failures", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            self.ensure_column("mail_account_campaigns", name, definition)
         self.ensure_column("events", "source_port", "INTEGER")
         self.ensure_column("events", "destination_ip", "TEXT")
         self.ensure_column("events", "destination_port", "INTEGER")
@@ -1520,7 +1617,7 @@ class StateDB:
             self.conn.execute(
                 """SELECT event_uuid, occurred_epoch, occurred_at, site_id, account_key,
                           source_ip, source_port, destination_ip, destination_port,
-                          transport_protocol, application_protocol
+                          transport_protocol, application_protocol, metadata_json
                    FROM events
                    WHERE service = 'mail'
                      AND event_type = 'mail_auth_failed'
@@ -1548,7 +1645,8 @@ class StateDB:
             "failure_threshold", "distinct_ip_threshold", "window_seconds",
             "first_seen_epoch", "last_seen_epoch", "first_seen", "last_seen",
             "protocols", "sample_source_ips_json", "prefix_proposals_json",
-            "asn_summary_json", "updated_at",
+            "asn_summary_json", "campaign_kind", "source_ip", "distinct_accounts",
+            "known_failures", "probe_failures", "updated_at",
         )
         updates = ", ".join(
             f"{name}=excluded.{name}" for name in columns if name not in {"site_id", "account_key", "campaign_id"}
@@ -1558,21 +1656,22 @@ class StateDB:
                 f"""INSERT INTO mail_account_campaigns ({', '.join(columns)}, automatic_block)
                     VALUES ({', '.join('?' for _ in columns)}, 0)
                     ON CONFLICT(site_id, account_key) DO UPDATE SET {updates}, automatic_block=0""",
-                tuple(campaign[name] for name in columns),
+                tuple(campaign.get(name, MAIL_CAMPAIGN_DEFAULTS.get(name)) for name in columns),
             )
 
     def mail_campaigns(self, limit: int = 50, since_epoch: int = 0) -> list[dict[str, Any]]:
         """Export-safe campaign rows: the account token itself is never returned."""
         rows = self.conn.execute(
-            """SELECT campaign_id, site_id, protected, protected_label, status, failures,
+            f"""SELECT campaign_id, site_id, protected, protected_label, status, failures,
                       distinct_source_ips, enforced_source_ips, failure_threshold,
                       distinct_ip_threshold, window_seconds, first_seen, last_seen,
                       protocols, sample_source_ips_json, prefix_proposals_json,
-                      asn_summary_json, automatic_block, review_status, updated_at
+                      asn_summary_json, campaign_kind, source_ip, distinct_accounts,
+                      known_failures, probe_failures, automatic_block, review_status,
+                      updated_at
                FROM mail_account_campaigns
                WHERE last_seen_epoch >= ?
-               ORDER BY protected DESC, CASE status WHEN 'enforcing' THEN 0 ELSE 1 END,
-                        distinct_source_ips DESC, last_seen_epoch DESC
+               ORDER BY {MAIL_CAMPAIGN_ORDER}
                LIMIT ?""",
             (since_epoch, limit),
         )
@@ -1586,6 +1685,7 @@ class StateDB:
                     item[name[:-5]] = []
             item["protected"] = bool(item["protected"])
             item["automatic_block"] = False
+            item["campaign_label"] = mail_campaign_label(item.get("campaign_kind"))
             result.append(item)
         return result
 
@@ -4026,22 +4126,36 @@ class Collector:
         return asn_groups(source_ips, self.db.cached_asns(source_ips))
 
     def evaluate_mail_account_slowburn(self, now_epoch: int | None = None) -> int:
-        """Account-keyed mail slow-burn policy.
+        """Mail policy: account-keyed slow-burn plus source-IP account probes.
 
-        Groups ``mail_auth_failed`` events by HMAC target-account token across
-        all source IPs. When one account has at least ``failure_threshold``
-        failures from at least ``distinct_source_ips`` distinct sources inside
-        ``window_seconds``, every participating source IP with at least
-        ``min_failures_per_ip`` failures on that account gets its own per-IP
-        incident (and therefore its own per-IP CrowdSec decision). Prefix and
-        ASN aggregation is recorded only as review-only campaign proposals.
+        **Known-account slow-burn** (rules ``mail-account-slow-burn`` /
+        ``mail-protected-account-slow-burn``): groups ``mail_auth_failed``
+        events whose ``account_exists`` is true *or unknown* by HMAC
+        target-account token across all source IPs. When one account has at
+        least ``failure_threshold`` failures from at least
+        ``distinct_source_ips`` distinct sources inside ``window_seconds``,
+        every participating source IP with at least ``min_failures_per_ip``
+        failures on that account gets its own per-IP incident (and therefore
+        its own per-IP CrowdSec decision). Unknown existence keeps exactly the
+        pre-0.5.7.0 behaviour.
+
+        **Account probe** (rule ``mail-account-probe``): events whose
+        ``account_exists`` is false are grouped by *source IP*. A source that
+        failed against at least ``probe_distinct_accounts`` distinct
+        nonexistent accounts with at least ``probe_failure_threshold``
+        failures inside ``probe_window_seconds`` gets a per-IP incident;
+        CrowdSec is separately gated by ``probe_crowdsec_enforcement``.
+
+        Prefix and ASN aggregation is recorded only as review-only proposals.
         """
         policy = self.config.get("mail_account_policy", {})
         if not policy.get("enabled"):
             return 0
         end_epoch = int(now_epoch if now_epoch is not None else utc_now().timestamp())
         window = int(policy["window_seconds"])
+        probe_window = int(policy["probe_window_seconds"])
         start_epoch = end_epoch - window
+        probe_start_epoch = end_epoch - probe_window
         protected = self.protected_mail_accounts()
         report_enabled = bool(policy.get("abuse_reporting_enabled"))
         report_status = "pending" if report_enabled else "suppressed"
@@ -4049,15 +4163,31 @@ class Collector:
             "Mail account slow-burn reporting disabled pending production review"
         )
         accounts: dict[tuple[str, str], dict[str, list[sqlite3.Row]]] = {}
-        for row in self.db.mail_account_failures(start_epoch, end_epoch):
+        account_known: dict[tuple[str, str], bool] = {}
+        probes: dict[tuple[str, str], list[sqlite3.Row]] = {}
+        known_by_ip: dict[tuple[str, str], int] = {}
+        for row in self.db.mail_account_failures(min(start_epoch, probe_start_epoch), end_epoch):
             source_ip = str(row["source_ip"])
             try:
                 if self.trusted_ip(source_ip):
                     continue
             except ValueError:
                 continue
-            key = (str(row["site_id"]), str(row["account_key"]))
+            site_id = str(row["site_id"])
+            epoch = int(row["occurred_epoch"])
+            exists = mail_event_exists(row)
+            if exists is False:
+                if epoch >= probe_start_epoch:
+                    probes.setdefault((site_id, source_ip), []).append(row)
+                continue
+            if exists is True and epoch >= probe_start_epoch:
+                known_by_ip[(site_id, source_ip)] = known_by_ip.get((site_id, source_ip), 0) + 1
+            if epoch < start_epoch:
+                continue
+            key = (site_id, str(row["account_key"]))
             accounts.setdefault(key, {}).setdefault(source_ip, []).append(row)
+            if exists is True:
+                account_known[key] = True
 
         changed: set[str] = set()
         review_ips = int(policy["campaign_review_distinct_ips"])
@@ -4075,63 +4205,188 @@ class Collector:
                 continue
             campaign_id = mail_campaign_id(account_key)
             rule_id = MAIL_RULES[1] if is_protected else MAIL_RULES[0]
+            kind = "known" if account_known.get((site_id, account_key)) else "unresolved"
             enforced = 0
             if qualifies:
                 for source_ip, evidence in sorted(per_ip.items()):
                     if len(evidence) < int(policy["min_failures_per_ip"]):
                         continue
-                    prior = self.db.recent_incident(source_ip, rule_id, site_id)
-                    prior_count = int(prior["event_count"]) if prior is not None else -1
-                    incident_uuid = self.db.create_or_merge_incident(
-                        source_ip,
-                        rule_id,
-                        evidence,
+                    self._mail_incident(
+                        source_ip, rule_id, evidence, site_id, report_status, report_detail, changed,
+                        "Mail account slow-burn incident %s: site=%s campaign=%s kind=%s%s ip=%s "
+                        "events=%d campaign_failures=%d campaign_ips=%d enforcement=%s",
+                        lambda incident, uuid_, ip=source_ip: (
+                            uuid_, site_id, campaign_id, kind,
+                            f" protected={label}" if is_protected else "",
+                            ip, int(incident["event_count"]), failures, len(per_ip),
+                            "on" if policy.get("crowdsec_enforcement") else "dry-run",
+                        ),
                         int(policy["incident_merge_seconds"]),
-                        site_id=site_id,
-                        initial_report_status=report_status,
-                        initial_report_detail=report_detail,
                     )
                     enforced += 1
-                    incident = self.db.incident(incident_uuid)
-                    if prior is None or int(incident["event_count"]) != prior_count:
-                        changed.add(incident_uuid)
-                        LOG.warning(
-                            "Mail account slow-burn incident %s: site=%s campaign=%s%s ip=%s "
-                            "events=%d campaign_failures=%d campaign_ips=%d enforcement=%s",
-                            incident_uuid, site_id, campaign_id,
-                            f" protected={label}" if is_protected else "",
-                            source_ip, int(incident["event_count"]), failures, len(per_ip),
-                            "on" if policy.get("crowdsec_enforcement") else "dry-run",
-                        )
             all_rows = [row for rows in per_ip.values() for row in rows]
-            first_epoch = min(int(row["occurred_epoch"]) for row in all_rows)
-            last_epoch = max(int(row["occurred_epoch"]) for row in all_rows)
-            ranked_ips = sorted(per_ip, key=lambda ip: (-len(per_ip[ip]), ip))
-            protocols = sorted({str(row["application_protocol"] or "").upper() for row in all_rows} - {""})
-            self.db.upsert_mail_campaign({
-                "site_id": site_id,
-                "account_key": account_key,
-                "campaign_id": campaign_id,
-                "protected": 1 if is_protected else 0,
-                "protected_label": label,
-                "status": "enforcing" if qualifies else "review",
-                "failures": failures,
-                "distinct_source_ips": len(per_ip),
-                "enforced_source_ips": enforced,
-                "failure_threshold": threshold,
-                "distinct_ip_threshold": distinct_required,
-                "window_seconds": window,
-                "first_seen_epoch": first_epoch,
-                "last_seen_epoch": last_epoch,
-                "first_seen": epoch_text(first_epoch),
-                "last_seen": epoch_text(last_epoch),
-                "protocols": ",".join(protocols) or None,
-                "sample_source_ips_json": json.dumps(ranked_ips[:sample_limit]),
-                "prefix_proposals_json": json.dumps(self.mail_prefix_proposals(per_ip), sort_keys=True),
-                "asn_summary_json": json.dumps(self.mail_asn_summary(list(per_ip)), sort_keys=True),
-                "updated_at": utc_text(),
-            })
+            self.db.upsert_mail_campaign(self._mail_campaign_record(
+                site_id=site_id,
+                account_key=account_key,
+                campaign_id=campaign_id,
+                protected=is_protected,
+                label=label,
+                status="enforcing" if qualifies else "review",
+                per_ip=per_ip,
+                all_rows=all_rows,
+                enforced=enforced,
+                threshold=threshold,
+                distinct_required=distinct_required,
+                window=window,
+                sample_limit=sample_limit,
+                kind=kind,
+                source_ip=None,
+                distinct_accounts=1,
+                known_failures=failures if kind == "known" else 0,
+                probe_failures=0,
+            ))
+
+        if policy.get("probe_enabled"):
+            probe_report_enabled = bool(policy.get("probe_abuse_reporting_enabled"))
+            probe_report_status = "pending" if probe_report_enabled else "suppressed"
+            probe_report_detail = None if probe_report_enabled else (
+                "Mail account-probe reporting disabled (probe_abuse_reporting_enabled is false)"
+            )
+            distinct_required = int(policy["probe_distinct_accounts"])
+            threshold = int(policy["probe_failure_threshold"])
+            review_accounts = int(policy["probe_review_distinct_accounts"])
+            for (site_id, source_ip), evidence in sorted(probes.items()):
+                distinct_accounts = len({str(row["account_key"]) for row in evidence})
+                failures = len(evidence)
+                qualifies = distinct_accounts >= distinct_required and failures >= threshold
+                if not (qualifies or distinct_accounts >= review_accounts):
+                    continue
+                campaign_key = mail_probe_campaign_key(site_id, source_ip)
+                campaign_id = mail_campaign_id(campaign_key)
+                known_failures = known_by_ip.get((site_id, source_ip), 0)
+                kind = "mixed" if known_failures else "probe"
+                enforced = 0
+                if qualifies:
+                    self._mail_incident(
+                        source_ip, MAIL_PROBE_RULE, evidence, site_id,
+                        probe_report_status, probe_report_detail, changed,
+                        "Mail account-probe incident %s: site=%s campaign=%s kind=%s ip=%s "
+                        "events=%d nonexistent_accounts=%d enforcement=%s",
+                        lambda incident, uuid_: (
+                            uuid_, site_id, campaign_id, kind, source_ip,
+                            int(incident["event_count"]), distinct_accounts,
+                            "on" if policy.get("probe_crowdsec_enforcement") else "dry-run",
+                        ),
+                        int(policy["incident_merge_seconds"]),
+                    )
+                    enforced = 1
+                self.db.upsert_mail_campaign(self._mail_campaign_record(
+                    site_id=site_id,
+                    account_key=campaign_key,
+                    campaign_id=campaign_id,
+                    protected=False,
+                    label=None,
+                    status="enforcing" if qualifies else "review",
+                    per_ip={source_ip: evidence},
+                    all_rows=evidence,
+                    enforced=enforced,
+                    threshold=threshold,
+                    distinct_required=distinct_required,
+                    window=probe_window,
+                    sample_limit=sample_limit,
+                    kind=kind,
+                    source_ip=source_ip,
+                    distinct_accounts=distinct_accounts,
+                    known_failures=known_failures,
+                    probe_failures=failures,
+                ))
         return len(changed)
+
+    def _mail_incident(
+        self,
+        source_ip: str,
+        rule_id: str,
+        evidence: Sequence[sqlite3.Row],
+        site_id: str,
+        report_status: str,
+        report_detail: str | None,
+        changed: set[str],
+        log_format: str,
+        log_args: Any,
+        merge_seconds: int,
+    ) -> bool:
+        prior = self.db.recent_incident(source_ip, rule_id, site_id)
+        prior_count = int(prior["event_count"]) if prior is not None else -1
+        incident_uuid = self.db.create_or_merge_incident(
+            source_ip,
+            rule_id,
+            evidence,
+            merge_seconds,
+            site_id=site_id,
+            initial_report_status=report_status,
+            initial_report_detail=report_detail,
+        )
+        incident = self.db.incident(incident_uuid)
+        if prior is None or int(incident["event_count"]) != prior_count:
+            changed.add(incident_uuid)
+            LOG.warning(log_format, *log_args(incident, incident_uuid))
+            return True
+        return False
+
+    def _mail_campaign_record(
+        self,
+        *,
+        site_id: str,
+        account_key: str,
+        campaign_id: str,
+        protected: bool,
+        label: str | None,
+        status: str,
+        per_ip: Mapping[str, Sequence[Any]],
+        all_rows: Sequence[sqlite3.Row],
+        enforced: int,
+        threshold: int,
+        distinct_required: int,
+        window: int,
+        sample_limit: int,
+        kind: str,
+        source_ip: str | None,
+        distinct_accounts: int,
+        known_failures: int,
+        probe_failures: int,
+    ) -> dict[str, Any]:
+        first_epoch = min(int(row["occurred_epoch"]) for row in all_rows)
+        last_epoch = max(int(row["occurred_epoch"]) for row in all_rows)
+        ranked_ips = sorted(per_ip, key=lambda ip: (-len(per_ip[ip]), ip))
+        protocols = sorted({str(row["application_protocol"] or "").upper() for row in all_rows} - {""})
+        return {
+            "site_id": site_id,
+            "account_key": account_key,
+            "campaign_id": campaign_id,
+            "protected": 1 if protected else 0,
+            "protected_label": label,
+            "status": status,
+            "failures": len(all_rows),
+            "distinct_source_ips": len(per_ip),
+            "enforced_source_ips": enforced,
+            "failure_threshold": threshold,
+            "distinct_ip_threshold": distinct_required,
+            "window_seconds": window,
+            "first_seen_epoch": first_epoch,
+            "last_seen_epoch": last_epoch,
+            "first_seen": epoch_text(first_epoch),
+            "last_seen": epoch_text(last_epoch),
+            "protocols": ",".join(protocols) or None,
+            "sample_source_ips_json": json.dumps(ranked_ips[:sample_limit]),
+            "prefix_proposals_json": json.dumps(self.mail_prefix_proposals(per_ip), sort_keys=True),
+            "asn_summary_json": json.dumps(self.mail_asn_summary(list(per_ip)), sort_keys=True),
+            "campaign_kind": kind,
+            "source_ip": source_ip,
+            "distinct_accounts": distinct_accounts,
+            "known_failures": known_failures,
+            "probe_failures": probe_failures,
+            "updated_at": utc_text(),
+        }
 
     def registration_abuse_window(
         self,
@@ -4905,6 +5160,14 @@ class Collector:
                 "Mail account slow-burn CrowdSec enforcement is operator-gated "
                 "(mail_account_policy.crowdsec_enforcement is false)"
             )
+        if (
+            str(incident["rule_id"]) == MAIL_PROBE_RULE
+            and not self.config["mail_account_policy"].get("probe_crowdsec_enforcement")
+        ):
+            return "dry-run", (
+                "Mail account-probe CrowdSec enforcement is operator-gated "
+                "(mail_account_policy.probe_crowdsec_enforcement is false)"
+            )
         maximum_age = int(self.config["policy"]["max_enforcement_age_days"]) * 86400
         if int(utc_now().timestamp()) - int(incident["last_seen_epoch"]) > maximum_age:
             return "stale", "Incident is older than the configured enforcement window"
@@ -4920,6 +5183,8 @@ class Collector:
         duration = str(self.config["policy"]["ban_duration"])
         if str(incident["rule_id"]) in MAIL_RULES:
             duration = str(self.config["mail_account_policy"]["ban_duration"])
+        elif str(incident["rule_id"]) == MAIL_PROBE_RULE:
+            duration = str(self.config["mail_account_policy"]["probe_ban_duration"])
         elif str(incident["rule_id"]) in REGISTRATION_RULES:
             duration = str(self.config["registration_abuse_policy"]["ban_duration"])
         command = [
@@ -5125,14 +5390,18 @@ class Collector:
 
     @staticmethod
     def _report_metadata(row: Any) -> dict[str, Any]:
+        """Event metadata for outbound reports, minus local-only mail classification."""
         raw = Collector._report_value(row, "metadata_json", "{}")
         if isinstance(raw, Mapping):
-            return dict(raw)
-        try:
-            parsed = json.loads(str(raw or "{}"))
-        except (TypeError, json.JSONDecodeError):
+            parsed: Any = dict(raw)
+        else:
+            try:
+                parsed = json.loads(str(raw or "{}"))
+            except (TypeError, json.JSONDecodeError):
+                return {}
+        if not isinstance(parsed, dict):
             return {}
-        return parsed if isinstance(parsed, dict) else {}
+        return {key: value for key, value in parsed.items() if key not in MAIL_PRIVATE_METADATA}
 
     @staticmethod
     def _report_unique(values: Sequence[Any]) -> list[str]:

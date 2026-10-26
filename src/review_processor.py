@@ -32,7 +32,7 @@ from review_queue import (
     utc_text,
 )
 
-APP_VERSION = "0.5.6.1"
+APP_VERSION = "0.5.7.0"
 UTC = dt.timezone.utc
 DEFAULTS: dict[str, Any] = {
     "state_db": "/var/lib/argent-sentinel/collector/state.sqlite3",

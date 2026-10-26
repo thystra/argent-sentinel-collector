@@ -1,3 +1,70 @@
+## 0.5.7.0 (unreleased — mail account existence + Postfix mail.log tail)
+
+### Ingest classification (agent)
+
+- Every `mail_auth_failed` event now carries `account_exists` (`true` /
+  `false` / `null`), `failure_reason` (`bad_password` / `unknown_user` /
+  `unknown`), and `account_lookup` (`doveadm`, `auth-userdb`, `cache`,
+  `auth_verbose`, or `null`). `account_class` follows the OpenSSH convention:
+  `known` / `invalid`, with `submitted` kept for unresolved existence and
+  `empty` / `unresolved` unchanged.
+- New `mail.account_lookup` (enabled by default): node-local `doveadm user`
+  (default) or Dovecot auth-userdb socket lookup, 2 s timeout, works for both
+  Dovecot and Postfix SASL without `auth_verbose`. Positive/negative/error
+  TTLs 600/300/60 s, at most 200 lookups per run and 5000 cache entries. The
+  cache (`/var/lib/argent-sentinel/agent/mail-account-cache.json`, 0600) is
+  keyed by HMAC in a separate `mail-lookup` domain; no plaintext names. Unsafe
+  names (masks, options, control characters) are never looked up. Lookup
+  failures yield `null`.
+- Fallback: with `auth_verbose = yes`, Dovecot `auth:`/`auth-worker` lines
+  (`unknown user`, `password mismatch`) are correlated in memory by session id
+  or (account, source IP). `auth_verbose_passwords` is never required.
+
+### Postfix coverage (agent)
+
+- New `mail.log_files` (default `/var/log/mail.log`, component `postfix`)
+  tails syslog-format files (Postfix `maillog_file` and rsyslog RFC 3339) with
+  a durable dev/inode/offset cursor (`mail.log_cursor_file`), handling rename
+  and copytruncate rotation, partial lines, and a 16 MiB per-run budget.
+  Postfix with `maillog_file` never reaches journald, so 0.5.6.x missed all
+  Postfix SASL failures on such hosts.
+- Journald rows for a component covered by an existing, readable file are
+  dropped, so `postfix@-.service` can stay in `mail.units` (journald-only
+  Postfix hosts) without double counting.
+
+### Policy (collector)
+
+- Known-account slow-burn now uses only events whose `account_exists` is true
+  or unknown (unknown = unchanged behaviour). Thresholds unchanged; protected
+  mailboxes stricter as before.
+- New per-source-IP rule `mail-account-probe` for failures against
+  nonexistent accounts: `probe_distinct_accounts` 5, `probe_failure_threshold`
+  5, `probe_window_seconds` 86400, `probe_ban_duration` 72h,
+  `probe_review_distinct_accounts` 3, `probe_enabled` true. Separate CrowdSec
+  gate `probe_crowdsec_enforcement` (default **false**) and
+  `probe_abuse_reporting_enabled` (default false).
+- `mail_account_campaigns` gains `campaign_kind` (`known` / `unresolved` /
+  `probe` / `mixed`), `source_ip`, `distinct_accounts`, `known_failures`,
+  `probe_failures` (added with `ensure_column`; no manual migration).
+  Listings put known-account campaigns first.
+
+### Dashboard and digest
+
+- `/mail`: Exists and Reason columns on recent failures, Valid mailbox /
+  Nonexistent columns on failures by source, campaign Kind labels ("Valid
+  mailbox attack", "Account probing"), a failure split (valid / nonexistent /
+  unknown), and probe thresholds. Overview gains "Valid mailbox failures" and
+  "Nonexistent-account probes" cards.
+- The review digest opens with aggregate per-kind mail counts, valid-mailbox
+  attacks first; campaign entries show their kind. No per-event existence.
+
+### Privacy
+
+- Server responses are untouched (uniform failure + `auth_failure_delay`).
+- `account_exists`, `failure_reason`, `account_class`, and `account_lookup`
+  are stripped from abuse-report/XARF metadata; CrowdSec decisions carry only
+  IP, duration, and reason prefix/rule.
+
 ## 0.5.6.1 (unreleased — mail incident-monitor / dry-run safety)
 
 - Add `mail_account_policy.crowdsec_enforcement` (default `false`, validated
