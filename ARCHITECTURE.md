@@ -2,7 +2,7 @@
 
 ## Modular watchdog plane
 
-Argent Sentinel 0.5.6.0 retains the root-owned local watchdog plane that is separate
+Argent Sentinel 0.5.6.1 retains the root-owned local watchdog plane that is separate
 from event ingestion and abuse-reporting policy. A one-minute systemd timer runs
 the common scheduler. Package and local JSON definitions select dynamically
 imported, package-owned modules and their independent intervals. Package

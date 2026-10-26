@@ -136,6 +136,10 @@ After implementation or deployment decisions, review and update:
   commented EOF marker when the format supports comments.
 
 ## Current reporting checkpoint
+- Version 0.5.6.1 adds `mail_account_policy.crowdsec_enforcement` (default
+  false): mail slow-burn stays dry-run / incident monitor even with global
+  CrowdSec on. Install 0.5.6.1 before setting `mail_account_policy.enabled`
+  on nidhoggur (0.5.6.0 has no mail gate and would issue real bans).
 - Version 0.5.6.0 (branch `feature/mail-auth-ingest`) adds observe-only
   Dovecot/Postfix SASL ingest as service `mail`; see `docs/mail-auth-events.md`.
   Not deployed. PR2 adds the disabled-by-default account-keyed

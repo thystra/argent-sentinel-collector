@@ -1,3 +1,29 @@
+## 0.5.6.1 (unreleased — mail incident-monitor / dry-run safety)
+
+- Add `mail_account_policy.crowdsec_enforcement` (default `false`, validated
+  boolean). `apply_decision()` now gates `mail-account-slow-burn` and
+  `mail-protected-account-slow-burn` the same way as registration abuse: a
+  CrowdSec decision is only issued when both the global `crowdsec.enabled` and
+  `mail_account_policy.crowdsec_enforcement` are true; otherwise the incident is
+  recorded with decision status `dry-run`.
+- With `crowdsec_enforcement: false`, `mail_account_policy.enabled: true` is a
+  safe dry-run / incident monitor **even when global `crowdsec.enabled` is
+  true**; other policies keep enforcing. In 0.5.6.0 there was no such gate, so
+  enabling the mail policy with global CrowdSec on issued real bans.
+- New mail incidents log `enforcement=on|dry-run`.
+- Dashboard: the Overview "Mail auth failures" card now deep-links to
+  `/incidents#mail-auth-failures`, a new section listing recent
+  `mail_auth_failed` events grouped by source IP, node, and protocol (failure
+  and distinct-account counts only; no account tokens) with the mail policy
+  state (disabled / dry-run / on). Previously the card linked to plain
+  `/incidents`, which shows nothing mail specific until the policy produces
+  incidents or campaigns. "Registration abuse events" now links to
+  `/incidents#registration-abuse`.
+- Snapshot gains `mail_auth_failures` and `mail_account_policy`
+  (`enabled`, `crowdsec_enforcement`, `window_seconds`).
+- No schema migration; existing `collector.json` files without the new key
+  default to dry-run for mail.
+
 ## 0.5.6.0 (unreleased — release candidate, not deployed)
 
 - Add observe-only mail authentication ingest as one agent/batch service,
