@@ -11,16 +11,21 @@
   true**; other policies keep enforcing. In 0.5.6.0 there was no such gate, so
   enabling the mail policy with global CrowdSec on issued real bans.
 - New mail incidents log `enforcement=on|dry-run`.
-- Dashboard: the Overview "Mail auth failures" card now deep-links to
-  `/incidents#mail-auth-failures`, a new section listing recent
-  `mail_auth_failed` events grouped by source IP, node, and protocol (failure
-  and distinct-account counts only; no account tokens) with the mail policy
-  state (disabled / dry-run / on). Previously the card linked to plain
-  `/incidents`, which shows nothing mail specific until the policy produces
-  incidents or campaigns. "Registration abuse events" now links to
-  `/incidents#registration-abuse`.
-- Snapshot gains `mail_auth_failures` and `mail_account_policy`
-  (`enabled`, `crowdsec_enforcement`, `window_seconds`).
+- Dashboard: new **Mail** page (`/mail`, nav link; also embedded in
+  `/incidents` under `#mail`) with the mail policy state (disabled / dry-run
+  (incident monitor only) / on) and thresholds, slow-burn campaigns
+  (`#mail-campaigns`, now with protocols and sample IPs), failures grouped by
+  source IP/node/protocol (`#mail-auth-failures`), and individual recent
+  failures (`#mail-recent-failures`: time, source IP, node, protocol, port,
+  mechanism, account class, export-safe campaign id). Account names and HMAC
+  tokens are never shown. The Overview "Mail auth failures" card now links to
+  `/mail`; previously it linked to plain `/incidents`, which shows nothing mail
+  specific until the policy produces incidents or campaigns. "Registration
+  abuse events" now links to `/incidents#registration-abuse`.
+- Snapshot gains `mail_auth_failures` (grouped), `recent_mail_auth_failures`
+  (individual events; no `account_key`, allowlisted metadata only), and
+  `mail_account_policy` (state and thresholds; protected tokens, file path,
+  and privacy key path are excluded, only counts/booleans).
 - No schema migration; existing `collector.json` files without the new key
   default to dry-run for mail.
 

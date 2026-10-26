@@ -100,7 +100,8 @@ For each account token inside `window_seconds`:
 4. **Prefix and ASN aggregation is review-only.** Each campaign records bounded
    prefix proposals (`/24` IPv4, `/48` IPv6, narrowed to the smallest common
    prefix) and ASN groups from locally cached enrichment. They appear in
-   `argent-sentinel status`, the dashboard snapshot/Incidents page, and the
+   `argent-sentinel status`, the dashboard snapshot, the dashboard Mail page
+   (`/mail`, also embedded in Incidents as `#mail`), and the
    daily review digest. Nothing creates range, ASN, or country decisions; the
    per-IP incidents also feed the existing audited CIDR review queue, where any
    range decision still needs an operator action.
@@ -213,7 +214,8 @@ owner.
    ```
 
 4. Inspect `argent-sentinel status` → `mail_account_campaigns` and the
-   dashboard Incidents page, then set `crowdsec_enforcement: true` to issue
+   dashboard Mail page (`/mail`: policy state and thresholds, campaigns,
+   failures by source, and individual recent failures), then set `crowdsec_enforcement: true` to issue
    per-IP bans; leave `abuse_reporting_enabled: false` until reviewed.
 
 Packages older than 0.5.6.1 have no `crowdsec_enforcement` key for this policy:

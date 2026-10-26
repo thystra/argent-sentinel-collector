@@ -551,6 +551,44 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
             """,
             (start_epoch, max_rows),
         )
+        # Individual mail failures, newest first. account_key is read only to
+        # derive the export-safe campaign_id and is dropped before export;
+        # metadata is reduced to an allowlist (no usernames exist in it).
+        recent_mail_auth_failures = []
+        for item in rows(
+            connection,
+            """
+            SELECT occurred_at, source_ip, site_id, application_protocol,
+                   destination_port, account_key, metadata_json
+            FROM events
+            WHERE occurred_epoch >= ?
+              AND service = 'mail'
+              AND event_type = 'mail_auth_failed'
+            ORDER BY occurred_epoch DESC, event_uuid DESC
+            LIMIT ?
+            """,
+            (start_epoch, max_rows),
+        ):
+            account_key = item.pop("account_key", None)
+            try:
+                metadata = json.loads(str(item.pop("metadata_json", None) or "{}"))
+            except json.JSONDecodeError:
+                metadata = {}
+            if not isinstance(metadata, Mapping):
+                metadata = {}
+            recent_mail_auth_failures.append({
+                "occurred_at": item.get("occurred_at"),
+                "source_ip": item.get("source_ip"),
+                "site_id": item.get("site_id"),
+                "protocol": str(item.get("application_protocol") or "").upper() or None,
+                "destination_port": item.get("destination_port"),
+                "auth_mechanism": metadata.get("auth_mechanism"),
+                "account_class": metadata.get("account_class"),
+                "mail_component": metadata.get("mail_component"),
+                "postfix_service": metadata.get("postfix_service"),
+                "attempts": metadata.get("attempts"),
+                "campaign_id": collector.mail_campaign_id(str(account_key)) if account_key else None,
+            })
         overview["registration_abuse_events"] = scalar(
             connection,
             "SELECT COUNT(*) FROM events WHERE occurred_epoch >= ? "
@@ -686,11 +724,21 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
         "network_review_actions": network_review_actions,
         "mail_account_campaigns": mail_account_campaigns,
         "mail_account_policy": {
+            key: value
+            for key, value in mail_policy_config.items()
+            if key not in {"protected_account_tokens", "protected_accounts_file", "privacy_key_file"}
+        } | {
             "enabled": bool(mail_policy_config.get("enabled")),
             "crowdsec_enforcement": bool(mail_policy_config.get("crowdsec_enforcement")),
-            "window_seconds": int(mail_policy_config.get("window_seconds", 86400)),
+            "protected_account_tokens_configured": len(
+                mail_policy_config.get("protected_account_tokens") or []
+            ),
+            "protected_accounts_file_configured": bool(
+                str(mail_policy_config.get("protected_accounts_file") or "").strip()
+            ),
         },
         "mail_auth_failures": mail_auth_failures,
+        "recent_mail_auth_failures": recent_mail_auth_failures,
         "registration_abuse_policy": registration_view,
         "registration_abuse_campaigns": registration_abuse_campaigns,
         "local_address_protection": {

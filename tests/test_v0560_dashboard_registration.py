@@ -239,19 +239,41 @@ class DashboardRegistrationTest(unittest.TestCase):
         self.assertEqual({1}, {row["failures"] for row in failures})
         self.assertEqual({1}, {row["distinct_accounts"] for row in failures})
         self.assertNotIn("account_key", failures[0])
+        policy = snapshot["mail_account_policy"]
+        self.assertFalse(policy["enabled"])
+        self.assertFalse(policy["crowdsec_enforcement"])
+        self.assertEqual((86400, 10, 5), (
+            policy["window_seconds"], policy["failure_threshold"], policy["distinct_source_ips"],
+        ))
+        for secret_key in ("protected_account_tokens", "protected_accounts_file", "privacy_key_file"):
+            self.assertNotIn(secret_key, policy)
+
+        recent = snapshot["recent_mail_auth_failures"]
+        self.assertEqual(3, len(recent))
+        self.assertEqual("198.51.100.1", recent[0]["source_ip"])  # newest first
         self.assertEqual(
-            {"enabled": False, "crowdsec_enforcement": False, "window_seconds": 86400},
-            snapshot["mail_account_policy"],
+            collector.mail_campaign_id("mail-node:account:" + "c" * 64), recent[0]["campaign_id"],
         )
+        for row in recent:
+            self.assertNotIn("account_key", row)
+            self.assertNotIn("metadata_json", row)
+
         overview_html = dashboard.render_overview(snapshot)
-        self.assertIn('href="/incidents#mail-auth-failures"', overview_html)
+        self.assertIn('href="/mail"', overview_html)
         self.assertIn('href="/incidents#registration-abuse"', overview_html)
-        html = dashboard.render_incidents(snapshot)
-        self.assertIn('id="mail-auth-failures"', html)
-        self.assertIn('id="registration-abuse"', html)
-        self.assertIn("198.51.100.1", html)
-        self.assertIn("mail_account_policy is disabled", html)
-        self.assertNotIn("c" * 64, html)
+        for html in (dashboard.render_incidents(snapshot), dashboard.render_mail(snapshot)):
+            self.assertIn('id="mail"', html)
+            self.assertIn('id="mail-campaigns"', html)
+            self.assertIn('id="mail-auth-failures"', html)
+            self.assertIn('id="mail-recent-failures"', html)
+            self.assertIn("198.51.100.1", html)
+            self.assertIn("mail_account_policy is disabled", html)
+            self.assertIn("Failures / distinct IPs", html)
+            self.assertNotIn("c" * 64, html)
+        self.assertIn('id="registration-abuse"', dashboard.render_incidents(snapshot))
+        self.assertIn(b'href="/mail"', dashboard.page("Mail", "", snapshot, {}))
+        dump = json.dumps(snapshot)
+        self.assertNotIn("c" * 64, dump)
 
     def test_mail_policy_dry_run_state_shown(self) -> None:
         self.run_collector(self.config())
@@ -261,8 +283,9 @@ class DashboardRegistrationTest(unittest.TestCase):
         snapshot = self.snapshot()
         self.assertTrue(snapshot["mail_account_policy"]["enabled"])
         self.assertFalse(snapshot["mail_account_policy"]["crowdsec_enforcement"])
-        html = dashboard.render_incidents(snapshot)
+        html = dashboard.render_mail(snapshot)
         self.assertIn("dry-run (incident monitor only)", html)
+        self.assertIn("<dt>CrowdSec enforcement</dt><dd>dry-run</dd>", html)
 
     def test_snapshot_tolerates_missing_policy_and_legacy_config(self) -> None:
         self.deliver("site-alpha", [registration_event("203.0.113.50", 3)])

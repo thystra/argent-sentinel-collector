@@ -267,6 +267,7 @@ footer{{padding:20px 28px;color:var(--muted);border-top:1px solid var(--line)}}
 <a href="/">Overview</a>
 <a href="/traffic">Traffic</a>
 <a href="/incidents">Incidents</a>
+<a href="/mail">Mail</a>
 <a href="/networks">Networks</a>
 <a href="/reports">Reports</a>
 <a href="/reviews">Reviews</a>
@@ -325,7 +326,7 @@ def render_overview(snapshot: Mapping[str, Any]) -> str:
         (
             "Mail auth failures",
             overview.get("mail_auth_failures"),
-            "/incidents#mail-auth-failures",
+            "/mail",
         ),
         (
             "Registration abuse events",
@@ -519,21 +520,12 @@ def render_traffic(snapshot: Mapping[str, Any]) -> str:
     )
 
 
-def render_incidents(snapshot: Mapping[str, Any]) -> str:
-    incident_rows = [
-        [
-            f"<code>{h(row.get('source_ip'))}</code>",
-            h(row.get("rule_id")),
-            f'<span class="{status_class(row.get("report_status"))}">{h(row.get("report_status"))}</span>',
-            number(row.get("event_count")),
-            number(row.get("site_count")),
-            f"<code>{h(row.get('registered_cidr') or row.get('network_cidr'))}</code>",
-            h(row.get("asn_holder")),
-            when(row.get("last_seen")),
-            h(row.get("report_detail")),
-        ]
-        for row in snapshot.get("recent_incidents", [])
-    ]
+def render_mail(snapshot: Mapping[str, Any]) -> str:
+    """Mail auth evidence: policy/thresholds, campaigns, grouped and raw failures.
+
+    Account names and HMAC account tokens are never rendered; campaigns use the
+    export-safe ``campaign_id`` and protected mailboxes their operator label.
+    """
     mail_rows = [
         [
             f"<code>{h(row.get('campaign_id'))}</code>",
@@ -543,6 +535,8 @@ def render_incidents(snapshot: Mapping[str, Any]) -> str:
             number(row.get("failures")),
             number(row.get("distinct_source_ips")),
             number(row.get("enforced_source_ips")),
+            h(row.get("protocols") or "-"),
+            h(", ".join(str(item) for item in (row.get("sample_source_ips") or [])[:5]) or "-"),
             h(", ".join(
                 f"{item.get('proposal_cidr')} ({item.get('source_ips')})"
                 for item in (row.get("prefix_proposals") or [])[:3]
@@ -567,6 +561,19 @@ def render_incidents(snapshot: Mapping[str, Any]) -> str:
         ]
         for row in snapshot.get("mail_auth_failures", [])
     ]
+    recent_rows = [
+        [
+            when(row.get("occurred_at")),
+            f"<code>{h(row.get('source_ip'))}</code>",
+            h(row.get("site_id")),
+            h(row.get("protocol") or "-"),
+            h(row.get("destination_port") or "-"),
+            h(row.get("auth_mechanism") or "-"),
+            h(row.get("account_class") or "-"),
+            f"<code>{h(row.get('campaign_id'))}</code>" if row.get("campaign_id") else "-",
+        ]
+        for row in snapshot.get("recent_mail_auth_failures", [])
+    ]
     mail_policy = snapshot.get("mail_account_policy") or {}
     if not mail_policy:
         mail_state = "Mail policy state not present in this snapshot."
@@ -581,6 +588,68 @@ def render_incidents(snapshot: Mapping[str, Any]) -> str:
             + ("on" if mail_policy.get("crowdsec_enforcement") else "dry-run (incident monitor only)")
             + f"; window {number(mail_policy.get('window_seconds'))} seconds."
         )
+    threshold_items = [
+        ("Enabled", "yes" if mail_policy.get("enabled") else "no"),
+        ("CrowdSec enforcement", "on" if mail_policy.get("crowdsec_enforcement") else "dry-run"),
+        ("Window (s)", number(mail_policy.get("window_seconds"))),
+        ("Failures / distinct IPs", f"{number(mail_policy.get('failure_threshold'))} / "
+            f"{number(mail_policy.get('distinct_source_ips'))}"),
+        ("Protected failures / distinct IPs", f"{number(mail_policy.get('protected_failure_threshold'))} / "
+            f"{number(mail_policy.get('protected_distinct_source_ips'))}"),
+        ("Min failures per banned IP", number(mail_policy.get("min_failures_per_ip"))),
+        ("Campaign review distinct IPs", number(mail_policy.get("campaign_review_distinct_ips"))),
+        ("Ban duration", h(mail_policy.get("ban_duration") or "-")),
+        ("Abuse reporting", "on" if mail_policy.get("abuse_reporting_enabled") else "off"),
+        ("Protected tokens configured", number(mail_policy.get("protected_account_tokens_configured"))),
+        ("Protected accounts file", "yes" if mail_policy.get("protected_accounts_file_configured") else "no"),
+    ]
+    thresholds = "<dl>" + "".join(
+        f"<dt>{h(label)}</dt><dd>{value}</dd>" for label, value in threshold_items
+    ) + "</dl>" if mail_policy else ""
+    return (
+        '<section id="mail"><h2>Mail authentication</h2>'
+        f'<p class="muted">{h(mail_state)}</p>{thresholds}</section>'
+        '<section id="mail-campaigns"><h2>Mail account slow-burn campaigns</h2>'
+        '<p class="muted">Per-IP enforcement only. Prefix and ASN groupings are '
+        "review-only proposals; no range, ASN, or country ban is automatic.</p>"
+        + table(
+            ["Campaign", "Site", "Account", "Status", "Failures", "IPs", "Per-IP incidents",
+             "Protocols", "Sample IPs", "Prefix proposals", "ASN groups", "Last"],
+            mail_rows,
+        )
+        + '</section><section id="mail-auth-failures"><h2>Mail auth failures by source</h2>'
+        '<p class="muted">Recent <code>mail_auth_failed</code> events grouped by source, '
+        "node, and protocol; account names and tokens are never shown.</p>"
+        + table(
+            ["Source", "Node", "Protocol", "Failures", "Accounts", "First", "Last"],
+            mail_failure_rows,
+        )
+        + '</section><section id="mail-recent-failures"><h2>Recent mail auth failures</h2>'
+        '<p class="muted">Individual events, newest first. Account names and tokens are '
+        "never shown; Campaign is the export-safe campaign id for the targeted account.</p>"
+        + table(
+            ["When", "Source", "Node", "Protocol", "Port", "Mechanism", "Account class", "Campaign"],
+            recent_rows,
+        )
+        + "</section>"
+    )
+
+
+def render_incidents(snapshot: Mapping[str, Any]) -> str:
+    incident_rows = [
+        [
+            f"<code>{h(row.get('source_ip'))}</code>",
+            h(row.get("rule_id")),
+            f'<span class="{status_class(row.get("report_status"))}">{h(row.get("report_status"))}</span>',
+            number(row.get("event_count")),
+            number(row.get("site_count")),
+            f"<code>{h(row.get('registered_cidr') or row.get('network_cidr'))}</code>",
+            h(row.get("asn_holder")),
+            when(row.get("last_seen")),
+            h(row.get("report_detail")),
+        ]
+        for row in snapshot.get("recent_incidents", [])
+    ]
     registration_policy = snapshot.get("registration_abuse_policy") or {}
     registration_rows = [
         [
@@ -619,21 +688,9 @@ def render_incidents(snapshot: Mapping[str, Any]) -> str:
     return '<section id="recent-incidents"><h2>Recent incidents</h2>' + table(
         ["Source", "Rule", "Report", "Events", "Sites", "Network", "Holder", "Last", "Detail"],
         incident_rows,
-    ) + '</section><section id="mail-auth-failures"><h2>Mail auth failures</h2>' + (
-        f'<p class="muted">{h(mail_state)} Recent <code>mail_auth_failed</code> '
-        "events grouped by source, node, and protocol; account names and tokens "
-        "are never shown.</p>"
-    ) + table(
-        ["Source", "Node", "Protocol", "Failures", "Accounts", "First", "Last"],
-        mail_failure_rows,
-    ) + '</section><section id="mail-campaigns"><h2>Mail account slow-burn campaigns</h2>' + (
-        '<p class="muted">Per-IP enforcement only. Prefix and ASN groupings are '
-        "review-only proposals; no range, ASN, or country ban is automatic.</p>"
-    ) + table(
-        ["Campaign", "Site", "Account", "Status", "Failures", "IPs", "Per-IP incidents",
-         "Prefix proposals", "ASN groups", "Last"],
-        mail_rows,
-    ) + '</section><section id="registration-abuse"><h2>Access Guard registration-abuse campaigns</h2>' + (
+    ) + "</section>" + render_mail(snapshot) + (
+        '<section id="registration-abuse"><h2>Access Guard registration-abuse campaigns</h2>'
+    ) + (
         f'<p class="muted">{h(registration_state)} Grouped by Access Guard fingerprint '
         "signature across all sites. Prefix and ASN groupings are review-only "
         "proposals; no range, ASN, or country ban is automatic.</p>"
@@ -1385,6 +1442,8 @@ class Handler(BaseHTTPRequestHandler):
                 title, body = "Traffic", render_traffic(snapshot)
             elif path == "/incidents":
                 title, body = "Incidents", render_incidents(snapshot)
+            elif path == "/mail":
+                title, body = "Mail", render_mail(snapshot)
             elif path == "/networks":
                 title, body = "Networks", render_networks(
                     snapshot,
