@@ -19,6 +19,8 @@ import subprocess
 from typing import Any, Iterator, Mapping, Sequence
 import urllib.parse
 
+import collector
+
 APP_VERSION = "0.5.6.0"
 UTC = dt.timezone.utc
 CRAWLER_IDENTITIES: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -253,6 +255,8 @@ def render_digest(
         )
     except sqlite3.OperationalError:
         mail_campaigns = []
+    registration_view = collector.read_registration_abuse_campaigns(connection, config, end_epoch)
+    registration_campaigns = registration_view["campaigns"][: int(review.get("max_rows", 20))]
 
     body = [
         "Argent Sentinel daily operator review",
@@ -357,11 +361,34 @@ def render_digest(
             )
     else:
         body.append("  none")
+    body.extend(["", "Access Guard registration-abuse campaigns (prefix/ASN proposals are review-only):"])
+    if not registration_view["enabled"]:
+        body.append("  policy disabled")
+    elif registration_campaigns:
+        for item in registration_campaigns:
+            body.extend(
+                [
+                    "",
+                    f"  Fingerprint: {item['fingerprint_signature'][:16]} on {', '.join(item['sites']) or '-'}",
+                    f"  Status: {item['status']}",
+                    f"  Events / denied / distinct source IPs: {item['events']} / {item['denied_events']} / {item['distinct_source_ips']}",
+                    f"  Top rules: {', '.join(item['top_rule_ids'][:5]) or '-'}",
+                    f"  First/last seen: {item['first_seen']} / {item['last_seen']}",
+                    "  Sample source IPs: " + (", ".join(item["sample_source_ips"][:5]) or "-"),
+                    "  Prefix proposals (review-only): "
+                    + (", ".join(f"{p['proposal_cidr']} ({p['source_ips']} IPs)" for p in item["prefix_proposals"][:5]) or "none"),
+                    "  ASN groups (review-only): "
+                    + (", ".join(f"AS{a['asn']} ({a['source_ips']} IPs)" for a in item["asn_summary"][:5]) or "none"),
+                ]
+            )
+    else:
+        body.append("  none")
     body.extend(
         [
             "",
             "HTTP 429 entries remain review telemetry only.",
-            "Mail prefix/ASN groupings never create automatic range, ASN, or country bans.",
+            "Mail and registration-abuse prefix/ASN groupings never create automatic",
+            "range, ASN, or country bans.",
             "CIDR recommendations require an audited operator action before",
             "the root-owned review processor may create a CrowdSec range decision.",
         ]

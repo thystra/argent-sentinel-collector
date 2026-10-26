@@ -73,6 +73,28 @@
 - Add `docs/registration-abuse-policy.md` and
   `tests/test_v0560_registration_abuse.py`.
 
+### Dashboard and digest visibility for mail and registration abuse (same unreleased 0.5.6.0)
+
+- Surface Access Guard `registration_abuse_campaigns` (previously `status`
+  only) in the dashboard snapshot, a new "Access Guard registration-abuse
+  campaigns" section on the Incidents page, and the daily review digest:
+  fingerprint prefix, sites, status, events/denied, distinct IPs, sample IPs,
+  top rule IDs, review-only prefix proposals and cached-ASN groups. The section
+  states the policy state (disabled, or enabled with per-IP CrowdSec `dry-run`
+  vs `on`) and that no range, ASN, or country ban is automatic.
+- The snapshot and digest compute campaigns through a new read-only collector
+  helper (`read_registration_abuse_campaigns`) over the `mode=ro` connection,
+  sharing the exact grouping code `status` uses; `trusted_cidrs` are excluded
+  and no network lookups are made. Snapshot JSON gains
+  `registration_abuse_policy` (enabled, crowdsec_enforcement, window_seconds)
+  and `registration_abuse_campaigns`.
+- Add overview counts and cards for lookback-window `mail_auth_failed` events
+  ("Mail auth failures") and `registration_abuse` events ("Registration abuse
+  events"), plus `overview.registration_abuse_campaigns`.
+- `packaging/build_debs.py` now also runs
+  `tests/test_v0560_registration_abuse.py` and the new
+  `tests/test_v0560_dashboard_registration.py` when tests are not skipped.
+
 ## 0.5.5.1
 ### Debian revision 0.5.5.1-2
 

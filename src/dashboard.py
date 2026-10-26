@@ -322,6 +322,12 @@ def render_overview(snapshot: Mapping[str, Any]) -> str:
             overview.get("network_reviews"),
             "/networks",
         ),
+        ("Mail auth failures", overview.get("mail_auth_failures"), "/incidents"),
+        (
+            "Registration abuse events",
+            overview.get("registration_abuse_events"),
+            "/incidents",
+        ),
         (
             "Unhealthy watchdogs",
             overview.get("watchdogs_unhealthy"),
@@ -545,6 +551,41 @@ def render_incidents(snapshot: Mapping[str, Any]) -> str:
         ]
         for row in snapshot.get("mail_account_campaigns", [])
     ]
+    registration_policy = snapshot.get("registration_abuse_policy") or {}
+    registration_rows = [
+        [
+            f"<code>{h(str(row.get('fingerprint_signature') or '')[:16])}</code>",
+            h(", ".join(row.get("sites") or []) or "-"),
+            f'<span class="{status_class(row.get("status"))}">{h(row.get("status"))}</span>',
+            f"{number(row.get('events'))} / {number(row.get('denied_events'))}",
+            number(row.get("distinct_source_ips")),
+            h(", ".join(str(item) for item in (row.get("sample_source_ips") or [])[:5]) or "-"),
+            h(", ".join(str(item) for item in (row.get("top_rule_ids") or [])[:3]) or "-"),
+            h(", ".join(
+                f"{item.get('proposal_cidr')} ({item.get('source_ips')})"
+                for item in (row.get("prefix_proposals") or [])[:3]
+            ) or "-"),
+            h(", ".join(
+                f"AS{item.get('asn')} ({item.get('source_ips')})"
+                for item in (row.get("asn_summary") or [])[:3]
+            ) or "-"),
+            when(row.get("last_seen")),
+        ]
+        for row in snapshot.get("registration_abuse_campaigns", [])
+    ]
+    if not registration_policy:
+        registration_state = "Policy state not present in this snapshot."
+    elif not registration_policy.get("enabled"):
+        registration_state = (
+            "registration_abuse_policy is disabled; events are stored but no "
+            "campaigns are evaluated."
+        )
+    else:
+        registration_state = (
+            "registration_abuse_policy enabled; per-IP CrowdSec decisions are "
+            + ("on" if registration_policy.get("crowdsec_enforcement") else "dry-run")
+            + f"; window {number(registration_policy.get('window_seconds'))} seconds."
+        )
     return "<section><h2>Recent incidents</h2>" + table(
         ["Source", "Rule", "Report", "Events", "Sites", "Network", "Holder", "Last", "Detail"],
         incident_rows,
@@ -555,6 +596,14 @@ def render_incidents(snapshot: Mapping[str, Any]) -> str:
         ["Campaign", "Site", "Account", "Status", "Failures", "IPs", "Per-IP incidents",
          "Prefix proposals", "ASN groups", "Last"],
         mail_rows,
+    ) + "</section><section><h2>Access Guard registration-abuse campaigns</h2>" + (
+        f'<p class="muted">{h(registration_state)} Grouped by Access Guard fingerprint '
+        "signature across all sites. Prefix and ASN groupings are review-only "
+        "proposals; no range, ASN, or country ban is automatic.</p>"
+    ) + table(
+        ["Fingerprint", "Sites", "Status", "Events / denied", "IPs", "Sample IPs",
+         "Top rules", "Prefix proposals", "ASN groups", "Last"],
+        registration_rows,
     ) + "</section>"
 
 

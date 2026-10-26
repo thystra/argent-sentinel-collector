@@ -69,6 +69,12 @@ event counts, top rule IDs, sample IPs, bounded prefix proposals (≥
 `campaign_prefix_min_ips` IPs per `/24` or `/48`), and cached-ASN groups.
 Everything is `review_only: true`; nothing here creates incidents or decisions.
 
+The same view (computed read-only from the collector database, `trusted_cidrs`
+excluded) appears in the dashboard snapshot as `registration_abuse_campaigns`,
+on the dashboard Incidents page under "Access Guard registration-abuse
+campaigns", and in the daily review digest. The overview also counts
+`registration_abuse` events in the dashboard lookback window.
+
 ## Defaults
 
 | Key | Default | Meaning |
