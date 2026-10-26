@@ -45,7 +45,27 @@
       "submission": 587,
       "smtps": 465
     },
-    "max_events_per_batch": 500
+    "max_events_per_batch": 500,
+    "log_files": [
+      {"path": "/var/log/mail.log", "components": ["postfix"]}
+    ],
+    "log_cursor_file": "/var/lib/argent-sentinel/agent/mail-log.cursor",
+    "max_log_bytes_per_run": 16777216,
+    "account_lookup": {
+      "enabled": true,
+      "backend": "doveadm",
+      "doveadm_path": "/usr/bin/doveadm",
+      "auth_userdb_socket": "/run/dovecot/auth-userdb",
+      "auth_userdb_service": "argent-sentinel",
+      "timeout_seconds": 2,
+      "positive_ttl_seconds": 600,
+      "negative_ttl_seconds": 300,
+      "error_ttl_seconds": 60,
+      "max_lookups_per_run": 200,
+      "max_cache_entries": 5000,
+      "cache_file": "/var/lib/argent-sentinel/agent/mail-account-cache.json",
+      "auth_verbose_fallback": true
+    }
   },
   "local_address_protection": {
     "enabled": true,

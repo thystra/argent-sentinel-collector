@@ -3,7 +3,7 @@
 Argent Sentinel is a self-hosted security event collector, correlation engine,
 CrowdSec decision bridge, and guarded abuse-reporting system.
 
-Version 0.5.6.1 combines authenticated event transport, central policy,
+Version 0.5.7.0 combines authenticated event transport, central policy,
 a read-only dashboard, and per-site traffic analytics:
 
 ```text
@@ -498,6 +498,17 @@ dry-run / incident monitor **even when the global `crowdsec.enabled` is true**:
 incidents and campaigns are recorded, no mail ban is issued, and other policies
 keep enforcing. Prefix and ASN groupings are review-only. Protected mailboxes are configured on the host
 only, never in git. See `docs/mail-auth-events.md`.
+
+Since 0.5.7.0 the agent classifies every mail failure at ingest with a
+short-TTL, node-local userdb lookup (`doveadm user`, or the Dovecot
+auth-userdb socket): `account_exists` true / false / null and
+`failure_reason` bad_password / unknown_user / unknown. Valid-mailbox attacks
+keep the account-keyed slow-burn rule; failures against nonexistent accounts
+feed a separate per-source-IP `mail-account-probe` rule whose CrowdSec gate,
+`probe_crowdsec_enforcement`, defaults to false. Postfix SASL failures are
+also tailed from `/var/log/mail.log` (Postfix `maillog_file` bypasses
+journald). Existence is local-only: never in abuse reports, XARF, or CrowdSec
+decisions, and the digest shows only aggregate counts.
 
 ## Access Guard registration-abuse policy
 

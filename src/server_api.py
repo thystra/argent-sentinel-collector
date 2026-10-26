@@ -45,7 +45,7 @@ except ModuleNotFoundError:
     sys.modules.setdefault("local_protection", local_protection)
     _LOCAL_PROTECTION_SPEC.loader.exec_module(local_protection)
 
-APP_VERSION = "0.5.6.1"
+APP_VERSION = "0.5.7.0"
 LOG = logging.getLogger("argent-sentinel-api")
 
 DEFAULTS: dict[str, Any] = {

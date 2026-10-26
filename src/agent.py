@@ -2,7 +2,8 @@
 """Argent Sentinel node agent.
 
 Stages local producer files, captures bounded OpenSSH and mail (Dovecot,
-Postfix SASL) authentication failures from systemd-journald, and delivers
+Postfix SASL) authentication failures from systemd-journald and the Postfix
+mail log file, and delivers
 immutable transport envelopes to the central Sentinel HTTPS endpoint.  The
 agent never sends abuse mail or changes firewall state.
 """
@@ -51,7 +52,7 @@ except ModuleNotFoundError:
     sys.modules.setdefault("local_protection", local_protection)
     _LOCAL_PROTECTION_SPEC.loader.exec_module(local_protection)
 
-APP_VERSION = "0.5.6.1"
+APP_VERSION = "0.5.7.0"
 UTC = dt.timezone.utc
 LOG = logging.getLogger("argent-sentinel-agent")
 
@@ -113,6 +114,32 @@ DEFAULTS: dict[str, Any] = {
         "destination_ip": "",
         "postfix_service_ports": {"smtp": 25, "submission": 587, "smtps": 465},
         "max_events_per_batch": 500,
+        # Postfix with ``maillog_file`` (and rsyslog mail.log) never reaches
+        # journald, so Postfix SASL failures are tailed from the file. A
+        # component covered by an existing file is ignored in the journal
+        # stream, so a host may keep ``postfix@-.service`` in ``units`` for
+        # journald-only Postfix without double counting.
+        "log_files": [{"path": "/var/log/mail.log", "components": ["postfix"]}],
+        "log_cursor_file": "/var/lib/argent-sentinel/agent/mail-log.cursor",
+        "max_log_bytes_per_run": 16777216,
+        # Node-local account-existence classification at ingest. Never changes
+        # what Dovecot/Postfix answer the client; results stay on the node
+        # except as event metadata for the local collector/dashboard.
+        "account_lookup": {
+            "enabled": True,
+            "backend": "doveadm",
+            "doveadm_path": "/usr/bin/doveadm",
+            "auth_userdb_socket": "/run/dovecot/auth-userdb",
+            "auth_userdb_service": "argent-sentinel",
+            "timeout_seconds": 2,
+            "positive_ttl_seconds": 600,
+            "negative_ttl_seconds": 300,
+            "error_ttl_seconds": 60,
+            "max_lookups_per_run": 200,
+            "max_cache_entries": 5000,
+            "cache_file": "/var/lib/argent-sentinel/agent/mail-account-cache.json",
+            "auth_verbose_fallback": True,
+        },
     },
 }
 
@@ -217,6 +244,49 @@ def validate_mail_config(mail: Any) -> None:
     for name, port in ports.items():
         if not isinstance(name, str) or not 1 <= int(port) <= 65535:
             raise AgentError("mail.postfix_service_ports values must be valid ports")
+    log_files = mail.get("log_files", [])
+    if not isinstance(log_files, list):
+        raise AgentError("mail.log_files must be a list")
+    for index, entry in enumerate(log_files):
+        where = f"mail.log_files[{index}]"
+        if not isinstance(entry, Mapping):
+            raise AgentError(f"{where} must be an object with path and components")
+        path = entry.get("path")
+        if not isinstance(path, str) or not path.startswith("/") or "\0" in path:
+            raise AgentError(f"{where}.path must be an absolute path")
+        components = entry.get("components", ["postfix"])
+        if (
+            not isinstance(components, list)
+            or not components
+            or not all(item in MAIL_LOG_COMPONENTS for item in components)
+        ):
+            raise AgentError(f"{where}.components must be a non-empty subset of {list(MAIL_LOG_COMPONENTS)}")
+    if log_files and not str(mail.get("log_cursor_file", "")).startswith("/"):
+        raise AgentError("mail.log_cursor_file must be an absolute path")
+    if int(mail.get("max_log_bytes_per_run", 0)) < 4096:
+        raise AgentError("mail.max_log_bytes_per_run must be at least 4096")
+    lookup = mail.get("account_lookup", {})
+    if not isinstance(lookup, Mapping):
+        raise AgentError("mail.account_lookup must be an object")
+    for name in ("enabled", "auth_verbose_fallback"):
+        if not isinstance(lookup.get(name, False), bool):
+            raise AgentError(f"mail.account_lookup.{name} must be boolean")
+    if lookup.get("backend", "none") not in MAIL_ACCOUNT_LOOKUP_BACKENDS:
+        raise AgentError(f"mail.account_lookup.backend must be one of {list(MAIL_ACCOUNT_LOOKUP_BACKENDS)}")
+    for name in ("positive_ttl_seconds", "negative_ttl_seconds", "error_ttl_seconds"):
+        value = int(lookup.get(name, 0))
+        if not 0 <= value <= 86400:
+            raise AgentError(f"mail.account_lookup.{name} must be between 0 and 86400")
+    for name in ("max_lookups_per_run", "max_cache_entries"):
+        if int(lookup.get(name, 1)) < 1:
+            raise AgentError(f"mail.account_lookup.{name} must be positive")
+    timeout = float(lookup.get("timeout_seconds", 2))
+    if not 0 < timeout <= 30:
+        raise AgentError("mail.account_lookup.timeout_seconds must be in (0, 30]")
+    for name in ("doveadm_path", "auth_userdb_socket", "cache_file"):
+        value = lookup.get(name, "")
+        if not isinstance(value, str) or (value and not value.startswith("/")):
+            raise AgentError(f"mail.account_lookup.{name} must be an absolute path")
 
 
 UNIT_NAME_RE = re.compile(r"[A-Za-z0-9@:._\\-]{1,255}")
@@ -524,6 +594,14 @@ def collect_sshd(config: Mapping[str, Any]) -> int:
 # ---------------------------------------------------------------------------
 
 MAIL_PRIVACY_DOMAIN = "mail"
+# Separate HMAC domain for the node-local account-existence cache so cache
+# keys never equal the exported account token.
+MAIL_LOOKUP_PRIVACY_DOMAIN = "mail-lookup"
+MAIL_ACCOUNT_LOOKUP_BACKENDS = ("doveadm", "auth-userdb", "none")
+MAIL_LOG_COMPONENTS = ("postfix", "dovecot")
+MAIL_FAILURE_REASONS = ("unknown_user", "bad_password", "unknown")
+# doveadm exit status for "user doesn't exist" (sysexits EX_NOUSER).
+DOVEADM_EX_NOUSER = 67
 
 DOVECOT_LOGIN_RE = re.compile(
     r"^(?P<proto>imap|pop3|managesieve|submission)-login:\s+"
@@ -541,6 +619,20 @@ DOVECOT_LIP_RE = re.compile(r"\blip=(?P<ip>[0-9A-Fa-f:.]+)")
 DOVECOT_RPORT_RE = re.compile(r"\brport=(?P<port>\d{1,5})\b")
 DOVECOT_LPORT_RE = re.compile(r"\blport=(?P<port>\d{1,5})\b")
 DOVECOT_TLS_RE = re.compile(r",\s*(?:TLS|TLS handshaking)(?=[,:\s]|$)")
+DOVECOT_SESSION_RE = re.compile(r"\bsession=<(?P<session>[^>]{1,128})>")
+# auth_verbose=yes companion lines, e.g.
+#   auth: passwd-file(alice@example.org,198.51.100.7,<sess>): unknown user
+#   auth-worker(123): pam(alice,198.51.100.7,<sess>): pam_authenticate() failed: ... (password mismatch?)
+#   auth: sql(bob,198.51.100.8,<sess>): Password mismatch
+# Only used in memory to correlate a login summary line; never exported.
+DOVECOT_AUTH_DETAIL_RE = re.compile(
+    r"^auth(?:-worker\(\d+\))?:\s+(?:(?:Info|Warning|Error|Debug):\s+)?"
+    r"(?:conn [^:]{0,128}:\s+)?(?:request [^:]{0,64}:\s+)?"
+    r"(?P<driver>[A-Za-z0-9_-]{1,32})\((?P<user>[^,()]{0,512}),(?P<ip>[0-9A-Fa-f:.]{2,64})"
+    r"(?:,<(?P<session>[^>]{1,128})>)?\):\s+(?P<detail>.*)$",
+)
+DOVECOT_UNKNOWN_USER_RE = re.compile(r"\bunknown user\b", re.IGNORECASE)
+DOVECOT_PASSWORD_MISMATCH_RE = re.compile(r"\bpassword mismatch\b", re.IGNORECASE)
 
 POSTFIX_SASL_FAILED_RE = re.compile(
     r"(?:^|\s)(?:warning:\s+)?(?P<client>[^\s\[\]]{1,255})\[(?P<ip>[^\]\s]{1,64})\]:\s+"
@@ -553,6 +645,18 @@ POSTFIX_SASL_STAGES = {
     "UGFzc3dvcmQ6": "password",   # "Password:"
     "VXNlcm5hbWU6": "username",   # "Username:"
 }
+
+# Traditional (Postfix maillog_file / BSD syslog) and RFC 3339 (rsyslog on
+# Ubuntu 24.04) line prefixes:
+#   Oct 26 17:10:00 host postfix/submission/smtpd[123]: warning: ...
+#   2026-10-26T17:10:00.123456-04:00 host postfix/smtpd[123]: warning: ...
+SYSLOG_LINE_RE = re.compile(
+    r"^(?:(?P<iso>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})?)"
+    r"|(?P<bsd>[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}))\s+"
+    r"(?P<host>\S{1,255})\s+(?P<ident>[^\s\[\]:]{1,128})(?:\[(?P<pid>\d{1,10})\])?:\s"
+    r"(?P<message>.*)$"
+)
+MAIL_LOG_MAX_LINE_BYTES = 16384
 
 
 def journal_message(row: Mapping[str, Any]) -> str:
@@ -599,6 +703,258 @@ def postfix_service_name(identifier: str) -> str | None:
     return parts[1].lower() if len(parts) >= 3 else "smtp"
 
 
+def mail_row_component(row: Mapping[str, Any]) -> str | None:
+    """Classify a journal/log row as ``postfix`` or ``dovecot`` (or None)."""
+    identifier = str(row.get("SYSLOG_IDENTIFIER", "") or "").strip().lower()
+    if identifier.startswith("postfix"):
+        return "postfix"
+    if identifier.startswith("dovecot"):
+        return "dovecot"
+    message = journal_message(row)
+    if DOVECOT_LOGIN_RE.match(message) or message.startswith(("auth:", "auth-worker(")):
+        return "dovecot"
+    return None
+
+
+# -- account existence ------------------------------------------------------
+
+def mail_lookup_name_is_safe(username: str) -> bool:
+    """Reject names that a userdb lookup must not see verbatim.
+
+    ``doveadm user`` treats ``*``/``?`` as a listing mask and a leading ``-`` as
+    an option; the auth-userdb protocol is tab/newline framed. Such names are
+    left unresolved (``account_exists: null``) rather than guessed.
+    """
+    if not username or len(username) > 255 or username.startswith("-"):
+        return False
+    if any(character in username for character in "*?%\\"):
+        return False
+    return not any(ord(character) < 0x20 or ord(character) == 0x7F or character.isspace()
+                   for character in username)
+
+
+class MailAccountResolver:
+    """Short-TTL, bounded, node-local account-existence lookups.
+
+    Answers ``True`` (userdb has the account), ``False`` (userdb says the user
+    does not exist), or ``None`` (lookup disabled, unsafe name, backend error,
+    or per-run budget exhausted). The cache is keyed by an HMAC of the account
+    name in a separate ``mail-lookup`` domain and stored 0600 on the node; no
+    plaintext account name is written anywhere. The answer never changes what
+    Dovecot or Postfix tell the client.
+    """
+
+    def __init__(self, settings: Mapping[str, Any], secret: bytes, node_id: str,
+                 *, now: float | None = None) -> None:
+        self.settings = dict(settings or {})
+        self.secret = secret
+        self.node_id = node_id
+        self.backend = str(self.settings.get("backend", "none"))
+        self.enabled = bool(self.settings.get("enabled")) and self.backend != "none"
+        self.now = float(now if now is not None else time.time())
+        self.cache_path = Path(str(self.settings.get("cache_file") or "")) if self.settings.get("cache_file") else None
+        self.cache: dict[str, dict[str, Any]] = {}
+        self.dirty = False
+        self.unavailable = False
+        self.lookups = 0
+        self.stats = {"cache_hits": 0, "lookups": 0, "errors": 0, "skipped": 0}
+        if self.enabled:
+            self._load_cache()
+
+    # cache ------------------------------------------------------------------
+    def _load_cache(self) -> None:
+        if self.cache_path is None or not self.cache_path.exists():
+            return
+        try:
+            data = json.loads(self.cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            LOG.warning("Ignoring unreadable mail account cache %s: %s", self.cache_path, exc)
+            return
+        entries = data.get("entries") if isinstance(data, Mapping) else None
+        if not isinstance(entries, Mapping):
+            return
+        for key, entry in entries.items():
+            if not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key):
+                continue
+            if not isinstance(entry, Mapping):
+                continue
+            exists = entry.get("exists")
+            try:
+                expires = float(entry.get("expires", 0))
+            except (TypeError, ValueError):
+                continue
+            if exists not in (True, False, None) or expires <= self.now:
+                self.dirty = True
+                continue
+            self.cache[key] = {"exists": exists, "expires": expires}
+
+    def save(self) -> None:
+        if not self.enabled or self.cache_path is None or not self.dirty:
+            return
+        live = {key: value for key, value in self.cache.items() if float(value["expires"]) > self.now}
+        limit = max(1, int(self.settings.get("max_cache_entries", 5000)))
+        if len(live) > limit:
+            keep = sorted(live, key=lambda key: float(live[key]["expires"]), reverse=True)[:limit]
+            live = {key: live[key] for key in keep}
+        payload = json.dumps({"version": 1, "entries": live}, sort_keys=True, separators=(",", ":"))
+        try:
+            atomic_write(self.cache_path, (payload + "\n").encode(), 0o600)
+        except OSError as exc:
+            LOG.warning("Cannot write mail account cache %s: %s", self.cache_path, exc)
+            return
+        self.dirty = False
+
+    def cache_key(self, username: str) -> str:
+        return privacy_token(self.secret, self.node_id, username, MAIL_LOOKUP_PRIVACY_DOMAIN)
+
+    def _remember(self, key: str, exists: bool | None) -> None:
+        if exists is True:
+            ttl = int(self.settings.get("positive_ttl_seconds", 600))
+        elif exists is False:
+            ttl = int(self.settings.get("negative_ttl_seconds", 300))
+        else:
+            ttl = int(self.settings.get("error_ttl_seconds", 60))
+        if ttl <= 0:
+            return
+        self.cache[key] = {"exists": exists, "expires": self.now + ttl}
+        self.dirty = True
+
+    # lookup -----------------------------------------------------------------
+    def lookup(self, username: str | None) -> tuple[bool | None, str | None]:
+        """Return ``(exists, source)``; source is the backend, ``cache``, or None."""
+        if not self.enabled or not username:
+            return None, None
+        if not mail_lookup_name_is_safe(username):
+            self.stats["skipped"] += 1
+            return None, None
+        key = self.cache_key(username)
+        cached = self.cache.get(key)
+        if cached is not None and float(cached["expires"]) > self.now:
+            self.stats["cache_hits"] += 1
+            return cached["exists"], "cache" if cached["exists"] is not None else None
+        if self.unavailable or self.lookups >= int(self.settings.get("max_lookups_per_run", 200)):
+            self.stats["skipped"] += 1
+            return None, None
+        self.lookups += 1
+        self.stats["lookups"] += 1
+        try:
+            if self.backend == "doveadm":
+                exists = self._lookup_doveadm(username)
+            else:
+                exists = self._lookup_auth_userdb(username)
+        except FileNotFoundError as exc:
+            # Backend not installed / socket absent: stop for this run, do not
+            # cache, so a later install takes effect immediately.
+            self.unavailable = True
+            self.stats["errors"] += 1
+            LOG.warning("Mail account lookup backend %s unavailable: %s", self.backend, exc)
+            return None, None
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            self.stats["errors"] += 1
+            LOG.debug("Mail account lookup failed: %s", exc)
+            exists = None
+        self._remember(key, exists)
+        return exists, (self.backend if exists is not None else None)
+
+    def _timeout(self) -> float:
+        return float(min(max(float(self.settings.get("timeout_seconds", 2)), 0.1), 30.0))
+
+    def _lookup_doveadm(self, username: str) -> bool | None:
+        # argv only, never a shell; the name was screened by
+        # mail_lookup_name_is_safe() so it cannot be an option or a mask.
+        result = subprocess.run(
+            [str(self.settings.get("doveadm_path", "/usr/bin/doveadm")), "user", username],
+            text=True, capture_output=True, timeout=self._timeout(), check=False,
+        )
+        if result.returncode == 0:
+            return True
+        if result.returncode == DOVEADM_EX_NOUSER:
+            return False
+        return None
+
+    def _lookup_auth_userdb(self, username: str) -> bool | None:
+        """Dovecot auth-master protocol USER lookup on the auth-userdb socket."""
+        import socket
+
+        path = str(self.settings.get("auth_userdb_socket", "/run/dovecot/auth-userdb"))
+        if not Path(path).exists():
+            raise FileNotFoundError(path)
+        service = str(self.settings.get("auth_userdb_service", "argent-sentinel"))
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", service):
+            raise ValueError("invalid auth_userdb_service")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(self._timeout())
+            connection.connect(path)
+            request = f"VERSION\t1\t0\nCPID\t{os.getpid()}\nUSER\t1\t{username}\tservice={service}\n"
+            connection.sendall(request.encode("utf-8"))
+            buffer = b""
+            while len(buffer) < 65536:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                for line in buffer.split(b"\n")[:-1]:
+                    fields = line.decode("utf-8", "replace").split("\t")
+                    if len(fields) >= 2 and fields[1] == "1":
+                        if fields[0] == "USER":
+                            return True
+                        if fields[0] == "NOTFOUND":
+                            return False
+                        if fields[0] == "FAIL":
+                            return None
+        return None
+
+
+class MailAuthVerboseHints:
+    """In-memory ``auth_verbose`` correlation (fallback only; never exported).
+
+    Indexes Dovecot auth/auth-worker detail lines by session id and by
+    ``(account, source IP)`` so a later login summary or Postfix SASL line can
+    learn ``unknown user`` vs ``password mismatch`` when no userdb lookup is
+    available. Requires ``auth_verbose = yes``; never ``auth_verbose_passwords``.
+    """
+
+    def __init__(self) -> None:
+        self.by_session: dict[str, bool] = {}
+        self.by_account_ip: dict[tuple[str, str], bool] = {}
+
+    def __len__(self) -> int:
+        return len(self.by_session) + len(self.by_account_ip)
+
+    def add_row(self, row: Mapping[str, Any]) -> None:
+        match = DOVECOT_AUTH_DETAIL_RE.match(journal_message(row))
+        if not match:
+            return
+        detail = match.group("detail")
+        if DOVECOT_UNKNOWN_USER_RE.search(detail):
+            exists = False
+        elif DOVECOT_PASSWORD_MISMATCH_RE.search(detail):
+            exists = True
+        else:
+            return
+        source_ip = normalize_mail_ip(match.group("ip"))
+        user = match.group("user").strip().casefold()
+        if match.group("session"):
+            self.by_session[match.group("session")] = exists
+        if user and source_ip:
+            self.by_account_ip[(user, source_ip)] = exists
+
+    def match(self, session: str | None, username: str | None, source_ip: str | None) -> bool | None:
+        if session and session in self.by_session:
+            return self.by_session[session]
+        if username and source_ip:
+            return self.by_account_ip.get((username.casefold(), source_ip))
+        return None
+
+
+def mail_failure_reason(exists: bool | None) -> str:
+    if exists is True:
+        return "bad_password"
+    if exists is False:
+        return "unknown_user"
+    return "unknown"
+
+
 def parse_mail_row(
     row: Mapping[str, Any],
     *,
@@ -606,20 +962,26 @@ def parse_mail_row(
     secret: bytes,
     destination_ip: str,
     postfix_service_ports: Mapping[str, Any] | None = None,
+    resolver: MailAccountResolver | None = None,
+    hints: MailAuthVerboseHints | None = None,
 ) -> dict[str, Any] | None:
-    """Parse one Dovecot or Postfix SASL authentication-failure journal row.
+    """Parse one Dovecot or Postfix SASL authentication-failure row.
 
-    Only high-confidence summary lines are accepted, so one failed connection
-    produces one event:
+    Rows come from journald or from a tailed syslog-format file (normalised to
+    the same journal-like mapping). Only high-confidence summary lines are
+    accepted, so one failed connection produces one event:
 
     * Dovecot ``<proto>-login: ... (auth failed, N attempts ...): user=<..>,
       method=.., rip=.., lip=..`` disconnect/abort lines.  Auth-worker detail
-      lines (``passwd-file(...)``, ``pam(...)``) are ignored as companions.
+      lines (``passwd-file(...)``, ``pam(...)``) never become events; they are
+      only an optional ``auth_verbose`` correlation hint.
     * Postfix ``warning: host[ip]: SASL MECH authentication failed: ...`` from
       any ``postfix*/.../smtpd`` identifier.
 
-    Account names are never exported; only an HMAC token in the ``mail``
-    privacy domain is emitted.
+    Account existence is classified at ingest (``account_exists`` true / false
+    / null, ``failure_reason`` bad_password / unknown_user / unknown) from a
+    node-local userdb lookup, falling back to ``auth_verbose`` hints. Account
+    names are never exported; only an HMAC token in the ``mail`` privacy domain.
     """
     message = journal_message(row)
     if not message:
@@ -629,6 +991,7 @@ def parse_mail_row(
     source_port: int | None = None
     destination_port: int | None = None
     local_ip: str | None = None
+    session: str | None = None
     username: str | None
 
     login = DOVECOT_LOGIN_RE.match(message)
@@ -650,6 +1013,8 @@ def parse_mail_row(
         lport = DOVECOT_LPORT_RE.search(message)
         source_port = _mail_port(rport.group("port") if rport else None)
         destination_port = _mail_port(lport.group("port") if lport else None)
+        session_match = DOVECOT_SESSION_RE.search(message)
+        session = session_match.group("session") if session_match else None
         application_protocol = protocol.upper()
         metadata = {
             "mail_component": "dovecot",
@@ -683,12 +1048,27 @@ def parse_mail_row(
             "sasl_stage": POSTFIX_SASL_STAGES.get(reason, "other" if reason else "none"),
         }
 
+    exists: bool | None = None
+    lookup_source: str | None = None
     if username:
-        metadata["account_class"] = "submitted"
+        if resolver is not None:
+            exists, lookup_source = resolver.lookup(username)
+        if exists is None and hints is not None:
+            hinted = hints.match(session, username, source_ip)
+            if hinted is not None:
+                exists, lookup_source = hinted, "auth_verbose"
+        # SSH-style classes: known / invalid; "submitted" when existence is
+        # unresolved (unchanged pre-0.5.7.0 meaning).
+        metadata["account_class"] = "known" if exists is True else "invalid" if exists is False else "submitted"
         account_key: str | None = privacy_token(secret, node_id, username, MAIL_PRIVACY_DOMAIN)
     else:
         metadata["account_class"] = "empty" if metadata["mail_component"] == "dovecot" else "unresolved"
         account_key = None
+    metadata["account_exists"] = exists
+    metadata["failure_reason"] = mail_failure_reason(exists)
+    metadata["account_lookup"] = lookup_source
+    if row.get("_ARGENT_LOG_SOURCE"):
+        metadata["log_source"] = "file"
     cursor = str(row.get("__CURSOR", ""))
     identity = cursor or f"{row.get('__REALTIME_TIMESTAMP', '')}\0{message}"
     event_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"argent-sentinel:mail:{node_id}:{identity}"))
@@ -721,12 +1101,25 @@ def load_privacy_secret(path: Path, label: str) -> bytes:
     return secret
 
 
-def build_mail_batches(config: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def build_mail_batches(
+    config: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    resolver: MailAccountResolver | None = None,
+) -> list[dict[str, Any]]:
     mail = config["mail"]
     secret = load_privacy_secret(Path(str(mail["privacy_key_file"])), "Mail")
     node_id = str(config["node"]["id"])
     destination_ip = str(mail.get("destination_ip", "")).strip()
     ports = mail.get("postfix_service_ports") or {}
+    own_resolver = resolver is None
+    if resolver is None:
+        resolver = MailAccountResolver(mail.get("account_lookup") or {}, secret, node_id)
+    hints: MailAuthVerboseHints | None = None
+    if (mail.get("account_lookup") or {}).get("auth_verbose_fallback", True):
+        hints = MailAuthVerboseHints()
+        for row in rows:
+            hints.add_row(row)
     events: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in rows:
@@ -736,10 +1129,14 @@ def build_mail_batches(config: Mapping[str, Any], rows: Sequence[Mapping[str, An
             secret=secret,
             destination_ip=destination_ip,
             postfix_service_ports=ports,
+            resolver=resolver,
+            hints=hints,
         )
         if event is not None and event["event_uuid"] not in seen:
             seen.add(event["event_uuid"])
             events.append(event)
+    if own_resolver:
+        resolver.save()
     if not events:
         return []
     limit = int(mail["max_events_per_batch"])
@@ -762,25 +1159,239 @@ def build_mail_batches(config: Mapping[str, Any], rows: Sequence[Mapping[str, An
     return batches
 
 
+# -- syslog-format file tail (Postfix maillog_file / rsyslog mail.log) -------
+
+def parse_syslog_time(match: re.Match[str], now: dt.datetime | None = None) -> dt.datetime | None:
+    now = now or utc_now()
+    if match.group("iso"):
+        text = match.group("iso")
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        elif re.search(r"[+-]\d{4}$", text):
+            text = text[:-2] + ":" + text[-2:]
+        if "." in text:
+            head, _, rest = text.partition(".")
+            digits = re.match(r"\d+", rest)
+            fraction = digits.group(0) if digits else ""
+            text = f"{head}.{(fraction + '000000')[:6]}{rest[len(fraction):]}"
+        try:
+            value = dt.datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if value.tzinfo is None:
+            value = value.astimezone()
+        return value.astimezone(UTC)
+    bsd = " ".join(match.group("bsd").split())
+    local_now = now.astimezone()
+    for year in (local_now.year, local_now.year - 1):
+        try:
+            naive = dt.datetime.strptime(f"{year} {bsd}", "%Y %b %d %H:%M:%S")
+        except ValueError:
+            return None
+        value = naive.astimezone()  # host local time zone, as syslog wrote it
+        # A timestamp more than a day ahead belongs to last year (Dec -> Jan).
+        if value <= local_now + dt.timedelta(days=1):
+            return value.astimezone(UTC)
+    return None
+
+
+def syslog_line_row(line: str, cursor: str, now: dt.datetime | None = None) -> dict[str, Any] | None:
+    """Normalise one syslog-format line into a journal-like row."""
+    match = SYSLOG_LINE_RE.match(line)
+    if not match:
+        return None
+    occurred = parse_syslog_time(match, now)
+    if occurred is None:
+        return None
+    return {
+        "MESSAGE": match.group("message"),
+        "SYSLOG_IDENTIFIER": match.group("ident"),
+        "__REALTIME_TIMESTAMP": str(int(occurred.timestamp() * 1_000_000)),
+        "__CURSOR": cursor,
+        "_ARGENT_LOG_SOURCE": "file",
+    }
+
+
+def load_mail_log_cursor(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        LOG.warning("Ignoring unreadable mail log cursor %s: %s", path, exc)
+        return {}
+    files = data.get("files") if isinstance(data, Mapping) else None
+    return dict(files) if isinstance(files, Mapping) else {}
+
+
+def _rotated_candidates(path: Path) -> list[Path]:
+    return [path.with_name(path.name + suffix) for suffix in (".1", ".0", "-1")]
+
+
+def read_mail_log_file(
+    path: Path,
+    state: Mapping[str, Any] | None,
+    *,
+    components: Sequence[str],
+    max_bytes: int,
+    initial_lookback_minutes: int,
+    now: dt.datetime | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Tail one syslog-format file after a durable (device, inode, offset) cursor.
+
+    * Same inode, size >= offset: continue at offset.
+    * Same inode, size < offset: copytruncate rotation, restart at 0.
+    * New inode: finish the rotated file (``.1``/``.0``/``-1`` with the old
+      inode) from the old offset, then read the new file from 0.
+    * No cursor: start ``initial_lookback_minutes`` back (bounded by
+      ``max_bytes`` from the end of the file).
+
+    Only complete newline-terminated lines are consumed. At most ``max_bytes``
+    are read per run; the cursor resumes the remainder next run. Returns the
+    rows and the new cursor entry (None when the file is absent/unreadable).
+    """
+    now = now or utc_now()
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return [], dict(state) if state else None
+    except OSError as exc:
+        LOG.warning("Cannot stat mail log %s: %s", path, exc)
+        return [], dict(state) if state else None
+    wanted = set(components)
+    segments: list[tuple[Path, int, int, int]] = []  # (path, dev, ino, start)
+    cutoff: dt.datetime | None = None
+    if state and int(state.get("dev", -1)) == info.st_dev and int(state.get("ino", -1)) == info.st_ino:
+        offset = int(state.get("offset", 0))
+        segments.append((path, info.st_dev, info.st_ino, offset if 0 <= offset <= info.st_size else 0))
+    elif state:
+        for candidate in _rotated_candidates(path):
+            try:
+                rotated = candidate.stat()
+            except OSError:
+                continue
+            if rotated.st_dev == int(state.get("dev", -1)) and rotated.st_ino == int(state.get("ino", -1)):
+                offset = int(state.get("offset", 0))
+                if 0 <= offset < rotated.st_size:
+                    segments.append((candidate, rotated.st_dev, rotated.st_ino, offset))
+                break
+        else:
+            LOG.info("Mail log %s rotated and the previous file is gone; continuing from the new file", path)
+        segments.append((path, info.st_dev, info.st_ino, 0))
+    else:
+        cutoff = now - dt.timedelta(minutes=int(initial_lookback_minutes))
+        segments.append((path, info.st_dev, info.st_ino, max(0, info.st_size - int(max_bytes))))
+
+    rows: list[dict[str, Any]] = []
+    budget = int(max_bytes)
+    new_state: dict[str, Any] = {"dev": info.st_dev, "ino": info.st_ino, "offset": 0}
+    for index, (segment_path, device, inode, start) in enumerate(segments):
+        new_state = {"dev": device, "ino": inode, "offset": start}
+        try:
+            handle = segment_path.open("rb")
+        except OSError as exc:
+            LOG.warning("Cannot read mail log %s: %s", segment_path, exc)
+            return rows, (dict(state) if state else None)
+        with handle:
+            opened = os.fstat(handle.fileno())
+            if (opened.st_dev, opened.st_ino) != (device, inode):
+                # Rotated between stat() and open(); retry next run.
+                return rows, (dict(state) if state else None)
+            handle.seek(start)
+            data = handle.read(max(0, budget))
+        budget -= len(data)
+        consumed = data.rfind(b"\n") + 1
+        if consumed == 0 and budget <= 0 and data:
+            consumed = len(data)  # one over-long fragment: skip it
+        position = start
+        first = start != 0 and index == 0 and not state  # lookback start may be mid-line
+        for raw_line in data[:consumed].split(b"\n")[:-1] if consumed else []:
+            line_offset = position
+            position += len(raw_line) + 1
+            if first:
+                first = False
+                continue
+            if len(raw_line) > MAIL_LOG_MAX_LINE_BYTES:
+                continue
+            line = raw_line.decode("utf-8", "replace").rstrip("\r")
+            item = syslog_line_row(line, f"file:{device}:{inode}:{line_offset}", now)
+            if item is None or mail_row_component(item) not in wanted:
+                continue
+            if cutoff is not None and int(item["__REALTIME_TIMESTAMP"]) < int(cutoff.timestamp() * 1_000_000):
+                continue
+            rows.append(item)
+        new_state["offset"] = start + consumed
+        if budget <= 0:
+            # Byte budget exhausted: resume exactly here next run.
+            return rows, new_state
+        # Otherwise this segment was read to EOF; a trailing partial line is
+        # left for the next run (current file) or dropped (rotated file).
+    return rows, new_state
+
+
+def read_mail_log_files(
+    mail: Mapping[str, Any],
+    now: dt.datetime | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], set[str]]:
+    """Read every configured ``mail.log_files`` entry.
+
+    Returns rows, the new cursor map, and the set of components covered by a
+    file that currently exists (journal rows for those components are dropped
+    so one failure is never counted from both journald and the file).
+    """
+    cursor = load_mail_log_cursor(Path(str(mail["log_cursor_file"])))
+    rows: list[dict[str, Any]] = []
+    covered: set[str] = set()
+    new_cursor: dict[str, Any] = {}
+    max_bytes = int(mail.get("max_log_bytes_per_run", 16 * 1024 * 1024))
+    for entry in mail.get("log_files") or []:
+        path = Path(str(entry["path"]))
+        components = [str(item) for item in entry.get("components") or ["postfix"]]
+        if path.is_file() and os.access(path, os.R_OK):
+            covered.update(components)
+        file_rows, state = read_mail_log_file(
+            path,
+            cursor.get(str(path)),
+            components=components,
+            max_bytes=max_bytes,
+            initial_lookback_minutes=int(mail["initial_lookback_minutes"]),
+            now=now,
+        )
+        rows.extend(file_rows)
+        if state is not None:
+            new_cursor[str(path)] = state
+    return rows, new_cursor, covered
+
+
 def collect_mail(config: Mapping[str, Any]) -> int:
     mail = config.get("mail") or {}
     if not mail.get("enabled"):
         return 0
     cursor_path = Path(str(mail["cursor_file"]))
-    rows, final_cursor = read_journal(
+    journal, final_cursor = read_journal(
         [str(unit) for unit in mail["units"]],
         cursor_path,
         int(mail["initial_lookback_minutes"]),
     )
+    file_rows, file_cursor, covered = read_mail_log_files(mail)
+    # A component tailed from an existing file (Postfix with maillog_file, or
+    # rsyslog mail.log) is not also counted from journald.
+    rows = [row for row in journal if mail_row_component(row) not in covered] + file_rows
     batches = build_mail_batches(config, rows)
     total = 0
     for batch in batches:
         payload = (json.dumps(batch, sort_keys=True, separators=(",", ":")) + "\n").encode()
         save_envelope(config, make_envelope(str(config["node"]["id"]), "event_batch", payload))
         total += len(batch["events"])
-    # Advance the cursor only after every resulting batch is durably staged.
+    # Advance cursors only after every resulting batch is durably staged.
     if final_cursor:
         atomic_write(cursor_path, (final_cursor + "\n").encode(), 0o600)
+    if mail.get("log_files"):
+        atomic_write(
+            Path(str(mail["log_cursor_file"])),
+            (json.dumps({"version": 1, "files": file_cursor}, sort_keys=True) + "\n").encode(),
+            0o600,
+        )
     return total
 
 

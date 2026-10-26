@@ -9,10 +9,15 @@ is the only consumer of these events and ships **disabled**.
 
 Dovecot and Postfix are collected as a single batch service named `mail`:
 
-- One journald reader follows `dovecot.service` and `postfix@-.service`
-  (configurable `mail.units`). Repeated `journalctl -u` options are OR-ed, so
-  both units share one interleaved stream and one durable cursor
-  (`/var/lib/argent-sentinel/agent/mail.cursor`).
+- **Two sources** (0.5.7.0). One journald reader follows `dovecot.service`
+  and `postfix@-.service` (configurable `mail.units`; repeated
+  `journalctl -u` options are OR-ed into one stream with one durable cursor,
+  `/var/lib/argent-sentinel/agent/mail.cursor`). **Plus** a syslog-format file
+  tail of `/var/log/mail.log` for Postfix (configurable `mail.log_files`,
+  cursor `/var/lib/argent-sentinel/agent/mail-log.cursor`). Postfix configured
+  with `maillog_file` (as on nidhoggur) writes SASL failures only to that file,
+  never to journald, so a journal-only agent silently misses them. See
+  "Postfix mail.log tail" below.
 - Account names are HMAC-SHA256 pseudonymised with the existing agent privacy
   key (`/etc/argent-sentinel/agent-privacy.key`) in a dedicated `mail` domain
   (`HMAC(key, "mail\0NODE\0casefold(account)")`). The same mailbox therefore has
@@ -35,18 +40,111 @@ produces one event:
 | Dovecot login process | `imap-login: Disconnected: Connection closed (auth failed, 1 attempts in 2 secs): user=<a@example.org>, method=PLAIN, rip=198.51.100.7, lip=203.0.113.25, TLS, session=<…>` | Also `Disconnected (auth failed …)`, `Aborted login (auth failed …)`, `Login aborted: … (auth failed …) (auth_failed)`, optional `Info:` level prefix; protocols `imap`, `pop3`, `managesieve`, `submission`. `attempts` is preserved in metadata. |
 | Postfix smtpd | `warning: unknown[198.51.100.23]: SASL LOGIN authentication failed: UGFzc3dvcmQ6[, sasl_username=a@example.org]` | Any `postfix*/…/smtpd` syslog identifier. `postfix/smtpd` → `smtp`, `postfix/submission/smtpd` → `submission`, `postfix/smtps/smtpd` → `smtps`. |
 
-Ignored: Dovecot `auth`/`auth-worker` companion lines (`passwd-file(…)`,
-`pam(…)`), `no auth attempts`, successful logins, Postfix `lost connection
-after AUTH`, and non-smtpd identifiers.
+Ignored as events: Dovecot `auth`/`auth-worker` companion lines
+(`passwd-file(…)`, `pam(…)`), `no auth attempts`, successful logins, Postfix
+`lost connection after AUTH`, and non-smtpd identifiers. (With
+`auth_verbose = yes` the companion lines are used, in memory only, as an
+existence-classification fallback; see below.)
 
 Event fields: source IP (IPv4-mapped IPv6 is folded to IPv4), source port when
 Dovecot logs `rport=`, destination IP from Dovecot `lip=` or the configured
 `mail.destination_ip`, destination port from Dovecot `lport=` or
 `mail.postfix_service_ports`, `TCP`, application protocol (`IMAP`, `POP3`,
 `MANAGESIEVE`, `SUBMISSION`, `SMTP`), and metadata `mail_component`,
-`protocol`, `auth_mechanism`, `attempts`, `account_class`
-(`submitted`/`empty`/`unresolved`), plus `tls` (Dovecot) or
-`postfix_service`/`sasl_stage` (Postfix).
+`protocol`, `auth_mechanism`, `attempts`, `account_class`, `account_exists`,
+`failure_reason`, `account_lookup`, plus `tls` (Dovecot) or
+`postfix_service`/`sasl_stage` (Postfix) and `log_source: file` for tailed
+lines.
+
+## Account-existence classification (0.5.7.0)
+
+With `auth_verbose = no` (the default, and nidhoggur's setting) Dovecot logs an
+unknown user and a wrong password identically on the login summary line, and
+Postfix SASL never says. The agent therefore classifies each failure **at
+ingest, on the node**:
+
+| `account_exists` | `failure_reason` | `account_class` | Meaning |
+| --- | --- | --- | --- |
+| `true` | `bad_password` | `known` | userdb has the mailbox: a valid-mailbox attack (or a stale client password) |
+| `false` | `unknown_user` | `invalid` | userdb says the user does not exist: account probing |
+| `null` | `unknown` | `submitted` | lookup unavailable/failed/skipped: pre-0.5.7.0 behaviour |
+| `null` | `unknown` | `empty` / `unresolved` | no account name logged (unchanged) |
+
+`account_class` follows the OpenSSH convention (`invalid` for nonexistent
+accounts); `submitted` keeps its old meaning when existence is unknown.
+
+**Lookup** (`mail.account_lookup`, enabled by default with the agent's `mail`
+block):
+
+- `backend: "doveadm"` (default) runs `doveadm user NAME` (argv, never a shell)
+  with `timeout_seconds` (2 s). Exit 0 → exists, exit 67 (`EX_NOUSER`) → does
+  not exist, anything else → `null`. Works for Dovecot and for Postfix SASL
+  (Postfix authenticates through Dovecot SASL), without `auth_verbose`.
+- `backend: "auth-userdb"` speaks the Dovecot auth-master protocol directly
+  to `auth_userdb_socket` (`/run/dovecot/auth-userdb`): `USER` → exists,
+  `NOTFOUND` → does not exist, `FAIL` → `null`. No subprocess per lookup.
+- `backend: "none"` or `enabled: false` disables lookups (everything `null`).
+- Names containing `*`, `?`, `%`, `\`, whitespace/control characters, a
+  leading `-`, or more than 255 characters are never passed to userdb
+  (`null`): they could be a doveadm listing mask, an option, or break framing.
+- **Caveat:** a `static` userdb with `allow_all_users=yes` reports every name
+  as existing. nidhoggur's offline `doveadm user` checks did distinguish
+  (about half of recent distinct names do not exist), so the default backend
+  fits there; confirm with `doveadm user nosuchuser@example.invalid; echo $?`
+  (expect 67) before relying on the split.
+
+**Cache and DoS bounds:** results are cached in
+`/var/lib/argent-sentinel/agent/mail-account-cache.json` (0600, root) keyed
+by `HMAC(agent-privacy.key, "mail-lookup\0NODE\0casefold(name)")`, a separate
+HMAC domain from the exported token; **no plaintext name is written**. TTLs:
+`positive_ttl_seconds` 600, `negative_ttl_seconds` 300, `error_ttl_seconds`
+60 (errors are cached as `null` so a failing backend is not hammered). At most
+`max_lookups_per_run` (200) userdb lookups per agent run (beyond that:
+`null`), at most `max_cache_entries` (5000) entries kept. A missing backend
+(`doveadm` not installed, socket absent) stops lookups for that run without
+caching, so installing it takes effect on the next run.
+
+**Fallback** (`auth_verbose_fallback: true`): when the lookup gives `null`
+and Dovecot runs with `auth_verbose = yes`, `auth:`/`auth-worker(N):` lines
+in the same run (`passwd-file(user,ip,<session>): unknown user`,
+`Password mismatch`, `pam_authenticate() failed: … (password mismatch?)`)
+are correlated by session id, else by (account, source IP) — which also
+covers Postfix SASL through Dovecot. These lines are held in memory only.
+`auth_verbose_passwords` is never needed or used.
+
+**Server behaviour is unchanged.** The agent only reads logs and queries
+userdb; Dovecot/Postfix keep answering every failure uniformly (same message,
+`auth_failure_delay`), so an attacker learns nothing new. Existence stays
+local: it is stored in the collector DB and shown on the local dashboard, but
+it is stripped from abuse reports/XARF, never part of a CrowdSec decision
+(`cscli` only receives IP, duration, and `REASON_PREFIX/RULE`), and the review
+digest carries only per-kind aggregate counts.
+
+## Postfix mail.log tail (0.5.7.0)
+
+`mail.log_files` (default `[{"path": "/var/log/mail.log", "components":
+["postfix"]}]`) is tailed with a durable cursor per file (`dev`, `inode`,
+byte `offset`) in `mail.log_cursor_file`:
+
+- Both Postfix `maillog_file` (`Oct 26 17:10:00 host postfix/smtpd[1]: …`,
+  year inferred, host time zone) and rsyslog RFC 3339 timestamps are parsed.
+- Only lines from the listed `components` (`postfix`, `dovecot`) are read; by
+  default Dovecot lines that rsyslog also copies into mail.log are ignored
+  (Dovecot comes from journald).
+- **Rotation:** same inode and smaller size → copytruncate, restart at 0; new
+  inode → finish the old file (`mail.log.1`, `.0`, `-1` with the saved inode)
+  from the saved offset, then read the new file from 0. Only complete lines
+  are consumed; at most `max_log_bytes_per_run` (16 MiB) per run, the rest
+  next run. The first run starts `initial_lookback_minutes` back.
+- Cursors advance only after every batch is durably staged. Event ids are
+  derived from `dev:inode:offset`, so a re-read never duplicates an event.
+- **No double counting:** while a configured file exists and is readable,
+  journald rows for its components are dropped. A host whose Postfix logs to
+  journald only (no file) keeps `postfix@-.service` coverage automatically;
+  hosts using `maillog_file` get Postfix from the file. Set `log_files: []`
+  to go journal-only.
+- The agent runs as root with `ProtectSystem=strict`; reading
+  `/var/log/mail.log` (`syslog:adm 0640`) needs no unit change.
 
 Dovecot does not log ports by default. To get complete tuples, add
 `rport=%{rport} lport=%{lport}` to `login_log_format_elements`. Postfix only
@@ -79,7 +177,31 @@ source IPs inside a rolling window. Events without a token
 ignored. One event is one failed connection (Dovecot `attempts` is not
 multiplied in).
 
-### Decision rule
+### Two rules: valid-mailbox slow-burn vs account probing (0.5.7.0)
+
+Events are split by the ingest classification:
+
+- `account_exists` **true or unknown** → the **known-account slow-burn**
+  below (unchanged thresholds; protected mailboxes stricter). Unknown
+  existence behaves exactly as before 0.5.7.0.
+- `account_exists` **false** → never part of an account campaign. They feed
+  the **account-probe** rule, keyed by **source IP**: a source that failed
+  against ≥ `probe_distinct_accounts` (5) distinct nonexistent accounts with ≥
+  `probe_failure_threshold` (5) failures inside `probe_window_seconds` (24 h)
+  gets a per-IP `mail-account-probe` incident. CrowdSec for probes is gated
+  separately by `probe_crowdsec_enforcement` (default **false**, independent
+  of `crowdsec_enforcement`); duration `probe_ban_duration` (72 h). Probe
+  incidents start report-`suppressed` unless `probe_abuse_reporting_enabled`.
+  Sources with ≥ `probe_review_distinct_accounts` (3) are listed as review
+  campaigns. `probe_enabled: false` turns the rule off.
+
+Campaign kinds (`campaign_kind`, dashboard label): `known` "Valid mailbox
+attack", `unresolved` "Mailbox attack (existence unknown)", `probe` "Account
+probing", `mixed` "Account probing (also hit valid mailboxes)" — a probing
+source that also failed against existing mailboxes in the window. Listings
+(status, dashboard, digest) put protected, then known-account campaigns first.
+
+### Decision rule (known-account slow-burn)
 
 For each account token inside `window_seconds`:
 
@@ -122,6 +244,14 @@ For each account token inside `window_seconds`:
 | `abuse_reporting_enabled` | `false` | Incidents start `suppressed`; set `true` to send XARF `login_attack` reports |
 | `campaign_review_distinct_ips` | `3` | Record review-only campaigns from this many IPs even below N/M |
 | `campaign_prefix_min_ips` | `2` | IPs per bounded prefix before a prefix proposal is listed |
+| `probe_enabled` | `true` | Account-probe rule (only evaluated when `enabled`) |
+| `probe_crowdsec_enforcement` | `false` | Separate CrowdSec gate for `mail-account-probe` |
+| `probe_window_seconds` | `86400` | Probe window |
+| `probe_distinct_accounts` | `5` | Distinct nonexistent accounts from one source IP (minimum 2) |
+| `probe_failure_threshold` | `5` | Failures on nonexistent accounts from that IP |
+| `probe_review_distinct_accounts` | `3` | List a review-only probe campaign from this many |
+| `probe_ban_duration` | `72h` | Per-IP CrowdSec duration for probes |
+| `probe_abuse_reporting_enabled` | `false` | Probe incidents start `suppressed` |
 
 Rationale: a single user with a stale password on one device produces failures
 from one or two addresses, so M=5 (M=3 for protected) keeps them out; a slow
@@ -213,7 +343,10 @@ owner.
    }
    ```
 
-4. Inspect `argent-sentinel status` → `mail_account_campaigns` and the
+4. With 0.5.7.0 agents, check the dashboard Mail page split (valid mailbox /
+   nonexistent / unknown) and that `account_exists` is populated; probe
+   incidents stay `dry-run` until `probe_crowdsec_enforcement: true`.
+5. Inspect `argent-sentinel status` → `mail_account_campaigns` and the
    dashboard Mail page (`/mail`: policy state and thresholds, campaigns,
    failures by source, and individual recent failures), then set `crowdsec_enforcement: true` to issue
    per-IP bans; leave `abuse_reporting_enabled: false` until reviewed.

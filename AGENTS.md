@@ -136,6 +136,17 @@ After implementation or deployment decisions, review and update:
   commented EOF marker when the format supports comments.
 
 ## Current reporting checkpoint
+- Version 0.5.7.0 (branch `feature/mail-account-exists-postfix-tail`) adds
+  ingest-time mail account-existence classification (`account_exists`,
+  `failure_reason`; `doveadm user` by default, TTL cache keyed by a
+  separate HMAC domain, no plaintext), tails Postfix SASL from
+  `/var/log/mail.log` with a dev/inode/offset cursor (nidhoggur's Postfix uses
+  `maillog_file`, so journald had 0 of 158 SASL failures), and splits mail
+  policy into known-account slow-burn vs per-source-IP `mail-account-probe`
+  (`probe_crowdsec_enforcement` default false). Collector schema gains
+  `mail_account_campaigns` columns via `ensure_column`. Not deployed: IT
+  Manager installs on nidhoggur only after Alan merges and tags. Never enable
+  `auth_verbose_passwords` or change Dovecot/Postfix failure responses.
 - Version 0.5.6.1 adds `mail_account_policy.crowdsec_enforcement` (default
   false): mail slow-burn stays dry-run / incident monitor even with global
   CrowdSec on. Install 0.5.6.1 before setting `mail_account_policy.enabled`

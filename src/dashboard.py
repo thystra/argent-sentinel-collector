@@ -26,7 +26,7 @@ from http.server import BaseHTTPRequestHandler
 from typing import Any, Mapping
 from review_queue import NETWORK_REVIEW_ACTIONS, REVIEW_ACTIONS
 
-APP_VERSION = "0.5.6.1"
+APP_VERSION = "0.5.7.0"
 LOG = logging.getLogger("argent-sentinel-dashboard")
 
 DEFAULTS: dict[str, Any] = {
@@ -329,6 +329,16 @@ def render_overview(snapshot: Mapping[str, Any]) -> str:
             "/mail",
         ),
         (
+            "Valid mailbox failures",
+            overview.get("mail_auth_failures_known"),
+            "/mail#mail-campaigns",
+        ),
+        (
+            "Nonexistent-account probes",
+            overview.get("mail_auth_failures_nonexistent"),
+            "/mail#mail-auth-failures",
+        ),
+        (
             "Registration abuse events",
             overview.get("registration_abuse_events"),
             "/incidents#registration-abuse",
@@ -520,6 +530,14 @@ def render_traffic(snapshot: Mapping[str, Any]) -> str:
     )
 
 
+MAIL_CAMPAIGN_LABELS = {
+    "known": "Valid mailbox attack",
+    "unresolved": "Mailbox attack (existence unknown)",
+    "mixed": "Account probing (also hit valid mailboxes)",
+    "probe": "Account probing",
+}
+
+
 def render_mail(snapshot: Mapping[str, Any]) -> str:
     """Mail auth evidence: policy/thresholds, campaigns, grouped and raw failures.
 
@@ -529,8 +547,13 @@ def render_mail(snapshot: Mapping[str, Any]) -> str:
     mail_rows = [
         [
             f"<code>{h(row.get('campaign_id'))}</code>",
+            h(row.get("campaign_label") or MAIL_CAMPAIGN_LABELS.get(str(row.get("campaign_kind") or ""), "-")),
             h(row.get("site_id")),
-            h(f"protected: {row.get('protected_label')}" if row.get("protected") else "unlisted"),
+            h(
+                f"protected: {row.get('protected_label')}" if row.get("protected")
+                else f"{number(row.get('distinct_accounts'))} nonexistent"
+                if row.get("campaign_kind") in {"probe", "mixed"} else "unlisted"
+            ),
             f'<span class="{status_class(row.get("status"))}">{h(row.get("status"))}</span>',
             number(row.get("failures")),
             number(row.get("distinct_source_ips")),
@@ -555,7 +578,10 @@ def render_mail(snapshot: Mapping[str, Any]) -> str:
             h(row.get("site_id")),
             h(row.get("protocol")),
             number(row.get("failures")),
+            number(row.get("known_failures")),
+            number(row.get("nonexistent_failures")),
             number(row.get("distinct_accounts")),
+            number(row.get("nonexistent_accounts")),
             when(row.get("first_seen")),
             when(row.get("last_seen")),
         ]
@@ -570,6 +596,8 @@ def render_mail(snapshot: Mapping[str, Any]) -> str:
             h(row.get("destination_port") or "-"),
             h(row.get("auth_mechanism") or "-"),
             h(row.get("account_class") or "-"),
+            h({True: "yes", False: "no"}.get(row.get("account_exists"), "unknown")),
+            h(row.get("failure_reason") or "unknown"),
             f"<code>{h(row.get('campaign_id'))}</code>" if row.get("campaign_id") else "-",
         ]
         for row in snapshot.get("recent_mail_auth_failures", [])
@@ -596,6 +624,13 @@ def render_mail(snapshot: Mapping[str, Any]) -> str:
             f"{number(mail_policy.get('distinct_source_ips'))}"),
         ("Protected failures / distinct IPs", f"{number(mail_policy.get('protected_failure_threshold'))} / "
             f"{number(mail_policy.get('protected_distinct_source_ips'))}"),
+        ("Probe rule", "on" if mail_policy.get("probe_enabled") else "off"),
+        ("Probe CrowdSec enforcement", "on" if mail_policy.get("probe_crowdsec_enforcement") else "dry-run"),
+        ("Probe nonexistent accounts / failures per IP",
+            f"{number(mail_policy.get('probe_distinct_accounts'))} / "
+            f"{number(mail_policy.get('probe_failure_threshold'))} in "
+            f"{number(mail_policy.get('probe_window_seconds'))} s"),
+        ("Probe ban duration", h(mail_policy.get("probe_ban_duration") or "-")),
         ("Min failures per banned IP", number(mail_policy.get("min_failures_per_ip"))),
         ("Campaign review distinct IPs", number(mail_policy.get("campaign_review_distinct_ips"))),
         ("Ban duration", h(mail_policy.get("ban_duration") or "-")),
@@ -606,14 +641,29 @@ def render_mail(snapshot: Mapping[str, Any]) -> str:
     thresholds = "<dl>" + "".join(
         f"<dt>{h(label)}</dt><dd>{value}</dd>" for label, value in threshold_items
     ) + "</dl>" if mail_policy else ""
+    overview = snapshot.get("overview") or {}
+    split_items = [
+        ("Total failures", number(overview.get("mail_auth_failures"))),
+        ("Valid mailbox (bad password)", number(overview.get("mail_auth_failures_known"))),
+        ("Nonexistent account (unknown user)", number(overview.get("mail_auth_failures_nonexistent"))),
+        ("Existence unknown", number(overview.get("mail_auth_failures_unresolved"))),
+        ("Valid mailbox attack campaigns", number(overview.get("mail_known_account_campaigns"))),
+        ("Account probing campaigns", number(overview.get("mail_probe_campaigns"))),
+    ]
+    split = '<dl id="mail-failure-split">' + "".join(
+        f"<dt>{h(label)}</dt><dd>{value}</dd>" for label, value in split_items
+    ) + "</dl>"
     return (
         '<section id="mail"><h2>Mail authentication</h2>'
-        f'<p class="muted">{h(mail_state)}</p>{thresholds}</section>'
-        '<section id="mail-campaigns"><h2>Mail account slow-burn campaigns</h2>'
-        '<p class="muted">Per-IP enforcement only. Prefix and ASN groupings are '
-        "review-only proposals; no range, ASN, or country ban is automatic.</p>"
+        f'<p class="muted">{h(mail_state)}</p>{split}{thresholds}</section>'
+        '<section id="mail-campaigns"><h2>Mail account slow-burn campaigns and account probing</h2>'
+        '<p class="muted">Valid mailbox attacks (account-keyed slow-burn) are listed first, '
+        "then account probing (one source trying nonexistent mailboxes). Per-IP enforcement "
+        "only. Prefix and ASN groupings are review-only proposals; no range, ASN, or country "
+        "ban is automatic. Existence classification is local to this dashboard and never "
+        "appears in abuse reports or CrowdSec decisions.</p>"
         + table(
-            ["Campaign", "Site", "Account", "Status", "Failures", "IPs", "Per-IP incidents",
+            ["Campaign", "Kind", "Site", "Account", "Status", "Failures", "IPs", "Per-IP incidents",
              "Protocols", "Sample IPs", "Prefix proposals", "ASN groups", "Last"],
             mail_rows,
         )
@@ -621,14 +671,16 @@ def render_mail(snapshot: Mapping[str, Any]) -> str:
         '<p class="muted">Recent <code>mail_auth_failed</code> events grouped by source, '
         "node, and protocol; account names and tokens are never shown.</p>"
         + table(
-            ["Source", "Node", "Protocol", "Failures", "Accounts", "First", "Last"],
+            ["Source", "Node", "Protocol", "Failures", "Valid mailbox", "Nonexistent",
+             "Accounts", "Nonexistent accounts", "First", "Last"],
             mail_failure_rows,
         )
         + '</section><section id="mail-recent-failures"><h2>Recent mail auth failures</h2>'
         '<p class="muted">Individual events, newest first. Account names and tokens are '
         "never shown; Campaign is the export-safe campaign id for the targeted account.</p>"
         + table(
-            ["When", "Source", "Node", "Protocol", "Port", "Mechanism", "Account class", "Campaign"],
+            ["When", "Source", "Node", "Protocol", "Port", "Mechanism", "Account class",
+             "Exists", "Reason", "Campaign"],
             recent_rows,
         )
         + "</section>"
