@@ -138,7 +138,10 @@ After implementation or deployment decisions, review and update:
 ## Current reporting checkpoint
 - Version 0.5.6.0 (branch `feature/mail-auth-ingest`) adds observe-only
   Dovecot/Postfix SASL ingest as service `mail`; see `docs/mail-auth-events.md`.
-  Not deployed; enforcement policy is deferred to a later PR.
+  Not deployed. PR2 adds the disabled-by-default account-keyed
+  `mail_account_policy` (per-IP CrowdSec only; prefix/ASN review-only).
+  Protected mailbox addresses must never be committed: configure tokens on
+  the collector host (`argent-sentinel mail-account-token`).
 - Version 0.5.5.1 is the current development target. Debian revision
   `0.5.5.1-1` is installed on nidhoggur; corrected revision `0.5.5.1-2` is
   pending build and deployment after the event-mechanism sandbox diagnosis.

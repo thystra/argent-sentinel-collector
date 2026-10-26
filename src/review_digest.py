@@ -239,6 +239,21 @@ def render_digest(
         (int(review.get("max_network_rows", 20)),),
     )
 
+    try:
+        mail_campaigns = query_rows(
+            connection,
+            """SELECT campaign_id, site_id, protected, protected_label, status, failures,
+                      distinct_source_ips, enforced_source_ips, first_seen, last_seen,
+                      protocols, prefix_proposals_json, asn_summary_json
+               FROM mail_account_campaigns
+               WHERE last_seen_epoch>=? AND last_seen_epoch<?
+               ORDER BY protected DESC, CASE status WHEN 'enforcing' THEN 0 ELSE 1 END,
+                        distinct_source_ips DESC, last_seen DESC LIMIT ?""",
+            (start_epoch, end_epoch, int(review.get("max_rows", 20))),
+        )
+    except sqlite3.OperationalError:
+        mail_campaigns = []
+
     body = [
         "Argent Sentinel daily operator review",
         f"Version: {APP_VERSION}",
@@ -317,10 +332,36 @@ def render_digest(
             )
     else:
         body.append("  none")
+    body.extend(["", "Mail account slow-burn campaigns (prefix/ASN proposals are review-only):"])
+    if mail_campaigns:
+        for row in mail_campaigns:
+            try:
+                prefixes = json.loads(str(row["prefix_proposals_json"] or "[]"))
+                asns = json.loads(str(row["asn_summary_json"] or "[]"))
+            except json.JSONDecodeError:
+                prefixes, asns = [], []
+            protected = f"protected ({row['protected_label']})" if int(row["protected"] or 0) else "unlisted account"
+            body.extend(
+                [
+                    "",
+                    f"  Campaign: {row['campaign_id']} on {row['site_id']} [{protected}]",
+                    f"  Status: {row['status']}",
+                    f"  Failures / distinct source IPs / per-IP incidents: {row['failures']} / {row['distinct_source_ips']} / {row['enforced_source_ips']}",
+                    f"  Protocols: {row['protocols'] or '-'}",
+                    f"  First/last seen: {row['first_seen']} / {row['last_seen']}",
+                    "  Prefix proposals (review-only): "
+                    + (", ".join(f"{item['proposal_cidr']} ({item['source_ips']} IPs)" for item in prefixes[:5]) or "none"),
+                    "  ASN groups (review-only): "
+                    + (", ".join(f"AS{item['asn']} ({item['source_ips']} IPs)" for item in asns[:5]) or "none"),
+                ]
+            )
+    else:
+        body.append("  none")
     body.extend(
         [
             "",
             "HTTP 429 entries remain review telemetry only.",
+            "Mail prefix/ASN groupings never create automatic range, ASN, or country bans.",
             "CIDR recommendations require an audited operator action before",
             "the root-owned review processor may create a CrowdSec range decision.",
         ]

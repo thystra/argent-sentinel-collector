@@ -524,9 +524,37 @@ def render_incidents(snapshot: Mapping[str, Any]) -> str:
         ]
         for row in snapshot.get("recent_incidents", [])
     ]
+    mail_rows = [
+        [
+            f"<code>{h(row.get('campaign_id'))}</code>",
+            h(row.get("site_id")),
+            h(f"protected: {row.get('protected_label')}" if row.get("protected") else "unlisted"),
+            f'<span class="{status_class(row.get("status"))}">{h(row.get("status"))}</span>',
+            number(row.get("failures")),
+            number(row.get("distinct_source_ips")),
+            number(row.get("enforced_source_ips")),
+            h(", ".join(
+                f"{item.get('proposal_cidr')} ({item.get('source_ips')})"
+                for item in (row.get("prefix_proposals") or [])[:3]
+            ) or "-"),
+            h(", ".join(
+                f"AS{item.get('asn')} ({item.get('source_ips')})"
+                for item in (row.get("asn_summary") or [])[:3]
+            ) or "-"),
+            when(row.get("last_seen")),
+        ]
+        for row in snapshot.get("mail_account_campaigns", [])
+    ]
     return "<section><h2>Recent incidents</h2>" + table(
         ["Source", "Rule", "Report", "Events", "Sites", "Network", "Holder", "Last", "Detail"],
         incident_rows,
+    ) + "</section><section><h2>Mail account slow-burn campaigns</h2>" + (
+        '<p class="muted">Per-IP enforcement only. Prefix and ASN groupings are '
+        "review-only proposals; no range, ASN, or country ban is automatic.</p>"
+    ) + table(
+        ["Campaign", "Site", "Account", "Status", "Failures", "IPs", "Per-IP incidents",
+         "Prefix proposals", "ASN groups", "Last"],
+        mail_rows,
     ) + "</section>"
 
 

@@ -5,7 +5,7 @@
 - [ ] Optionally protect `main` on Forgejo so the `CI` checks are required
   before merge.
 
-## Implemented in 0.5.6.0 — mail authentication ingest (observe-only, PR1)
+## Implemented in 0.5.6.0 — mail authentication ingest (PR1) and account slow-burn policy (PR2)
 
 - [x] Observe-only Dovecot and Postfix SASL auth-failure ingest as service
   `mail` (`mail_auth_failed`), HMAC-pseudonymised account tokens, API/collector
@@ -13,15 +13,22 @@
 - [ ] Deploy to nidhoggur via IT Manager after approval: enable `mail` in
   `agent.json`, add `mail` to `nodes.d/nidhoggur.json`, and consider
   `rport`/`lport` in Dovecot `login_log_format_elements`.
-- [ ] PR2 policy: per-IP CrowdSec decision after N failures on one target
-  account token from M distinct source IPs (propose N/M defaults from observed
-  data); keep the policy disabled until production review.
-- [ ] PR2 policy: prefix and ASN aggregation as review-only proposals; no
-  country or ASN automatic bans.
-- [ ] PR2 policy: protected-account list for real mailboxes (operator-held list,
-  including the primary personal mailboxes, `postmaster@`, and `merchant@`),
-  matched by privacy token, never by stored plaintext.
-- [ ] Dashboard/reporting views for `mail` events and XARF mapping (deferred).
+- [x] PR2 policy: per-IP CrowdSec decision after N failures on one target
+  account token from M distinct source IPs (defaults N=10, M=5, 24 h, 2/IP;
+  protected N=6, M=3; 168 h bans); disabled by default.
+- [x] PR2 policy: prefix and ASN aggregation as review-only campaign proposals
+  (status, snapshot/Incidents page, digest); no country or ASN automatic bans.
+- [x] PR2 policy: protected-account tokens / root-only hashed file, matched in
+  the ingest `mail` HMAC domain; `mail-account-token` helper; no plaintext in git.
+- [x] XARF `login_attack` mapping and `mail` report family (reporting disabled
+  by default).
+- [ ] Deploy (IT Manager, after approval): compute protected tokens on
+  nidhoggur, add to `/etc/argent-sentinel/collector.json`, enable the policy
+  with CrowdSec dry-run first, review campaigns, then enforce.
+- [ ] Tune N/M/window from the first weeks of production `mail_auth_failed`
+  volume; decide whether to enable `abuse_reporting_enabled`.
+- [ ] Optional: audited dashboard review actions for mail campaigns (currently
+  read-only display).
 
 ## Implemented in 0.5.5.1 — version-aware PHP-FPM observation
 

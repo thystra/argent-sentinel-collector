@@ -48,6 +48,8 @@ REPORTABLE_STATES = ("pending", "failed", "deferred", "disabled", "no-contact")
 def report_family(rule_id: str) -> str:
     if rule_id.startswith("sshd-"):
         return "sshd"
+    if rule_id.startswith("mail-"):
+        return "mail"
     if rule_id.startswith("nginx-"):
         return "web"
     return "wordpress"
@@ -56,6 +58,7 @@ def report_family(rule_id: str) -> str:
 def activity_name(family: str) -> str:
     return {
         "sshd": "OpenSSH authentication attacks",
+        "mail": "mail (IMAP/SMTP AUTH) credential attacks",
         "web": "web exploit scanning",
         "wordpress": "WordPress credential attacks",
     }.get(family, "hostile activity")
