@@ -17,6 +17,7 @@ import tempfile
 from typing import Any, Iterator, Mapping, Sequence
 import urllib.parse
 
+import collector
 import review_digest
 from reporting_view import (
     build_reporting_snapshot,
@@ -510,6 +511,28 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
             item["protected"] = bool(item["protected"])
             item["automatic_block"] = False
         overview["mail_account_campaigns"] = len(mail_account_campaigns)
+        # Access Guard registration_abuse campaigns are computed (not stored)
+        # by the collector; reuse its read-only helper so the dashboard shows
+        # exactly what ``argent-sentinel status`` reports. Review-only.
+        registration_view = collector.read_registration_abuse_campaigns(
+            connection, collector_config, end_epoch,
+        )
+        registration_abuse_campaigns = registration_view.pop("campaigns")[:max_rows]
+        for item in registration_abuse_campaigns:
+            item["automatic_block"] = False
+        overview["registration_abuse_campaigns"] = len(registration_abuse_campaigns)
+        overview["mail_auth_failures"] = scalar(
+            connection,
+            "SELECT COUNT(*) FROM events WHERE occurred_epoch >= ? "
+            "AND service = 'mail' AND event_type = 'mail_auth_failed'",
+            (start_epoch,),
+        )
+        overview["registration_abuse_events"] = scalar(
+            connection,
+            "SELECT COUNT(*) FROM events WHERE occurred_epoch >= ? "
+            "AND service = 'wordpress' AND event_type = 'registration_abuse'",
+            (start_epoch,),
+        )
         overview["network_reviews"] = scalar(
             connection,
             "SELECT COUNT(*) FROM network_cases "
@@ -632,6 +655,8 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
         "network_cases": network_cases,
         "network_review_actions": network_review_actions,
         "mail_account_campaigns": mail_account_campaigns,
+        "registration_abuse_policy": registration_view,
+        "registration_abuse_campaigns": registration_abuse_campaigns,
         "local_address_protection": {
             "state_file": str(dynamic_state_path),
             "state_status": dynamic_state_status,

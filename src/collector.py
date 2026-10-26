@@ -1531,40 +1531,11 @@ class StateDB:
 
     def registration_abuse_events(self, start_epoch: int, end_epoch: int) -> list[sqlite3.Row]:
         """Access Guard registration_abuse events from any WordPress site, oldest first."""
-        return list(
-            self.conn.execute(
-                """SELECT event_uuid, occurred_epoch, occurred_at, site_id, account_key,
-                          source_ip, outcome, user_agent, request_method, request_path,
-                          request_id, metadata_json
-                   FROM events
-                   WHERE service = 'wordpress'
-                     AND event_type = 'registration_abuse'
-                     AND source_ip IS NOT NULL
-                     AND occurred_epoch BETWEEN ? AND ?
-                   ORDER BY occurred_epoch ASC, event_uuid ASC""",
-                (start_epoch, end_epoch),
-            )
-        )
+        return registration_abuse_event_rows(self.conn, start_epoch, end_epoch)
 
     def cached_asns(self, source_ips: Sequence[str]) -> dict[str, tuple[int | None, str | None]]:
         """ASN facts already known locally (no network lookups)."""
-        result: dict[str, tuple[int | None, str | None]] = {}
-        values = sorted(set(source_ips))
-        for offset in range(0, len(values), 500):
-            chunk = values[offset:offset + 500]
-            marks = ",".join("?" for _ in chunk)
-            for row in self.conn.execute(
-                f"SELECT source_ip, asn, asn_holder FROM enrichment_cache WHERE source_ip IN ({marks})",
-                chunk,
-            ):
-                result[str(row["source_ip"])] = (row["asn"], row["asn_holder"])
-            for row in self.conn.execute(
-                f"""SELECT source_ip, asn, asn_holder FROM incidents
-                    WHERE asn IS NOT NULL AND source_ip IN ({marks})""",
-                chunk,
-            ):
-                result.setdefault(str(row["source_ip"]), (row["asn"], row["asn_holder"]))
-        return result
+        return cached_asns_from(self.conn, source_ips)
 
     def upsert_mail_campaign(self, campaign: Mapping[str, Any]) -> None:
         columns = (
@@ -2878,6 +2849,225 @@ def epoch_text(epoch: int) -> str:
     return dt.datetime.fromtimestamp(int(epoch), UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+# -- review-only campaign helpers ---------------------------------------------
+# Module-level so the read-only dashboard snapshot and daily review digest can
+# build the same registration-abuse campaign view as ``status`` from a
+# ``mode=ro`` connection, without constructing a (writable) Collector.
+
+def registration_abuse_event_rows(
+    connection: sqlite3.Connection,
+    start_epoch: int,
+    end_epoch: int,
+) -> list[sqlite3.Row]:
+    """Access Guard registration_abuse events from any WordPress site, oldest first."""
+    return list(
+        connection.execute(
+            """SELECT event_uuid, occurred_epoch, occurred_at, site_id, account_key,
+                      source_ip, outcome, user_agent, request_method, request_path,
+                      request_id, metadata_json
+               FROM events
+               WHERE service = 'wordpress'
+                 AND event_type = 'registration_abuse'
+                 AND source_ip IS NOT NULL
+                 AND occurred_epoch BETWEEN ? AND ?
+               ORDER BY occurred_epoch ASC, event_uuid ASC""",
+            (start_epoch, end_epoch),
+        )
+    )
+
+
+def cached_asns_from(
+    connection: sqlite3.Connection,
+    source_ips: Sequence[str],
+) -> dict[str, tuple[int | None, str | None]]:
+    """ASN facts already known locally (no network lookups)."""
+    result: dict[str, tuple[int | None, str | None]] = {}
+    values = sorted(set(source_ips))
+    for offset in range(0, len(values), 500):
+        chunk = values[offset:offset + 500]
+        marks = ",".join("?" for _ in chunk)
+        for row in connection.execute(
+            f"SELECT source_ip, asn, asn_holder FROM enrichment_cache WHERE source_ip IN ({marks})",
+            chunk,
+        ):
+            result[str(row["source_ip"])] = (row["asn"], row["asn_holder"])
+        for row in connection.execute(
+            f"""SELECT source_ip, asn, asn_holder FROM incidents
+                WHERE asn IS NOT NULL AND source_ip IN ({marks})""",
+            chunk,
+        ):
+            result.setdefault(str(row["source_ip"]), (row["asn"], row["asn_holder"]))
+    return result
+
+
+def bounded_prefix_proposals(
+    per_ip: Mapping[str, Sequence[Any]],
+    minimum_ips: int,
+    ipv4_boundary: int,
+    ipv6_boundary: int,
+) -> list[dict[str, Any]]:
+    """Review-only bounded prefix aggregation for one campaign."""
+    groups: dict[str, list[ipaddress.IPv4Address | ipaddress.IPv6Address]] = {}
+    failures: dict[str, int] = {}
+    for source_ip, rows in per_ip.items():
+        address = ipaddress.ip_address(source_ip)
+        boundary = int(ipv4_boundary if address.version == 4 else ipv6_boundary)
+        bounded = str(ipaddress.ip_network(f"{address}/{boundary}", strict=False))
+        groups.setdefault(bounded, []).append(address)
+        failures[bounded] = failures.get(bounded, 0) + len(rows)
+    proposals: list[dict[str, Any]] = []
+    for bounded, addresses in groups.items():
+        if len(addresses) < int(minimum_ips):
+            continue
+        network = ipaddress.ip_network(bounded)
+        ordered = sorted(addresses, key=int)
+        low, high = int(ordered[0]), int(ordered[-1])
+        common = ordered[0].max_prefixlen - (low ^ high).bit_length()
+        proposal = ipaddress.ip_network((low, max(common, network.prefixlen)), strict=False)
+        proposals.append({
+            "bounded_cidr": bounded,
+            "proposal_cidr": str(proposal),
+            "source_ips": len(ordered),
+            "failures": failures[bounded],
+            "review_only": True,
+        })
+    proposals.sort(key=lambda item: (-item["source_ips"], -item["failures"], item["proposal_cidr"]))
+    return proposals
+
+
+def asn_groups(
+    source_ips: Sequence[str],
+    known: Mapping[str, tuple[Any, Any]],
+) -> list[dict[str, Any]]:
+    """Review-only ASN grouping from already-known enrichment facts."""
+    groups: dict[Any, dict[str, Any]] = {}
+    for source_ip in source_ips:
+        asn, holder = known.get(source_ip, (None, None))
+        if asn is None:
+            continue
+        item = groups.setdefault(asn, {"asn": asn, "asn_holder": holder, "source_ips": 0, "review_only": True})
+        item["source_ips"] += 1
+    return sorted(groups.values(), key=lambda item: (-item["source_ips"], str(item["asn"])))
+
+
+def summarize_registration_campaigns(
+    by_ip: Mapping[str, Sequence[tuple[Any, Mapping[str, Any]]]],
+    policy: Mapping[str, Any],
+    ipv4_boundary: int,
+    ipv6_boundary: int,
+    known_asns: Any,
+) -> list[dict[str, Any]]:
+    """Group registration_abuse evidence by Access Guard fingerprint signature.
+
+    ``by_ip`` is the policy window keyed by (untrusted) source IP, as built by
+    ``Collector.registration_abuse_window``. ``known_asns`` is a callable that
+    maps a list of IPs to cached ``(asn, holder)`` facts. Output is review-only.
+    """
+    groups: dict[str, dict[str, list[Any]]] = {}
+    details: dict[str, dict[str, Any]] = {}
+    for source_ip, rows in by_ip.items():
+        for row, evidence in rows:
+            signature = evidence["fingerprint_signature"]
+            if not signature:
+                continue
+            groups.setdefault(signature, {}).setdefault(source_ip, []).append(row)
+            detail = details.setdefault(signature, {"sites": set(), "denied": 0, "rule_ids": {}})
+            detail["sites"].add(str(row["site_id"]))
+            if str(row["outcome"]) == "denied":
+                detail["denied"] += 1
+            for rule in evidence["rule_ids"]:
+                detail["rule_ids"][rule] = detail["rule_ids"].get(rule, 0) + 1
+    campaigns: list[dict[str, Any]] = []
+    minimum = int(policy["campaign_review_distinct_ips"])
+    sample_limit = int(policy["max_campaign_sample_ips"])
+    for signature, per_ip in groups.items():
+        if len(per_ip) < minimum:
+            continue
+        detail = details[signature]
+        all_rows = [row for rows in per_ip.values() for row in rows]
+        ranked = sorted(per_ip, key=lambda ip: (-len(per_ip[ip]), ip))
+        top_rules = sorted(detail["rule_ids"].items(), key=lambda item: (-item[1], item[0]))
+        campaigns.append({
+            "fingerprint_signature": signature,
+            "status": "review",
+            "events": len(all_rows),
+            "denied_events": int(detail["denied"]),
+            "distinct_source_ips": len(per_ip),
+            "sites": sorted(detail["sites"]),
+            "first_seen": epoch_text(min(int(row["occurred_epoch"]) for row in all_rows)),
+            "last_seen": epoch_text(max(int(row["occurred_epoch"]) for row in all_rows)),
+            "top_rule_ids": [rule for rule, _ in top_rules[:10]],
+            "sample_source_ips": ranked[:sample_limit],
+            "prefix_proposals": bounded_prefix_proposals(
+                per_ip, int(policy["campaign_prefix_min_ips"]), ipv4_boundary, ipv6_boundary,
+            ),
+            "asn_summary": asn_groups(list(per_ip), known_asns(list(per_ip))),
+            "review_only": True,
+        })
+    campaigns.sort(key=lambda item: (-item["distinct_source_ips"], -item["events"], item["fingerprint_signature"]))
+    return campaigns
+
+
+def read_registration_abuse_campaigns(
+    connection: sqlite3.Connection,
+    supplied_config: Mapping[str, Any],
+    now_epoch: int | None = None,
+) -> dict[str, Any]:
+    """Read-only registration-abuse campaign view for dashboards and digests.
+
+    ``supplied_config`` is the raw collector.json (defaults are merged here).
+    Mirrors ``Collector.registration_abuse_campaigns``: empty while the policy
+    is disabled, trusted_cidrs excluded, prefix/ASN groupings review-only.
+    Never writes, never performs network lookups, never proposes automatic
+    range or ASN bans.
+    """
+    config = deep_merge(DEFAULTS, supplied_config if isinstance(supplied_config, Mapping) else {})
+    policy = config["registration_abuse_policy"]
+    summary: dict[str, Any] = {
+        "enabled": bool(policy.get("enabled")),
+        "crowdsec_enforcement": bool(policy.get("crowdsec_enforcement")),
+        "window_seconds": int(policy.get("window_seconds", 86400)),
+        "campaigns": [],
+    }
+    if not summary["enabled"]:
+        return summary
+    try:
+        trusted = [ipaddress.ip_network(str(cidr), strict=False) for cidr in config["trusted_cidrs"]]
+    except ValueError:
+        trusted = []
+    end_epoch = int(now_epoch if now_epoch is not None else utc_now().timestamp())
+    start_epoch = end_epoch - int(policy["window_seconds"])
+    by_ip: dict[str, list[tuple[Any, dict[str, Any]]]] = {}
+    try:
+        rows = registration_abuse_event_rows(connection, start_epoch, end_epoch)
+    except sqlite3.OperationalError:
+        return summary
+    for row in rows:
+        source_ip = str(row["source_ip"])
+        try:
+            address = ipaddress.ip_address(source_ip)
+        except ValueError:
+            continue
+        if any(address in network for network in trusted):
+            continue
+        by_ip.setdefault(source_ip, []).append((row, registration_evidence(row["metadata_json"])))
+
+    def known(source_ips: Sequence[str]) -> Mapping[str, tuple[Any, Any]]:
+        try:
+            return cached_asns_from(connection, source_ips)
+        except sqlite3.OperationalError:
+            return {}
+
+    summary["campaigns"] = summarize_registration_campaigns(
+        by_ip,
+        policy,
+        int(config["policy"]["network_block_min_ipv4_prefix_length"]),
+        int(config["policy"]["network_block_min_ipv6_prefix_length"]),
+        known,
+    )
+    return summary
+
+
 def candidate_network(source_ip: str) -> str | None:
     try:
         address = ipaddress.ip_address(source_ip)
@@ -3820,48 +4010,16 @@ class Collector:
         minimum = int(
             minimum_ips if minimum_ips is not None else mail_policy["campaign_prefix_min_ips"]
         )
-        groups: dict[str, list[ipaddress.IPv4Address | ipaddress.IPv6Address]] = {}
-        failures: dict[str, int] = {}
-        for source_ip, rows in per_ip.items():
-            address = ipaddress.ip_address(source_ip)
-            boundary = int(
-                policy["network_block_min_ipv4_prefix_length"]
-                if address.version == 4
-                else policy["network_block_min_ipv6_prefix_length"]
-            )
-            bounded = str(ipaddress.ip_network(f"{address}/{boundary}", strict=False))
-            groups.setdefault(bounded, []).append(address)
-            failures[bounded] = failures.get(bounded, 0) + len(rows)
-        proposals: list[dict[str, Any]] = []
-        for bounded, addresses in groups.items():
-            if len(addresses) < minimum:
-                continue
-            network = ipaddress.ip_network(bounded)
-            ordered = sorted(addresses, key=int)
-            low, high = int(ordered[0]), int(ordered[-1])
-            common = ordered[0].max_prefixlen - (low ^ high).bit_length()
-            proposal = ipaddress.ip_network((low, max(common, network.prefixlen)), strict=False)
-            proposals.append({
-                "bounded_cidr": bounded,
-                "proposal_cidr": str(proposal),
-                "source_ips": len(ordered),
-                "failures": failures[bounded],
-                "review_only": True,
-            })
-        proposals.sort(key=lambda item: (-item["source_ips"], -item["failures"], item["proposal_cidr"]))
-        return proposals
+        return bounded_prefix_proposals(
+            per_ip,
+            minimum,
+            int(policy["network_block_min_ipv4_prefix_length"]),
+            int(policy["network_block_min_ipv6_prefix_length"]),
+        )
 
     def mail_asn_summary(self, source_ips: Sequence[str]) -> list[dict[str, Any]]:
         """Review-only ASN grouping from locally cached enrichment (no lookups)."""
-        known = self.db.cached_asns(source_ips)
-        groups: dict[Any, dict[str, Any]] = {}
-        for source_ip in source_ips:
-            asn, holder = known.get(source_ip, (None, None))
-            if asn is None:
-                continue
-            item = groups.setdefault(asn, {"asn": asn, "asn_holder": holder, "source_ips": 0, "review_only": True})
-            item["source_ips"] += 1
-        return sorted(groups.values(), key=lambda item: (-item["source_ips"], str(item["asn"])))
+        return asn_groups(source_ips, self.db.cached_asns(source_ips))
 
     def evaluate_mail_account_slowburn(self, now_epoch: int | None = None) -> int:
         """Account-keyed mail slow-burn policy.
@@ -4084,49 +4242,13 @@ class Collector:
         policy = self.config.get("registration_abuse_policy", {})
         if not policy.get("enabled"):
             return []
-        groups: dict[str, dict[str, list[sqlite3.Row]]] = {}
-        details: dict[str, dict[str, Any]] = {}
-        for source_ip, rows in self.registration_abuse_window(now_epoch).items():
-            for row, evidence in rows:
-                signature = evidence["fingerprint_signature"]
-                if not signature:
-                    continue
-                groups.setdefault(signature, {}).setdefault(source_ip, []).append(row)
-                detail = details.setdefault(signature, {"sites": set(), "denied": 0, "rule_ids": {}})
-                detail["sites"].add(str(row["site_id"]))
-                if str(row["outcome"]) == "denied":
-                    detail["denied"] += 1
-                for rule in evidence["rule_ids"]:
-                    detail["rule_ids"][rule] = detail["rule_ids"].get(rule, 0) + 1
-        campaigns: list[dict[str, Any]] = []
-        minimum = int(policy["campaign_review_distinct_ips"])
-        sample_limit = int(policy["max_campaign_sample_ips"])
-        for signature, per_ip in groups.items():
-            if len(per_ip) < minimum:
-                continue
-            detail = details[signature]
-            all_rows = [row for rows in per_ip.values() for row in rows]
-            ranked = sorted(per_ip, key=lambda ip: (-len(per_ip[ip]), ip))
-            top_rules = sorted(detail["rule_ids"].items(), key=lambda item: (-item[1], item[0]))
-            campaigns.append({
-                "fingerprint_signature": signature,
-                "status": "review",
-                "events": len(all_rows),
-                "denied_events": int(detail["denied"]),
-                "distinct_source_ips": len(per_ip),
-                "sites": sorted(detail["sites"]),
-                "first_seen": epoch_text(min(int(row["occurred_epoch"]) for row in all_rows)),
-                "last_seen": epoch_text(max(int(row["occurred_epoch"]) for row in all_rows)),
-                "top_rule_ids": [rule for rule, _ in top_rules[:10]],
-                "sample_source_ips": ranked[:sample_limit],
-                "prefix_proposals": self.mail_prefix_proposals(
-                    per_ip, int(policy["campaign_prefix_min_ips"])
-                ),
-                "asn_summary": self.mail_asn_summary(list(per_ip)),
-                "review_only": True,
-            })
-        campaigns.sort(key=lambda item: (-item["distinct_source_ips"], -item["events"], item["fingerprint_signature"]))
-        return campaigns
+        return summarize_registration_campaigns(
+            self.registration_abuse_window(now_epoch),
+            policy,
+            int(self.config["policy"]["network_block_min_ipv4_prefix_length"]),
+            int(self.config["policy"]["network_block_min_ipv6_prefix_length"]),
+            self.db.cached_asns,
+        )
 
     def evaluate_new_events(self, events: Sequence[Mapping[str, Any]]) -> None:
         wordpress_events = [
