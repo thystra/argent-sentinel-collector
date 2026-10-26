@@ -94,7 +94,7 @@ class MailSlowBurnTest(unittest.TestCase):
 
     # -- helpers -----------------------------------------------------------
     def config(self, **mail_policy) -> dict:
-        policy = {"enabled": True, "privacy_key_file": str(self.key)}
+        policy = {"enabled": True, "crowdsec_enforcement": True, "privacy_key_file": str(self.key)}
         policy.update(mail_policy)
         config = collector.deep_merge(collector.DEFAULTS, {
             "state_db": str(self.root / "state.sqlite3"),
@@ -154,6 +154,7 @@ class MailSlowBurnTest(unittest.TestCase):
     def test_defaults_are_conservative_and_disabled(self) -> None:
         defaults = collector.DEFAULTS["mail_account_policy"]
         self.assertFalse(defaults["enabled"])
+        self.assertFalse(defaults["crowdsec_enforcement"])
         self.assertFalse(defaults["abuse_reporting_enabled"])
         self.assertEqual(
             (86400, 10, 5, 2, 6, 3, "168h"),
@@ -197,6 +198,47 @@ class MailSlowBurnTest(unittest.TestCase):
             campaign["status"], campaign["failures"],
             campaign["distinct_source_ips"], campaign["enforced_source_ips"],
         ))
+
+    def test_crowdsec_enforcement_false_is_dry_run_even_with_global_crowdsec(self) -> None:
+        ips = sources("45.155.205", 3) + sources("185.220.101", 2)
+        self.deliver(self.campaign_rows(ALICE, ips, 2))
+        instance, recorder = self.run_collector(self.config(crowdsec_enforcement=False))
+        incidents = self.incidents(instance)
+        self.assertEqual(sorted(ips), [row["source_ip"] for row in incidents])
+        for row in incidents:
+            self.assertEqual("mail-account-slow-burn", row["rule_id"])
+            self.assertEqual("dry-run", row["decision_status"])
+            self.assertIn("mail_account_policy.crowdsec_enforcement is false", row["decision_detail"])
+        self.assertEqual([], recorder.decisions)
+        self.assertEqual("enforcing", instance.db.mail_campaigns()[0]["status"])
+
+    def test_crowdsec_enforcement_defaults_to_dry_run(self) -> None:
+        ips = sources("45.155.205", 5)
+        self.deliver(self.campaign_rows(ALICE, ips, 2))
+        supplied = self.config()
+        del supplied["mail_account_policy"]["crowdsec_enforcement"]
+        config = collector.deep_merge(collector.DEFAULTS, supplied)
+        self.assertFalse(config["mail_account_policy"]["crowdsec_enforcement"])
+        instance, recorder = self.run_collector(config)
+        self.assertEqual(5, len(self.incidents(instance)))
+        self.assertTrue(all(row["decision_status"] == "dry-run" for row in self.incidents(instance)))
+        self.assertEqual([], recorder.decisions)
+
+    def test_mail_gate_does_not_affect_other_policies(self) -> None:
+        config = self.config(crowdsec_enforcement=False)
+        instance = collector.Collector(config)
+        self.instances.append(instance)
+        recorder = CscliRecorder()
+        row = {"source_ip": "45.155.205.99", "rule_id": "wordpress-persistent-abuse",
+               "last_seen_epoch": int(time.time())}
+        with mock.patch.object(collector.subprocess, "run", side_effect=recorder):
+            status, _detail = instance.apply_decision(row)
+        self.assertEqual("applied", status)
+        self.assertEqual(1, len(recorder.decisions))
+
+    def test_crowdsec_enforcement_must_be_boolean(self) -> None:
+        with self.assertRaisesRegex(collector.CollectorError, "crowdsec_enforcement must be boolean"):
+            self.config(crowdsec_enforcement="false")
 
     def test_rerun_is_idempotent(self) -> None:
         self.deliver(self.campaign_rows(ALICE, sources("45.155.205", 5), 2))

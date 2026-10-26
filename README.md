@@ -489,8 +489,14 @@ Abuse-report connection formatting is service aware: OpenSSH events use `scheme=
 `mail_account_policy` (disabled by default) aggregates `mail_auth_failed`
 events per HMAC target-account token across source IPs and, past N failures
 from M distinct IPs in the window (defaults 10 / 5 / 24 h; protected mailboxes
-6 / 3), creates per-IP incidents and per-IP CrowdSec decisions only. Prefix and
-ASN groupings are review-only. Protected mailboxes are configured on the host
+6 / 3), creates per-IP incidents and per-IP CrowdSec decisions only. CrowdSec
+is operator-gated exactly like registration abuse: decisions are recorded as
+`dry-run` (incident monitor only) unless both `crowdsec.enabled` and
+`mail_account_policy.crowdsec_enforcement` (default false) are true. With
+`crowdsec_enforcement: false`, `mail_account_policy.enabled: true` is a safe
+dry-run / incident monitor **even when the global `crowdsec.enabled` is true**:
+incidents and campaigns are recorded, no mail ban is issued, and other policies
+keep enforcing. Prefix and ASN groupings are review-only. Protected mailboxes are configured on the host
 only, never in git. See `docs/mail-auth-events.md`.
 
 ## Access Guard registration-abuse policy
