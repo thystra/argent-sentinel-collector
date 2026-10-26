@@ -19,7 +19,9 @@ jobs:
     runs-on: forgejo-workstation
     timeout-minutes: 20
     container:
-      image: python:3.12-bookworm
+      # node is required by the checkout action; the Debian bookworm image
+      # also ships python3 (3.11), git, and dpkg-deb, which is all CI needs.
+      image: node:24-bookworm
     steps:
       - name: Check out repository
         uses: https://data.forgejo.org/actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -38,7 +40,9 @@ jobs:
     timeout-minutes: 20
     needs: test
     container:
-      image: python:3.12-bookworm
+      # node is required by the checkout action; the Debian bookworm image
+      # also ships python3 (3.11), git, and dpkg-deb, which is all CI needs.
+      image: node:24-bookworm
     steps:
       - name: Check out repository
         uses: https://data.forgejo.org/actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd

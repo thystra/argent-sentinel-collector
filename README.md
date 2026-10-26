@@ -547,8 +547,9 @@ XARF reporting, production reporting, and legacy migration.
 
 Forgejo Actions runs `.forgejo/workflows/ci.yml` on every pull request and on
 pushes to `main` (runner label `forgejo-workstation`, container
-`python:3.12-bookworm`, matching Ubuntu 24.04's Python on nidhoggur). Both jobs
-call `scripts/ci-check.sh`, which can be run identically on fafnir:
+`node:24-bookworm`: the checkout action needs node, and the image's Debian
+python3 3.11 also checks the `python3 (>= 3.10)` package floor). Both jobs call
+`scripts/ci-check.sh`, which can be run identically on fafnir:
 
 ```bash
 cd ~/src/argent-sentinel/argent-sentinel
