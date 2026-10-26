@@ -89,14 +89,19 @@ For each account token inside `window_seconds`:
    account gets its **own per-IP incident** (rule `mail-account-slow-burn`, or
    `mail-protected-account-slow-burn` for a protected mailbox) and therefore its
    own per-IP CrowdSec decision (`cscli decisions add --ip`, duration
-   `ban_duration`). The usual guards apply: `crowdsec.enabled`, CrowdSec
+   `ban_duration`). CrowdSec is **operator-gated**: the decision is only
+   issued when both the global `crowdsec.enabled` and
+   `mail_account_policy.crowdsec_enforcement` (default `false`) are true;
+   otherwise the incident is recorded with decision status `dry-run`
+   (incident monitor only). The usual guards also apply: CrowdSec
    allowlists, `trusted_cidrs`, non-global addresses, max enforcement age.
 3. One-shot sources below `min_failures_per_ip` are not banned; they remain
    visible in the campaign's review-only prefix/ASN proposals.
 4. **Prefix and ASN aggregation is review-only.** Each campaign records bounded
    prefix proposals (`/24` IPv4, `/48` IPv6, narrowed to the smallest common
    prefix) and ASN groups from locally cached enrichment. They appear in
-   `argent-sentinel status`, the dashboard snapshot/Incidents page, and the
+   `argent-sentinel status`, the dashboard snapshot, the dashboard Mail page
+   (`/mail`, also embedded in Incidents as `#mail`), and the
    daily review digest. Nothing creates range, ASN, or country decisions; the
    per-IP incidents also feed the existing audited CIDR review queue, where any
    range decision still needs an operator action.
@@ -194,7 +199,25 @@ owner.
    service='mail' GROUP BY account_key ORDER BY 2 DESC`).
 2. Add protected tokens as above; `argent-sentinel --config
    /etc/argent-sentinel/collector.json validate-config`.
-3. Set `mail_account_policy.enabled: true`; with `crowdsec.enabled: false` the
-   decisions are recorded as `dry-run` first, which is a safe soak.
-4. Inspect `argent-sentinel status` → `mail_account_campaigns`, then enable
-   CrowdSec enforcement; leave `abuse_reporting_enabled: false` until reviewed.
+3. Incident monitor / dry-run soak: set `mail_account_policy.enabled: true`
+   and leave `mail_account_policy.crowdsec_enforcement: false` (the default).
+   Incidents and campaigns are recorded, decisions show `dry-run`, and no
+   CrowdSec ban is issued even when the global `crowdsec.enabled` is true
+   (other policies keep enforcing):
+
+   ```json
+   "mail_account_policy": {
+     "enabled": true,
+     "crowdsec_enforcement": false,
+     "abuse_reporting_enabled": false
+   }
+   ```
+
+4. Inspect `argent-sentinel status` → `mail_account_campaigns` and the
+   dashboard Mail page (`/mail`: policy state and thresholds, campaigns,
+   failures by source, and individual recent failures), then set `crowdsec_enforcement: true` to issue
+   per-IP bans; leave `abuse_reporting_enabled: false` until reviewed.
+
+Packages older than 0.5.6.1 have no `crowdsec_enforcement` key for this policy:
+on 0.5.6.0 with global CrowdSec on, `enabled: true` issues real bans. Install
+0.5.6.1 before enabling the policy.

@@ -24,10 +24,10 @@ from watchdogs import php_fpm, unbound  # noqa: E402
 
 class V0550Test(unittest.TestCase):
     def test_release_version(self) -> None:
-        self.assertEqual("0.5.6.0", (ROOT / "VERSION").read_text().strip())
-        self.assertEqual("0.5.6.0", watchdog.APP_VERSION)
-        self.assertEqual("0.5.6.0", dashboard.APP_VERSION)
-        self.assertEqual("0.5.6.0", dashboard_snapshot.APP_VERSION)
+        self.assertEqual("0.5.6.1", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.6.1", watchdog.APP_VERSION)
+        self.assertEqual("0.5.6.1", dashboard.APP_VERSION)
+        self.assertEqual("0.5.6.1", dashboard_snapshot.APP_VERSION)
 
     def test_packaged_watchdog_assets_exist(self) -> None:
         required = (

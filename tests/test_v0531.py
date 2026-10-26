@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # File: /home/alan/src/argent-sentinel-collector/tests/test_v0531.py
-"""Regression coverage for Argent Sentinel 0.5.6.0."""
+"""Regression coverage for Argent Sentinel 0.5.6.1."""
 
 from __future__ import annotations
 
@@ -27,11 +27,11 @@ UTC = dt.timezone.utc
 
 class V0531Test(unittest.TestCase):
     def test_release_and_schema_markers(self) -> None:
-        self.assertEqual("0.5.6.0", (ROOT / "VERSION").read_text().strip())
-        self.assertEqual("0.5.6.0", collector.APP_VERSION)
-        self.assertEqual("0.5.6.0", dashboard.APP_VERSION)
-        self.assertEqual("0.5.6.0", dashboard_snapshot.APP_VERSION)
-        self.assertEqual("0.5.6.0", review_processor.APP_VERSION)
+        self.assertEqual("0.5.6.1", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.6.1", collector.APP_VERSION)
+        self.assertEqual("0.5.6.1", dashboard.APP_VERSION)
+        self.assertEqual("0.5.6.1", dashboard_snapshot.APP_VERSION)
+        self.assertEqual("0.5.6.1", review_processor.APP_VERSION)
         self.assertEqual(9, review_queue.SCHEMA_VERSION)
 
     def test_collector_accepts_dedicated_protected_cidrs(self) -> None:

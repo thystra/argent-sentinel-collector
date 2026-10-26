@@ -43,7 +43,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.5.6.0"
+APP_VERSION = "0.5.6.1"
 SCHEMA_VERSION = 9
 
 DEFAULTS: dict[str, Any] = {
@@ -128,9 +128,13 @@ DEFAULTS: dict[str, Any] = {
     # Account-keyed slow-burn policy for service "mail" / "mail_auth_failed".
     # Unlike WordPress (site + source IP), the key is the HMAC target-account
     # token, aggregated across many source IPs. Enforcement is per source IP
-    # only; prefix/ASN aggregation is review-only. Disabled by default.
+    # only; prefix/ASN aggregation is review-only. Disabled by default. Even
+    # when enabled, CrowdSec stays dry-run (incident monitor only) until
+    # ``crowdsec_enforcement`` is true *and* the global ``crowdsec.enabled``
+    # guard is on, matching ``registration_abuse_policy``.
     "mail_account_policy": {
         "enabled": False,
+        "crowdsec_enforcement": False,
         "window_seconds": 86400,
         "failure_threshold": 10,
         "distinct_source_ips": 5,
@@ -816,7 +820,7 @@ def validate_mail_account_policy(policy: Mapping[str, Any]) -> None:
             raise CollectorError(f"mail_account_policy.{name} must be an integer") from exc
         if value < 1:
             raise CollectorError(f"mail_account_policy.{name} must be positive")
-    for name in ("enabled", "abuse_reporting_enabled"):
+    for name in ("enabled", "crowdsec_enforcement", "abuse_reporting_enabled"):
         if not isinstance(policy.get(name), bool):
             raise CollectorError(f"mail_account_policy.{name} must be boolean")
     if int(policy["distinct_source_ips"]) < 2 or int(policy["protected_distinct_source_ips"]) < 2:
@@ -4093,10 +4097,11 @@ class Collector:
                         changed.add(incident_uuid)
                         LOG.warning(
                             "Mail account slow-burn incident %s: site=%s campaign=%s%s ip=%s "
-                            "events=%d campaign_failures=%d campaign_ips=%d",
+                            "events=%d campaign_failures=%d campaign_ips=%d enforcement=%s",
                             incident_uuid, site_id, campaign_id,
                             f" protected={label}" if is_protected else "",
                             source_ip, int(incident["event_count"]), failures, len(per_ip),
+                            "on" if policy.get("crowdsec_enforcement") else "dry-run",
                         )
             all_rows = [row for rows in per_ip.values() for row in rows]
             first_epoch = min(int(row["occurred_epoch"]) for row in all_rows)
@@ -4891,6 +4896,14 @@ class Collector:
             return "dry-run", (
                 "Registration-abuse CrowdSec enforcement is operator-gated "
                 "(registration_abuse_policy.crowdsec_enforcement is false)"
+            )
+        if (
+            str(incident["rule_id"]) in MAIL_RULES
+            and not self.config["mail_account_policy"].get("crowdsec_enforcement")
+        ):
+            return "dry-run", (
+                "Mail account slow-burn CrowdSec enforcement is operator-gated "
+                "(mail_account_policy.crowdsec_enforcement is false)"
             )
         maximum_age = int(self.config["policy"]["max_enforcement_age_days"]) * 86400
         if int(utc_now().timestamp()) - int(incident["last_seen_epoch"]) > maximum_age:

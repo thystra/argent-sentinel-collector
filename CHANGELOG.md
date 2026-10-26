@@ -1,3 +1,34 @@
+## 0.5.6.1 (unreleased — mail incident-monitor / dry-run safety)
+
+- Add `mail_account_policy.crowdsec_enforcement` (default `false`, validated
+  boolean). `apply_decision()` now gates `mail-account-slow-burn` and
+  `mail-protected-account-slow-burn` the same way as registration abuse: a
+  CrowdSec decision is only issued when both the global `crowdsec.enabled` and
+  `mail_account_policy.crowdsec_enforcement` are true; otherwise the incident is
+  recorded with decision status `dry-run`.
+- With `crowdsec_enforcement: false`, `mail_account_policy.enabled: true` is a
+  safe dry-run / incident monitor **even when global `crowdsec.enabled` is
+  true**; other policies keep enforcing. In 0.5.6.0 there was no such gate, so
+  enabling the mail policy with global CrowdSec on issued real bans.
+- New mail incidents log `enforcement=on|dry-run`.
+- Dashboard: new **Mail** page (`/mail`, nav link; also embedded in
+  `/incidents` under `#mail`) with the mail policy state (disabled / dry-run
+  (incident monitor only) / on) and thresholds, slow-burn campaigns
+  (`#mail-campaigns`, now with protocols and sample IPs), failures grouped by
+  source IP/node/protocol (`#mail-auth-failures`), and individual recent
+  failures (`#mail-recent-failures`: time, source IP, node, protocol, port,
+  mechanism, account class, export-safe campaign id). Account names and HMAC
+  tokens are never shown. The Overview "Mail auth failures" card now links to
+  `/mail`; previously it linked to plain `/incidents`, which shows nothing mail
+  specific until the policy produces incidents or campaigns. "Registration
+  abuse events" now links to `/incidents#registration-abuse`.
+- Snapshot gains `mail_auth_failures` (grouped), `recent_mail_auth_failures`
+  (individual events; no `account_key`, allowlisted metadata only), and
+  `mail_account_policy` (state and thresholds; protected tokens, file path,
+  and privacy key path are excluded, only counts/booleans).
+- No schema migration; existing `collector.json` files without the new key
+  default to dry-run for mail.
+
 ## 0.5.6.0 (unreleased — release candidate, not deployed)
 
 - Add observe-only mail authentication ingest as one agent/batch service,

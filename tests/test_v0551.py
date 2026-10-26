@@ -19,7 +19,7 @@ from watchdogs import php_fpm  # noqa: E402
 
 class V0551Test(unittest.TestCase):
     def test_release_version_and_auto_package_default(self) -> None:
-        self.assertEqual("0.5.6.0", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.6.1", (ROOT / "VERSION").read_text().strip())
         value = json.loads(
             (ROOT / "config/watchdog.d/20-php_fpm.json").read_text()
         )

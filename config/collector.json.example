@@ -99,6 +99,7 @@
     "ban_duration": "168h",
     "campaign_prefix_min_ips": 2,
     "campaign_review_distinct_ips": 3,
+    "crowdsec_enforcement": false,
     "distinct_source_ips": 5,
     "enabled": false,
     "failure_threshold": 10,
