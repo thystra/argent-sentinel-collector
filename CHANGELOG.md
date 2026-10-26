@@ -18,11 +18,33 @@
   reports, or prefix proposals are produced from mail events in this release.
 - Add `--mail` to `argent-sentinel-configure-agent` and document the format in
   `docs/mail-auth-events.md`.
-- Planned for the follow-up enforcement PR (not implemented here): per-IP
-  CrowdSec decisions after N failures against one target account token from M
-  distinct source IPs (N/M defaults to be proposed in that PR); prefix and ASN
-  aggregation remain review-only proposals; no country or ASN automatic bans;
-  operator-listed real mailboxes are treated as protected accounts.
+
+### Mail account slow-burn policy (PR2, same unreleased 0.5.6.0)
+
+- Add collector `mail_account_policy` for `mail` / `mail_auth_failed`, keyed on
+  the HMAC **target-account token** across many source IPs (unlike the
+  WordPress site + source-IP persistent policy). When one account sees ≥ N
+  failures from ≥ M distinct IPs inside the window, each participating IP with
+  ≥ `min_failures_per_ip` failures gets its own per-IP incident and CrowdSec
+  decision. Rules: `mail-account-slow-burn` and
+  `mail-protected-account-slow-burn`.
+- Defaults (disabled): 24 h window, N=10, M=5, 2 failures per banned IP,
+  protected mailboxes N=6/M=3, per-IP `ban_duration` 168 h, provider reporting
+  suppressed. Distinct-IP thresholds below 2 are rejected (single-source
+  brute force stays fail2ban's job; fail2ban is unchanged).
+- Record per-account campaigns (`mail_account_campaigns` table, export-safe
+  `campaign_id`) with review-only bounded prefix proposals and cached-ASN
+  groups in `status`, the dashboard snapshot/Incidents page, and the daily
+  review digest. No range, ASN, or country decision is ever automatic.
+- Protected mailboxes are configured only on the collector host, as
+  precomputed tokens (`protected_account_tokens`, from the new
+  `argent-sentinel mail-account-token` stdin helper) or a root-only 0600
+  `protected_accounts_file` hashed at runtime in the same `mail` HMAC domain as
+  ingest. Validation rejects plaintext addresses in tokens or labels.
+- XARF/email reports for mail incidents reuse `login_attack` /
+  `credential_attack` with `service:mail`; report batching and the reporting
+  view gain a `mail` family. Account tokens and names are never exported.
+- Add `tests/test_v0560_mail_slowburn.py`.
 
 ## 0.5.5.1
 ### Debian revision 0.5.5.1-2

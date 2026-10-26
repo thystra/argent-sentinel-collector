@@ -94,6 +94,24 @@
     "suppress_matching_markers": true
   },
   "lock_file": "/run/argent-sentinel/collector.lock",
+  "mail_account_policy": {
+    "abuse_reporting_enabled": false,
+    "ban_duration": "168h",
+    "campaign_prefix_min_ips": 2,
+    "campaign_review_distinct_ips": 3,
+    "distinct_source_ips": 5,
+    "enabled": false,
+    "failure_threshold": 10,
+    "incident_merge_seconds": 86400,
+    "max_campaign_sample_ips": 10,
+    "min_failures_per_ip": 2,
+    "privacy_key_file": "/etc/argent-sentinel/agent-privacy.key",
+    "protected_account_tokens": [],
+    "protected_accounts_file": "",
+    "protected_distinct_source_ips": 3,
+    "protected_failure_threshold": 6,
+    "window_seconds": 86400
+  },
   "max_batch_bytes": 20971520,
   "network_reporting": {
     "automatic_cidr_blocking": false,

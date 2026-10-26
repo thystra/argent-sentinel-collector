@@ -31,6 +31,8 @@ def utc_text(value: dt.datetime | None = None) -> str:
 def report_family(rule_id: str) -> str:
     if rule_id.startswith("sshd-"):
         return "sshd"
+    if rule_id.startswith("mail-"):
+        return "mail"
     if rule_id.startswith("nginx-"):
         return "web"
     return "wordpress"

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Argent Sentinel host collector.
 
-Imports immutable WordPress and OpenSSH event batches, deduplicates events,
-correlates credential-spray and SSH brute-force incidents, imports Nginx
+Imports immutable WordPress, OpenSSH, and mail event batches, deduplicates
+events, correlates credential-spray, SSH brute-force, and account-keyed mail
+slow-burn incidents, imports Nginx
 abuse-context observations, correlates network tuples, and optionally submits
 CrowdSec decisions and sanitized abuse reports.
 """
@@ -18,12 +19,14 @@ import errno
 import fcntl
 import glob
 import hashlib
+import hmac
 import http.client
 import ipaddress
 import json
 import logging
 import os
 import re
+import sys
 import socket
 import sqlite3
 import stat
@@ -121,6 +124,28 @@ DEFAULTS: dict[str, Any] = {
         "single_account_threshold": 12,
         "incident_merge_seconds": 86400,
         "abuse_reporting_enabled": False,
+    },
+    # Account-keyed slow-burn policy for service "mail" / "mail_auth_failed".
+    # Unlike WordPress (site + source IP), the key is the HMAC target-account
+    # token, aggregated across many source IPs. Enforcement is per source IP
+    # only; prefix/ASN aggregation is review-only. Disabled by default.
+    "mail_account_policy": {
+        "enabled": False,
+        "window_seconds": 86400,
+        "failure_threshold": 10,
+        "distinct_source_ips": 5,
+        "min_failures_per_ip": 2,
+        "protected_failure_threshold": 6,
+        "protected_distinct_source_ips": 3,
+        "incident_merge_seconds": 86400,
+        "ban_duration": "168h",
+        "abuse_reporting_enabled": False,
+        "campaign_review_distinct_ips": 3,
+        "campaign_prefix_min_ips": 2,
+        "max_campaign_sample_ips": 10,
+        "protected_account_tokens": [],
+        "protected_accounts_file": "",
+        "privacy_key_file": "/etc/argent-sentinel/agent-privacy.key",
     },
     "legacy_reporting": {
         "marker_state_dir": "/var/lib/nginx-abuse-drafts",
@@ -549,6 +574,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
             raise CollectorError(
                 f"persistent_wordpress_policy.{name} must be boolean"
             )
+    validate_mail_account_policy(config.get("mail_account_policy", {}))
     batching = config["report_batching"]
     if not isinstance(batching.get("enabled"), bool):
         raise CollectorError(
@@ -672,6 +698,95 @@ def validate_config(config: Mapping[str, Any]) -> None:
     message_domain = str(reporting.get("message_id_domain", "")).strip()
     if not message_domain or any(character in message_domain for character in "\r\n <>@"):
         raise CollectorError("abuse_reporting.message_id_domain must be a safe DNS-style domain")
+
+
+MAIL_PRIVACY_DOMAIN = "mail"
+MAIL_ACCOUNT_KEY_RE = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}:account:)?[0-9a-f]{64}$")
+MAIL_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:-]{0,63}$")
+MAIL_RULES = ("mail-account-slow-burn", "mail-protected-account-slow-burn")
+
+
+def mail_privacy_token(secret: bytes, node_id: str, account: str) -> str:
+    """Return the agent's mail-domain HMAC token for ``account``.
+
+    Must stay byte-for-byte identical to ``agent.privacy_token(..., "mail")`` so
+    operator-listed protected mailboxes match ingested events.
+    """
+    material = f"{MAIL_PRIVACY_DOMAIN}\0{node_id}\0{account.casefold()}".encode("utf-8", "replace")
+    return hmac.new(secret, material, hashlib.sha256).hexdigest()
+
+
+def mail_campaign_id(account_key: str) -> str:
+    """Non-reversible, export-safe identifier for one target-account campaign."""
+    return hashlib.sha256(f"mail-campaign\0{account_key}".encode("utf-8")).hexdigest()[:16]
+
+
+def validate_mail_label(label: Any, where: str) -> str:
+    value = str(label if label is not None else "protected").strip() or "protected"
+    # Labels are exported to status/dashboard/digest; never allow an address.
+    if "@" in value or not MAIL_LABEL_RE.fullmatch(value):
+        raise CollectorError(
+            f"{where}: label must be a short non-address name (letters, digits, space, ._:-; no '@')"
+        )
+    return value
+
+
+def normalize_protected_mail_tokens(entries: Any) -> dict[str, str]:
+    if not isinstance(entries, list):
+        raise CollectorError("mail_account_policy.protected_account_tokens must be a list")
+    result: dict[str, str] = {}
+    for index, entry in enumerate(entries):
+        where = f"mail_account_policy.protected_account_tokens[{index}]"
+        if isinstance(entry, str):
+            token, label = entry, "protected"
+        elif isinstance(entry, Mapping):
+            token, label = entry.get("token", ""), entry.get("label", "protected")
+        else:
+            raise CollectorError(f"{where} must be a token string or {{token, label}} object")
+        token = str(token).strip()
+        prefix, _, digest = token.rpartition(":account:")
+        normalized = f"{prefix}:account:{digest.lower()}" if prefix else digest.lower()
+        if "@" in token or not MAIL_ACCOUNT_KEY_RE.fullmatch(normalized):
+            raise CollectorError(
+                f"{where}: expected SITE_ID:account:<64 hex> or <64 hex>; plaintext addresses are not accepted"
+            )
+        result[normalized] = validate_mail_label(label, where)
+    return result
+
+
+def validate_mail_account_policy(policy: Mapping[str, Any]) -> None:
+    for name in (
+        "window_seconds",
+        "failure_threshold",
+        "distinct_source_ips",
+        "min_failures_per_ip",
+        "protected_failure_threshold",
+        "protected_distinct_source_ips",
+        "incident_merge_seconds",
+        "campaign_review_distinct_ips",
+        "campaign_prefix_min_ips",
+        "max_campaign_sample_ips",
+    ):
+        try:
+            value = int(policy.get(name, 0))
+        except (TypeError, ValueError) as exc:
+            raise CollectorError(f"mail_account_policy.{name} must be an integer") from exc
+        if value < 1:
+            raise CollectorError(f"mail_account_policy.{name} must be positive")
+    for name in ("enabled", "abuse_reporting_enabled"):
+        if not isinstance(policy.get(name), bool):
+            raise CollectorError(f"mail_account_policy.{name} must be boolean")
+    if int(policy["distinct_source_ips"]) < 2 or int(policy["protected_distinct_source_ips"]) < 2:
+        raise CollectorError(
+            "mail_account_policy distinct source IP thresholds must be at least 2; "
+            "single-source mail brute force is fail2ban's job"
+        )
+    if not re.fullmatch(r"[1-9][0-9]*[smh]", str(policy.get("ban_duration", ""))):
+        raise CollectorError("mail_account_policy.ban_duration must look like 168h")
+    normalize_protected_mail_tokens(policy.get("protected_account_tokens", []))
+    for name in ("protected_accounts_file", "privacy_key_file"):
+        if not isinstance(policy.get(name, ""), str):
+            raise CollectorError(f"mail_account_policy.{name} must be a string path")
 
 
 def valid_email_header(value: str) -> bool:
@@ -992,6 +1107,34 @@ class StateDB:
             );
             CREATE INDEX IF NOT EXISTS node_protection_history_node_time
                 ON node_protection_inventory_history(node_id, generated_epoch DESC);
+            CREATE TABLE IF NOT EXISTS mail_account_campaigns (
+                site_id TEXT NOT NULL,
+                account_key TEXT NOT NULL,
+                campaign_id TEXT NOT NULL UNIQUE,
+                protected INTEGER NOT NULL DEFAULT 0,
+                protected_label TEXT,
+                status TEXT NOT NULL,
+                failures INTEGER NOT NULL,
+                distinct_source_ips INTEGER NOT NULL,
+                enforced_source_ips INTEGER NOT NULL DEFAULT 0,
+                failure_threshold INTEGER NOT NULL,
+                distinct_ip_threshold INTEGER NOT NULL,
+                window_seconds INTEGER NOT NULL,
+                first_seen_epoch INTEGER NOT NULL,
+                last_seen_epoch INTEGER NOT NULL,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                protocols TEXT,
+                sample_source_ips_json TEXT NOT NULL DEFAULT '[]',
+                prefix_proposals_json TEXT NOT NULL DEFAULT '[]',
+                asn_summary_json TEXT NOT NULL DEFAULT '[]',
+                automatic_block INTEGER NOT NULL DEFAULT 0,
+                review_status TEXT NOT NULL DEFAULT 'open',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (site_id, account_key)
+            );
+            CREATE INDEX IF NOT EXISTS mail_account_campaigns_last_seen
+                ON mail_account_campaigns(last_seen_epoch DESC);
             CREATE TABLE IF NOT EXISTS legacy_reports (
                 marker_key TEXT PRIMARY KEY,
                 source_ip TEXT NOT NULL,
@@ -1025,6 +1168,10 @@ class StateDB:
         self.conn.execute(
             """CREATE INDEX IF NOT EXISTS incidents_ip_rule_site_time
                ON incidents(source_ip, rule_id, site_id, last_seen_epoch)"""
+        )
+        self.conn.execute(
+            """CREATE INDEX IF NOT EXISTS events_service_type_time
+               ON events(service, event_type, occurred_epoch)"""
         )
         self.ensure_column(
             "network_cases", "suggested_block_days",
@@ -1226,6 +1373,93 @@ class StateDB:
                 (source_ip, site_id, start_epoch, end_epoch),
             )
         )
+    def mail_account_failures(self, start_epoch: int, end_epoch: int) -> list[sqlite3.Row]:
+        """Mail auth failures with a target-account token, oldest first."""
+        return list(
+            self.conn.execute(
+                """SELECT event_uuid, occurred_epoch, occurred_at, site_id, account_key,
+                          source_ip, source_port, destination_ip, destination_port,
+                          transport_protocol, application_protocol
+                   FROM events
+                   WHERE service = 'mail'
+                     AND event_type = 'mail_auth_failed'
+                     AND outcome = 'denied'
+                     AND source_ip IS NOT NULL
+                     AND account_key IS NOT NULL
+                     AND occurred_epoch BETWEEN ? AND ?
+                   ORDER BY occurred_epoch ASC, event_uuid ASC""",
+                (start_epoch, end_epoch),
+            )
+        )
+
+    def cached_asns(self, source_ips: Sequence[str]) -> dict[str, tuple[int | None, str | None]]:
+        """ASN facts already known locally (no network lookups)."""
+        result: dict[str, tuple[int | None, str | None]] = {}
+        values = sorted(set(source_ips))
+        for offset in range(0, len(values), 500):
+            chunk = values[offset:offset + 500]
+            marks = ",".join("?" for _ in chunk)
+            for row in self.conn.execute(
+                f"SELECT source_ip, asn, asn_holder FROM enrichment_cache WHERE source_ip IN ({marks})",
+                chunk,
+            ):
+                result[str(row["source_ip"])] = (row["asn"], row["asn_holder"])
+            for row in self.conn.execute(
+                f"""SELECT source_ip, asn, asn_holder FROM incidents
+                    WHERE asn IS NOT NULL AND source_ip IN ({marks})""",
+                chunk,
+            ):
+                result.setdefault(str(row["source_ip"]), (row["asn"], row["asn_holder"]))
+        return result
+
+    def upsert_mail_campaign(self, campaign: Mapping[str, Any]) -> None:
+        columns = (
+            "site_id", "account_key", "campaign_id", "protected", "protected_label",
+            "status", "failures", "distinct_source_ips", "enforced_source_ips",
+            "failure_threshold", "distinct_ip_threshold", "window_seconds",
+            "first_seen_epoch", "last_seen_epoch", "first_seen", "last_seen",
+            "protocols", "sample_source_ips_json", "prefix_proposals_json",
+            "asn_summary_json", "updated_at",
+        )
+        updates = ", ".join(
+            f"{name}=excluded.{name}" for name in columns if name not in {"site_id", "account_key", "campaign_id"}
+        )
+        with self.conn:
+            self.conn.execute(
+                f"""INSERT INTO mail_account_campaigns ({', '.join(columns)}, automatic_block)
+                    VALUES ({', '.join('?' for _ in columns)}, 0)
+                    ON CONFLICT(site_id, account_key) DO UPDATE SET {updates}, automatic_block=0""",
+                tuple(campaign[name] for name in columns),
+            )
+
+    def mail_campaigns(self, limit: int = 50, since_epoch: int = 0) -> list[dict[str, Any]]:
+        """Export-safe campaign rows: the account token itself is never returned."""
+        rows = self.conn.execute(
+            """SELECT campaign_id, site_id, protected, protected_label, status, failures,
+                      distinct_source_ips, enforced_source_ips, failure_threshold,
+                      distinct_ip_threshold, window_seconds, first_seen, last_seen,
+                      protocols, sample_source_ips_json, prefix_proposals_json,
+                      asn_summary_json, automatic_block, review_status, updated_at
+               FROM mail_account_campaigns
+               WHERE last_seen_epoch >= ?
+               ORDER BY protected DESC, CASE status WHEN 'enforcing' THEN 0 ELSE 1 END,
+                        distinct_source_ips DESC, last_seen_epoch DESC
+               LIMIT ?""",
+            (since_epoch, limit),
+        )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            for name in ("sample_source_ips_json", "prefix_proposals_json", "asn_summary_json"):
+                try:
+                    item[name[:-5]] = json.loads(str(item.pop(name) or "[]"))
+                except json.JSONDecodeError:
+                    item[name[:-5]] = []
+            item["protected"] = bool(item["protected"])
+            item["automatic_block"] = False
+            result.append(item)
+        return result
+
     def ssh_failures(self, source_ip: str, start_epoch: int, end_epoch: int) -> list[sqlite3.Row]:
         return list(
             self.conn.execute(
@@ -2742,6 +2976,7 @@ class Collector:
                 LOG.exception("Rejecting batch %s: %s", path, exc)
                 self.reject_file(claimed or path, str(exc))
         self.evaluate_persistent_wordpress_recent()
+        self.evaluate_mail_account_slowburn()
         context_files = self.import_abuse_context_files()
         protection_files = self.import_protection_inventory_files()
         self.publish_effective_protection_state()
@@ -3346,6 +3581,219 @@ class Collector:
                     int(incident["distinct_accounts"]),
                 )
         return len(changed_incidents)
+    def protected_mail_accounts(self) -> dict[str, str]:
+        """Return {account key or bare 64-hex token: label} for protected mailboxes.
+
+        Sources: precomputed ``protected_account_tokens`` (preferred; nothing
+        sensitive in collector.json) and an optional root-only
+        ``protected_accounts_file`` of plaintext mailbox names hashed here with the
+        agent privacy key in the same ``mail`` HMAC domain as ingest. Plaintext
+        names are never stored, logged, or exported.
+        """
+        policy = self.config.get("mail_account_policy", {})
+        result = normalize_protected_mail_tokens(policy.get("protected_account_tokens", []))
+        file_value = str(policy.get("protected_accounts_file", "") or "").strip()
+        if not file_value:
+            return result
+        path = Path(file_value)
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            LOG.error("Mail protected_accounts_file is missing: %s", path)
+            return result
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+            LOG.error(
+                "Ignoring mail protected_accounts_file %s: must be a regular file "
+                "not readable by group/other (chmod 0600)", path,
+            )
+            return result
+        try:
+            secret = Path(str(policy["privacy_key_file"])).read_bytes()
+        except OSError as exc:
+            LOG.error("Cannot read mail privacy key for protected accounts: %s", exc)
+            return result
+        if len(secret) < 32:
+            LOG.error("Mail privacy key must contain at least 32 bytes")
+            return result
+        node_id = str(self.config["node"]["id"])
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            text = line.strip()
+            if not text or text.startswith("#"):
+                continue
+            account, _, label = text.partition(" ")
+            try:
+                label = validate_mail_label(label.strip() or "protected", f"{path}:{number}")
+            except CollectorError as exc:
+                LOG.error("%s", exc)
+                continue
+            token = mail_privacy_token(secret, node_id, account)
+            result[f"mail-{node_id}:account:{token}"] = label
+        return result
+
+    @staticmethod
+    def _mail_protected_label(account_key: str, protected: Mapping[str, str]) -> str | None:
+        if account_key in protected:
+            return protected[account_key]
+        return protected.get(account_key.rpartition(":account:")[2])
+
+    def mail_prefix_proposals(
+        self,
+        per_ip: Mapping[str, Sequence[Any]],
+    ) -> list[dict[str, Any]]:
+        """Review-only bounded prefix aggregation for one account campaign."""
+        mail_policy = self.config["mail_account_policy"]
+        policy = self.config["policy"]
+        minimum = int(mail_policy["campaign_prefix_min_ips"])
+        groups: dict[str, list[ipaddress.IPv4Address | ipaddress.IPv6Address]] = {}
+        failures: dict[str, int] = {}
+        for source_ip, rows in per_ip.items():
+            address = ipaddress.ip_address(source_ip)
+            boundary = int(
+                policy["network_block_min_ipv4_prefix_length"]
+                if address.version == 4
+                else policy["network_block_min_ipv6_prefix_length"]
+            )
+            bounded = str(ipaddress.ip_network(f"{address}/{boundary}", strict=False))
+            groups.setdefault(bounded, []).append(address)
+            failures[bounded] = failures.get(bounded, 0) + len(rows)
+        proposals: list[dict[str, Any]] = []
+        for bounded, addresses in groups.items():
+            if len(addresses) < minimum:
+                continue
+            network = ipaddress.ip_network(bounded)
+            ordered = sorted(addresses, key=int)
+            low, high = int(ordered[0]), int(ordered[-1])
+            common = ordered[0].max_prefixlen - (low ^ high).bit_length()
+            proposal = ipaddress.ip_network((low, max(common, network.prefixlen)), strict=False)
+            proposals.append({
+                "bounded_cidr": bounded,
+                "proposal_cidr": str(proposal),
+                "source_ips": len(ordered),
+                "failures": failures[bounded],
+                "review_only": True,
+            })
+        proposals.sort(key=lambda item: (-item["source_ips"], -item["failures"], item["proposal_cidr"]))
+        return proposals
+
+    def mail_asn_summary(self, source_ips: Sequence[str]) -> list[dict[str, Any]]:
+        """Review-only ASN grouping from locally cached enrichment (no lookups)."""
+        known = self.db.cached_asns(source_ips)
+        groups: dict[Any, dict[str, Any]] = {}
+        for source_ip in source_ips:
+            asn, holder = known.get(source_ip, (None, None))
+            if asn is None:
+                continue
+            item = groups.setdefault(asn, {"asn": asn, "asn_holder": holder, "source_ips": 0, "review_only": True})
+            item["source_ips"] += 1
+        return sorted(groups.values(), key=lambda item: (-item["source_ips"], str(item["asn"])))
+
+    def evaluate_mail_account_slowburn(self, now_epoch: int | None = None) -> int:
+        """Account-keyed mail slow-burn policy.
+
+        Groups ``mail_auth_failed`` events by HMAC target-account token across
+        all source IPs. When one account has at least ``failure_threshold``
+        failures from at least ``distinct_source_ips`` distinct sources inside
+        ``window_seconds``, every participating source IP with at least
+        ``min_failures_per_ip`` failures on that account gets its own per-IP
+        incident (and therefore its own per-IP CrowdSec decision). Prefix and
+        ASN aggregation is recorded only as review-only campaign proposals.
+        """
+        policy = self.config.get("mail_account_policy", {})
+        if not policy.get("enabled"):
+            return 0
+        end_epoch = int(now_epoch if now_epoch is not None else utc_now().timestamp())
+        window = int(policy["window_seconds"])
+        start_epoch = end_epoch - window
+        protected = self.protected_mail_accounts()
+        report_enabled = bool(policy.get("abuse_reporting_enabled"))
+        report_status = "pending" if report_enabled else "suppressed"
+        report_detail = None if report_enabled else (
+            "Mail account slow-burn reporting disabled pending production review"
+        )
+        accounts: dict[tuple[str, str], dict[str, list[sqlite3.Row]]] = {}
+        for row in self.db.mail_account_failures(start_epoch, end_epoch):
+            source_ip = str(row["source_ip"])
+            try:
+                if self.trusted_ip(source_ip):
+                    continue
+            except ValueError:
+                continue
+            key = (str(row["site_id"]), str(row["account_key"]))
+            accounts.setdefault(key, {}).setdefault(source_ip, []).append(row)
+
+        changed: set[str] = set()
+        review_ips = int(policy["campaign_review_distinct_ips"])
+        sample_limit = int(policy["max_campaign_sample_ips"])
+        for (site_id, account_key), per_ip in accounts.items():
+            label = self._mail_protected_label(account_key, protected)
+            is_protected = label is not None
+            threshold = int(policy["protected_failure_threshold" if is_protected else "failure_threshold"])
+            distinct_required = int(
+                policy["protected_distinct_source_ips" if is_protected else "distinct_source_ips"]
+            )
+            failures = sum(len(rows) for rows in per_ip.values())
+            qualifies = failures >= threshold and len(per_ip) >= distinct_required
+            if not (qualifies or is_protected or len(per_ip) >= review_ips):
+                continue
+            campaign_id = mail_campaign_id(account_key)
+            rule_id = MAIL_RULES[1] if is_protected else MAIL_RULES[0]
+            enforced = 0
+            if qualifies:
+                for source_ip, evidence in sorted(per_ip.items()):
+                    if len(evidence) < int(policy["min_failures_per_ip"]):
+                        continue
+                    prior = self.db.recent_incident(source_ip, rule_id, site_id)
+                    prior_count = int(prior["event_count"]) if prior is not None else -1
+                    incident_uuid = self.db.create_or_merge_incident(
+                        source_ip,
+                        rule_id,
+                        evidence,
+                        int(policy["incident_merge_seconds"]),
+                        site_id=site_id,
+                        initial_report_status=report_status,
+                        initial_report_detail=report_detail,
+                    )
+                    enforced += 1
+                    incident = self.db.incident(incident_uuid)
+                    if prior is None or int(incident["event_count"]) != prior_count:
+                        changed.add(incident_uuid)
+                        LOG.warning(
+                            "Mail account slow-burn incident %s: site=%s campaign=%s%s ip=%s "
+                            "events=%d campaign_failures=%d campaign_ips=%d",
+                            incident_uuid, site_id, campaign_id,
+                            f" protected={label}" if is_protected else "",
+                            source_ip, int(incident["event_count"]), failures, len(per_ip),
+                        )
+            all_rows = [row for rows in per_ip.values() for row in rows]
+            first_epoch = min(int(row["occurred_epoch"]) for row in all_rows)
+            last_epoch = max(int(row["occurred_epoch"]) for row in all_rows)
+            ranked_ips = sorted(per_ip, key=lambda ip: (-len(per_ip[ip]), ip))
+            protocols = sorted({str(row["application_protocol"] or "").upper() for row in all_rows} - {""})
+            self.db.upsert_mail_campaign({
+                "site_id": site_id,
+                "account_key": account_key,
+                "campaign_id": campaign_id,
+                "protected": 1 if is_protected else 0,
+                "protected_label": label,
+                "status": "enforcing" if qualifies else "review",
+                "failures": failures,
+                "distinct_source_ips": len(per_ip),
+                "enforced_source_ips": enforced,
+                "failure_threshold": threshold,
+                "distinct_ip_threshold": distinct_required,
+                "window_seconds": window,
+                "first_seen_epoch": first_epoch,
+                "last_seen_epoch": last_epoch,
+                "first_seen": epoch_text(first_epoch),
+                "last_seen": epoch_text(last_epoch),
+                "protocols": ",".join(protocols) or None,
+                "sample_source_ips_json": json.dumps(ranked_ips[:sample_limit]),
+                "prefix_proposals_json": json.dumps(self.mail_prefix_proposals(per_ip), sort_keys=True),
+                "asn_summary_json": json.dumps(self.mail_asn_summary(list(per_ip)), sort_keys=True),
+                "updated_at": utc_text(),
+            })
+        return len(changed)
+
     def evaluate_new_events(self, events: Sequence[Mapping[str, Any]]) -> None:
         wordpress_events = [
             event for event in events
@@ -3992,9 +4440,12 @@ class Collector:
         timeout = int(settings["command_timeout_seconds"])
         reason_prefix = str(self.config["policy"]["reason_prefix"]).rstrip("/")
         reason = f"{reason_prefix}/{incident['rule_id']}"
+        duration = str(self.config["policy"]["ban_duration"])
+        if str(incident["rule_id"]) in MAIL_RULES:
+            duration = str(self.config["mail_account_policy"]["ban_duration"])
         command = [
             cscli, "decisions", "add", "--ip", source_ip,
-            "--duration", str(self.config["policy"]["ban_duration"]),
+            "--duration", duration,
             "--reason", reason,
         ]
         try:
@@ -4610,6 +5061,20 @@ class Collector:
             tags = ['attack:login', 'service:ssh', f'rule:{rule_id}']
             tuple_description = 'Correlated SSH connection tuples and sanitized authentication evidence'
             normalized_description = 'Sanitized normalized SSH authentication evidence'
+        elif rule_id.startswith('mail-'):
+            report_type = 'login_attack'
+            scan_type = 'credential_attack'
+            mail_protocols = {str(item.get('application_protocol') or '').lower() for item in connections} - {''}
+            smtp_like = {'smtp', 'submission', 'smtps'}
+            if mail_protocols and mail_protocols <= smtp_like:
+                service = 'smtp'
+            elif len(mail_protocols) == 1:
+                service = next(iter(mail_protocols))
+            else:
+                service = 'mail'
+            tags = ['attack:login', 'service:mail', f'rule:{rule_id}']
+            tuple_description = 'Correlated mail (IMAP/POP3/SMTP AUTH) connection tuples and sanitized authentication evidence'
+            normalized_description = 'Sanitized normalized mail authentication evidence'
         elif rule_id.startswith('wordpress-'):
             report_type = 'login_attack'
             scan_type = 'credential_attack'
@@ -4680,6 +5145,8 @@ class Collector:
         rule_id = str(incident['rule_id'])
         if rule_id.startswith('sshd-'):
             activity = 'Automated OpenSSH authentication attacks'
+        elif rule_id.startswith('mail-'):
+            activity = 'Automated mail (IMAP/SMTP AUTH) credential attacks'
         elif rule_id.startswith('nginx-'):
             activity = 'Automated hostile web probing and exploit scanning'
         else:
@@ -4707,6 +5174,8 @@ class Collector:
             opening = 'I operate the affected web service(s) listed below. The source IP generated automated exploit-scanning traffic against my server, including requests for WordPress backdoor paths, plugin/theme PHP probes, sensitive configuration files, command-style REST probes, and/or other hostile web requests.'
         elif rule_id.startswith('sshd-'):
             opening = 'I operate the affected SSH service listed below. The source IP generated automated authentication attacks against my server.'
+        elif rule_id.startswith('mail-'):
+            opening = 'I operate the affected mail service listed below. The source IP took part in a distributed, automated password-guessing campaign against mail (IMAP/POP3/SMTP AUTH) accounts on my server.'
         else:
             opening = 'I operate the affected WordPress service(s) listed below. The source IP generated automated credential attacks against my server.'
         attach_xarf = bool(settings.get('attach_xarf', True))
@@ -4915,6 +5384,14 @@ def status_output(collector: Collector) -> dict[str, Any]:
         "report_batching": collector.config["report_batching"],
         "sshd_policy": collector.config["sshd_policy"],
         "web_policy": collector.config["web_policy"],
+        "mail_account_policy": {
+            key: value
+            for key, value in collector.config["mail_account_policy"].items()
+            if key not in {"protected_account_tokens", "protected_accounts_file", "privacy_key_file"}
+        } | {
+            "protected_accounts_configured": len(collector.protected_mail_accounts()),
+        },
+        "mail_account_campaigns": collector.db.mail_campaigns(50),
         "legacy_reporting": collector.config["legacy_reporting"],
         "crowdsec_enabled": bool(collector.config["crowdsec"]["enabled"]),
         "abuse_reporting_enabled": bool(collector.config["abuse_reporting"]["enabled"]),
@@ -4968,10 +5445,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     migrate = sub.add_parser("migrate", help="Back up and migrate the state database")
     migrate.add_argument("--backup-dir", default="", help="Optional directory for a consistent pre-migration backup")
     sub.add_parser("validate-config", help="Validate configuration and exit")
+    mail_token = sub.add_parser(
+        "mail-account-token",
+        help="Read mailbox names on stdin and print protected-account tokens (plaintext is never stored)",
+    )
+    mail_token.add_argument("--node", default="", help="Agent node id (default: collector node.id)")
+    mail_token.add_argument(
+        "--privacy-key-file", default="",
+        help="Agent privacy key (default: mail_account_policy.privacy_key_file)",
+    )
     args = parser.parse_args(argv)
     configure_logging(args.verbose)
     try:
         config = load_config(Path(args.config))
+        if args.command == "mail-account-token":
+            key_path = Path(args.privacy_key_file or config["mail_account_policy"]["privacy_key_file"])
+            secret = key_path.read_bytes()
+            if len(secret) < 32:
+                raise CollectorError("Mail privacy key must contain at least 32 bytes")
+            node_id = args.node or str(config["node"]["id"])
+            for line in sys.stdin.read().splitlines():
+                account = line.strip()
+                if not account or account.startswith("#"):
+                    continue
+                print(f"mail-{node_id}:account:{mail_privacy_token(secret, node_id, account)}")
+            return 0
         if args.command == "validate-config":
             print(json.dumps({"status": "ok", "version": APP_VERSION}, indent=2))
             return 0

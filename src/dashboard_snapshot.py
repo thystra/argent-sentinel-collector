@@ -482,6 +482,34 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
             connection,
             max_rows,
         )
+        # Account tokens are deliberately not selected: only the export-safe
+        # campaign_id, operator label, counts, and review-only proposals.
+        mail_account_campaigns = rows(
+            connection,
+            """
+            SELECT campaign_id, site_id, protected, protected_label, status,
+                   failures, distinct_source_ips, enforced_source_ips,
+                   failure_threshold, distinct_ip_threshold, window_seconds,
+                   first_seen, last_seen, protocols, sample_source_ips_json,
+                   prefix_proposals_json, asn_summary_json, review_status
+            FROM mail_account_campaigns
+            WHERE last_seen_epoch >= ?
+            ORDER BY protected DESC,
+                     CASE status WHEN 'enforcing' THEN 0 ELSE 1 END,
+                     distinct_source_ips DESC, last_seen DESC
+            LIMIT ?
+            """,
+            (start_epoch, max_rows),
+        )
+        for item in mail_account_campaigns:
+            for name in ("sample_source_ips_json", "prefix_proposals_json", "asn_summary_json"):
+                try:
+                    item[name[:-5]] = json.loads(str(item.pop(name) or "[]"))
+                except json.JSONDecodeError:
+                    item[name[:-5]] = []
+            item["protected"] = bool(item["protected"])
+            item["automatic_block"] = False
+        overview["mail_account_campaigns"] = len(mail_account_campaigns)
         overview["network_reviews"] = scalar(
             connection,
             "SELECT COUNT(*) FROM network_cases "
@@ -603,6 +631,7 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
         "fail2ban": fail2ban,
         "network_cases": network_cases,
         "network_review_actions": network_review_actions,
+        "mail_account_campaigns": mail_account_campaigns,
         "local_address_protection": {
             "state_file": str(dynamic_state_path),
             "state_status": dynamic_state_status,

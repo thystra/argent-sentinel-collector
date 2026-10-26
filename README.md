@@ -484,6 +484,15 @@ resource-protection layer.
 
 Abuse-report connection formatting is service aware: OpenSSH events use `scheme=ssh` in both human-readable connection details and sanitized normalized evidence, while web events retain `http` or `https`.
 
+## Mail account slow-burn policy
+
+`mail_account_policy` (disabled by default) aggregates `mail_auth_failed`
+events per HMAC target-account token across source IPs and, past N failures
+from M distinct IPs in the window (defaults 10 / 5 / 24 h; protected mailboxes
+6 / 3), creates per-IP incidents and per-IP CrowdSec decisions only. Prefix and
+ASN groupings are review-only. Protected mailboxes are configured on the host
+only, never in git. See `docs/mail-auth-events.md`.
+
 ## SSH collection
 
 The agent reads `journalctl -u ssh.service`, pseudonymizes account names with

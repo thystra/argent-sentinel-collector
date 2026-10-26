@@ -64,6 +64,19 @@ stores the site ID on the incident. Persistent incidents enter the normal
 CrowdSec decision workflow. Provider reporting is suppressed by default during
 the initial production review.
 
+## Account-keyed mail slow-burn correlation
+
+Mail correlation (`mail_account_policy`, disabled by default) is keyed on the
+agent's HMAC target-account token rather than on a source address. A rolling
+window aggregates `mail_auth_failed` events per token across all untrusted
+sources; a qualifying campaign yields one incident per participating source IP,
+so enforcement remains per-IP CrowdSec. Bounded prefix and cached-ASN
+groupings are stored as review-only campaign proposals; no range, ASN, or
+country decision is automatic. Protected mailboxes are matched by token only;
+the plaintext list, if used, is a root-only host file hashed at runtime, and
+exports carry a derived `campaign_id` instead of the token. fail2ban remains
+the first, per-source layer.
+
 ## Policy classes
 
 - OpenSSH: trusted source addresses are excluded; external failed
