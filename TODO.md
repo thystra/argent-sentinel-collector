@@ -5,6 +5,19 @@
 - [ ] Optionally protect `main` on Forgejo so the `CI` checks are required
   before merge.
 
+## Implemented in 0.5.6.0 — Access Guard registration-abuse policy (PR4)
+
+- [x] Site-agnostic ingest of Access Guard `registration_abuse` from any
+  `drop/wordpress/<site>/`; `wordpress_drop.site_mismatch` warn/reject check.
+- [x] `registration_abuse_policy` per-IP rules (standard, high-confidence,
+  cross-site), disabled by default; CrowdSec dry-run until
+  `crowdsec_enforcement` is true; review-only fingerprint campaigns.
+- [ ] Deploy (IT Manager, after approval): connector 0.2.6 + Access Guard bridge
+  on wolfandraven.blog first; enable the policy dry-run, review incidents and
+  campaigns, then set `crowdsec_enforcement: true`.
+- [ ] Tune thresholds from the first weeks of production Access Guard volume;
+  consider dashboard/digest panels for registration campaigns.
+
 ## Implemented in 0.5.6.0 — mail authentication ingest (PR1) and account slow-burn policy (PR2)
 
 - [x] Observe-only Dovecot and Postfix SASL auth-failure ingest as service

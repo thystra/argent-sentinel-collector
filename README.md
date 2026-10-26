@@ -493,6 +493,21 @@ from M distinct IPs in the window (defaults 10 / 5 / 24 h; protected mailboxes
 ASN groupings are review-only. Protected mailboxes are configured on the host
 only, never in git. See `docs/mail-auth-events.md`.
 
+## Access Guard registration-abuse policy
+
+`registration_abuse_policy` (disabled by default) evaluates ArgentWolf Access
+Guard `registration_abuse` events from any WordPress site (no site allowlist;
+site identity is the batch `source.site_id`, compared with the
+`drop/wordpress/<site>/` directory per `wordpress_drop.site_mismatch`). Per
+source IP it raises `wordpress-registration-abuse` (≥ 3 qualifying denied
+events with score ≥ 6.0 and medium/high confidence, or qualifying events on ≥ 2
+sites) or `wordpress-registration-abuse-high-confidence` (≥ 2 high-confidence
+events with score ≥ 9.0) in a 24 h window. CrowdSec is operator-gated: decisions
+stay dry-run unless both `crowdsec.enabled` and
+`registration_abuse_policy.crowdsec_enforcement` are true; then per-IP 168 h
+decisions only. Fingerprint/prefix/ASN campaigns are review-only. See
+`docs/registration-abuse-policy.md`.
+
 ## SSH collection
 
 The agent reads `journalctl -u ssh.service`, pseudonymizes account names with
