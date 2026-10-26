@@ -40,7 +40,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.5.5.1"
+APP_VERSION = "0.5.6.0"
 SCHEMA_VERSION = 9
 
 DEFAULTS: dict[str, Any] = {
@@ -2509,6 +2509,9 @@ def validate_uuid(value: Any, name: str) -> str:
     return str(parsed)
 
 
+BATCH_SERVICES = frozenset({"wordpress", "sshd", "fail2ban", "mail"})
+
+
 def normalize_batch(raw: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if not isinstance(raw, dict):
         raise CollectorError("Batch root must be an object")
@@ -2525,7 +2528,9 @@ def normalize_batch(raw: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         if not isinstance(value, str) or not value.strip():
             raise CollectorError(f"Batch source.{key} is required")
         normalized_source[key] = value.strip()[:512]
-    if normalized_source["service"] not in {"wordpress", "sshd", "fail2ban"}:
+    # ``mail`` (Dovecot + Postfix SASL) is accepted observe-only: events are
+    # stored but no policy evaluates ``mail_auth_failed`` yet.
+    if normalized_source["service"] not in BATCH_SERVICES:
         raise CollectorError("Unsupported batch source service")
     raw_events = raw.get("events")
     if not isinstance(raw_events, list) or not raw_events:

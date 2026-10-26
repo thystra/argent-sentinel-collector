@@ -45,7 +45,7 @@ except ModuleNotFoundError:
     sys.modules.setdefault("local_protection", local_protection)
     _LOCAL_PROTECTION_SPEC.loader.exec_module(local_protection)
 
-APP_VERSION = "0.5.5.1"
+APP_VERSION = "0.5.6.0"
 LOG = logging.getLogger("argent-sentinel-api")
 
 DEFAULTS: dict[str, Any] = {
@@ -201,7 +201,7 @@ def validate_event_batch(payload: bytes, node: Mapping[str, Any]) -> tuple[str, 
     allowed_sites = {str(value) for value in node.get("site_ids", [])}
     if service == "wordpress" and allowed_sites and site_id not in allowed_sites:
         raise APIError(403, f"WordPress site {site_id!r} is not authorized for this node")
-    if service not in {"wordpress", "sshd"}:
+    if service not in {"wordpress", "sshd", "mail"}:
         raise APIError(400, f"Unsupported event service: {service}")
     try:
         uuid.UUID(str(batch.get("batch_uuid", "")))

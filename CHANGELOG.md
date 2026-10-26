@@ -1,3 +1,29 @@
+## 0.5.6.0 (unreleased — release candidate, not deployed)
+
+- Add observe-only mail authentication ingest as one agent/batch service,
+  `mail`, covering Dovecot login processes (IMAP, POP3, ManageSieve,
+  Submission) and Postfix smtpd SASL failures. A single journald reader follows
+  `dovecot.service` and `postfix@-.service` with one durable cursor
+  (`/var/lib/argent-sentinel/agent/mail.cursor`). Disabled by default.
+- Emit `event_type: mail_auth_failed` events with source/destination tuple,
+  protocol, mechanism, attempt count, and account class. Only high-confidence
+  summary lines are counted, so one failed connection is one event.
+- Pseudonymise mailbox/account names with the existing agent HMAC privacy key in
+  a separate `mail` domain, so one mailbox shares a token across IMAP and SMTP
+  AUTH without colliding with OpenSSH tokens. Raw account names and SASL
+  challenge text are never exported.
+- Accept the `mail` service in the ingestion API and collector batch allowlist;
+  nodes must list `mail` in `nodes.d/NODE.json` `services`. No collector policy
+  evaluates `mail_auth_failed`: no incidents, CrowdSec decisions, abuse
+  reports, or prefix proposals are produced from mail events in this release.
+- Add `--mail` to `argent-sentinel-configure-agent` and document the format in
+  `docs/mail-auth-events.md`.
+- Planned for the follow-up enforcement PR (not implemented here): per-IP
+  CrowdSec decisions after N failures against one target account token from M
+  distinct source IPs (N/M defaults to be proposed in that PR); prefix and ASN
+  aggregation remain review-only proposals; no country or ASN automatic bans;
+  operator-listed real mailboxes are treated as protected accounts.
+
 ## 0.5.5.1
 ### Debian revision 0.5.5.1-2
 
