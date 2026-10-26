@@ -232,6 +232,38 @@ class DashboardRegistrationTest(unittest.TestCase):
         self.assertEqual(1, snapshot["overview"]["registration_abuse_events"])
         self.assertEqual([], snapshot["registration_abuse_campaigns"])
 
+        # The Overview card deep-links to a mail-specific section that lists the
+        # raw failures even though no mail incident or campaign exists yet.
+        failures = snapshot["mail_auth_failures"]
+        self.assertEqual(3, len(failures))
+        self.assertEqual({1}, {row["failures"] for row in failures})
+        self.assertEqual({1}, {row["distinct_accounts"] for row in failures})
+        self.assertNotIn("account_key", failures[0])
+        self.assertEqual(
+            {"enabled": False, "crowdsec_enforcement": False, "window_seconds": 86400},
+            snapshot["mail_account_policy"],
+        )
+        overview_html = dashboard.render_overview(snapshot)
+        self.assertIn('href="/incidents#mail-auth-failures"', overview_html)
+        self.assertIn('href="/incidents#registration-abuse"', overview_html)
+        html = dashboard.render_incidents(snapshot)
+        self.assertIn('id="mail-auth-failures"', html)
+        self.assertIn('id="registration-abuse"', html)
+        self.assertIn("198.51.100.1", html)
+        self.assertIn("mail_account_policy is disabled", html)
+        self.assertNotIn("c" * 64, html)
+
+    def test_mail_policy_dry_run_state_shown(self) -> None:
+        self.run_collector(self.config())
+        supplied = json.loads((self.root / "collector.json").read_text())
+        supplied["mail_account_policy"] = {"enabled": True, "crowdsec_enforcement": False}
+        (self.root / "collector.json").write_text(json.dumps(supplied))
+        snapshot = self.snapshot()
+        self.assertTrue(snapshot["mail_account_policy"]["enabled"])
+        self.assertFalse(snapshot["mail_account_policy"]["crowdsec_enforcement"])
+        html = dashboard.render_incidents(snapshot)
+        self.assertIn("dry-run (incident monitor only)", html)
+
     def test_snapshot_tolerates_missing_policy_and_legacy_config(self) -> None:
         self.deliver("site-alpha", [registration_event("203.0.113.50", 3)])
         self.run_collector(self.config())

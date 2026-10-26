@@ -322,11 +322,15 @@ def render_overview(snapshot: Mapping[str, Any]) -> str:
             overview.get("network_reviews"),
             "/networks",
         ),
-        ("Mail auth failures", overview.get("mail_auth_failures"), "/incidents"),
+        (
+            "Mail auth failures",
+            overview.get("mail_auth_failures"),
+            "/incidents#mail-auth-failures",
+        ),
         (
             "Registration abuse events",
             overview.get("registration_abuse_events"),
-            "/incidents",
+            "/incidents#registration-abuse",
         ),
         (
             "Unhealthy watchdogs",
@@ -551,6 +555,32 @@ def render_incidents(snapshot: Mapping[str, Any]) -> str:
         ]
         for row in snapshot.get("mail_account_campaigns", [])
     ]
+    mail_failure_rows = [
+        [
+            f"<code>{h(row.get('source_ip'))}</code>",
+            h(row.get("site_id")),
+            h(row.get("protocol")),
+            number(row.get("failures")),
+            number(row.get("distinct_accounts")),
+            when(row.get("first_seen")),
+            when(row.get("last_seen")),
+        ]
+        for row in snapshot.get("mail_auth_failures", [])
+    ]
+    mail_policy = snapshot.get("mail_account_policy") or {}
+    if not mail_policy:
+        mail_state = "Mail policy state not present in this snapshot."
+    elif not mail_policy.get("enabled"):
+        mail_state = (
+            "mail_account_policy is disabled; mail_auth_failed events are stored "
+            "but no campaigns or incidents are evaluated."
+        )
+    else:
+        mail_state = (
+            "mail_account_policy enabled; per-IP CrowdSec decisions are "
+            + ("on" if mail_policy.get("crowdsec_enforcement") else "dry-run (incident monitor only)")
+            + f"; window {number(mail_policy.get('window_seconds'))} seconds."
+        )
     registration_policy = snapshot.get("registration_abuse_policy") or {}
     registration_rows = [
         [
@@ -586,17 +616,24 @@ def render_incidents(snapshot: Mapping[str, Any]) -> str:
             + ("on" if registration_policy.get("crowdsec_enforcement") else "dry-run")
             + f"; window {number(registration_policy.get('window_seconds'))} seconds."
         )
-    return "<section><h2>Recent incidents</h2>" + table(
+    return '<section id="recent-incidents"><h2>Recent incidents</h2>' + table(
         ["Source", "Rule", "Report", "Events", "Sites", "Network", "Holder", "Last", "Detail"],
         incident_rows,
-    ) + "</section><section><h2>Mail account slow-burn campaigns</h2>" + (
+    ) + '</section><section id="mail-auth-failures"><h2>Mail auth failures</h2>' + (
+        f'<p class="muted">{h(mail_state)} Recent <code>mail_auth_failed</code> '
+        "events grouped by source, node, and protocol; account names and tokens "
+        "are never shown.</p>"
+    ) + table(
+        ["Source", "Node", "Protocol", "Failures", "Accounts", "First", "Last"],
+        mail_failure_rows,
+    ) + '</section><section id="mail-campaigns"><h2>Mail account slow-burn campaigns</h2>' + (
         '<p class="muted">Per-IP enforcement only. Prefix and ASN groupings are '
         "review-only proposals; no range, ASN, or country ban is automatic.</p>"
     ) + table(
         ["Campaign", "Site", "Account", "Status", "Failures", "IPs", "Per-IP incidents",
          "Prefix proposals", "ASN groups", "Last"],
         mail_rows,
-    ) + "</section><section><h2>Access Guard registration-abuse campaigns</h2>" + (
+    ) + '</section><section id="registration-abuse"><h2>Access Guard registration-abuse campaigns</h2>' + (
         f'<p class="muted">{h(registration_state)} Grouped by Access Guard fingerprint '
         "signature across all sites. Prefix and ASN groupings are review-only "
         "proposals; no range, ASN, or country ban is automatic.</p>"

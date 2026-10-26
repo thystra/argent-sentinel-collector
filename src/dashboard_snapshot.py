@@ -527,6 +527,30 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
             "AND service = 'mail' AND event_type = 'mail_auth_failed'",
             (start_epoch,),
         )
+        # Raw mail_auth_failed evidence grouped per source so the Overview
+        # "Mail auth failures" card deep-links to something mail specific even
+        # while mail_account_policy is disabled or dry-run (no incidents yet).
+        # Account tokens are never selected; only a distinct-account count.
+        mail_auth_failures = rows(
+            connection,
+            """
+            SELECT source_ip, site_id,
+                   COALESCE(NULLIF(UPPER(application_protocol), ''), '-') AS protocol,
+                   COUNT(*) AS failures,
+                   COUNT(DISTINCT account_key) AS distinct_accounts,
+                   MIN(occurred_at) AS first_seen,
+                   MAX(occurred_at) AS last_seen
+            FROM events
+            WHERE occurred_epoch >= ?
+              AND service = 'mail'
+              AND event_type = 'mail_auth_failed'
+            GROUP BY source_ip, site_id,
+                     COALESCE(NULLIF(UPPER(application_protocol), ''), '-')
+            ORDER BY failures DESC, last_seen DESC
+            LIMIT ?
+            """,
+            (start_epoch, max_rows),
+        )
         overview["registration_abuse_events"] = scalar(
             connection,
             "SELECT COUNT(*) FROM events WHERE occurred_epoch >= ? "
@@ -635,6 +659,12 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
     overview["watchdogs_unhealthy"] = sum(
         1 for item in watchdogs if item.get("status") in {"warning", "critical", "error"}
     )
+    mail_policy_config = collector.deep_merge(
+        collector.DEFAULTS["mail_account_policy"],
+        collector_config.get("mail_account_policy")
+        if isinstance(collector_config.get("mail_account_policy"), Mapping)
+        else {},
+    )
     return {
         "version": APP_VERSION,
         "generated_at": utc_text(),
@@ -655,6 +685,12 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
         "network_cases": network_cases,
         "network_review_actions": network_review_actions,
         "mail_account_campaigns": mail_account_campaigns,
+        "mail_account_policy": {
+            "enabled": bool(mail_policy_config.get("enabled")),
+            "crowdsec_enforcement": bool(mail_policy_config.get("crowdsec_enforcement")),
+            "window_seconds": int(mail_policy_config.get("window_seconds", 86400)),
+        },
+        "mail_auth_failures": mail_auth_failures,
         "registration_abuse_policy": registration_view,
         "registration_abuse_campaigns": registration_abuse_campaigns,
         "local_address_protection": {
