@@ -136,6 +136,9 @@ After implementation or deployment decisions, review and update:
   commented EOF marker when the format supports comments.
 
 ## Current reporting checkpoint
+- Version 0.5.6.0 (branch `feature/mail-auth-ingest`) adds observe-only
+  Dovecot/Postfix SASL ingest as service `mail`; see `docs/mail-auth-events.md`.
+  Not deployed; enforcement policy is deferred to a later PR.
 - Version 0.5.5.1 is the current development target. Debian revision
   `0.5.5.1-1` is installed on nidhoggur; corrected revision `0.5.5.1-2` is
   pending build and deployment after the event-mechanism sandbox diagnosis.

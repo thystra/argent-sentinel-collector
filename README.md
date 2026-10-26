@@ -3,11 +3,11 @@
 Argent Sentinel is a self-hosted security event collector, correlation engine,
 CrowdSec decision bridge, and guarded abuse-reporting system.
 
-Version 0.5.5.1 combines authenticated event transport, central policy,
+Version 0.5.6.0 combines authenticated event transport, central policy,
 a read-only dashboard, and per-site traffic analytics:
 
 ```text
-WordPress / Nginx / OpenSSH
+WordPress / Nginx / OpenSSH / Dovecot + Postfix SASL (observe-only)
           | local immutable spool or journald cursor
           v
 argent-sentinel-agent
@@ -40,12 +40,12 @@ Validate redirected test mode before production delivery.
 | File | Purpose | Important options |
 | --- | --- | --- |
 | `/etc/argent-sentinel/collector.json` | Central ingestion, correlation, enforcement, and reporting policy | `incoming_globs`, `abuse_context`, `protection_inventory`, `policy`, `sshd_policy`, `web_policy`, `trusted_cidrs`, `enforcement_protection`, `crowdsec`, `enrichment`, `abuse_reporting` |
-| `/etc/argent-sentinel/agent.json` | Node transport, dynamic local-address protection, and SSH collection | `enabled`, `node`, `central_url`, certificate paths, local WordPress/Nginx globs, `local_address_protection`, `sshd` |
+| `/etc/argent-sentinel/agent.json` | Node transport, dynamic local-address protection, SSH and observe-only mail-auth collection | `enabled`, `node`, `central_url`, certificate paths, local WordPress/Nginx globs, `local_address_protection`, `sshd`, `mail` (see `docs/mail-auth-events.md`) |
 | `/etc/argent-sentinel/server-api.json` | Unix-socket ingestion API | `socket_path`, `socket_group`, `nodes_dir`, `receipt_db`, `event_drop_root` |
 | `/etc/argent-sentinel/nodes.d/NAME.json` | Per-node enrollment and service authorization | `node_id`, `enabled`, allowed `services`, allowed WordPress `site_ids` |
 | `/etc/logrotate.d/argent-sentinel-nginx` | Hourly rotation and staging of the filtered Nginx JSONL log | retention, compression, stage helper |
 | `/etc/nginx/conf.d/argent-sentinel-log-format.conf` | Dedicated structured Nginx format and conditional logging maps | JSON fields and suspicious-request conditions |
-| `/etc/argent-sentinel/agent-privacy.key` | HMAC secret used to pseudonymize SSH account names | root-readable, at least 32 bytes |
+| `/etc/argent-sentinel/agent-privacy.key` | HMAC secret used to pseudonymize SSH and mail account names | root-readable, at least 32 bytes |
 | `/etc/argent-sentinel/pki/` | Sentinel CA, node certificate, and private key material | protect private keys as root-only |
 | `/etc/argent-sentinel/watchdog.json` | Global watchdog scheduling, retention, and notification policy | administrative and emergency recipient groups |
 | `/etc/argent-sentinel/watchdog.d/*.json` | Local watchdog enable/disable and threshold overrides | merge by watchdog `id` |

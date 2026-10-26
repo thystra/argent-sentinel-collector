@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Argent Sentinel node agent.
 
-Stages local producer files, captures bounded OpenSSH authentication failures from
-systemd-journald, and delivers immutable transport envelopes to the central
-Sentinel HTTPS endpoint.  The agent never sends abuse mail or changes firewall
-state.
+Stages local producer files, captures bounded OpenSSH and mail (Dovecot,
+Postfix SASL) authentication failures from systemd-journald, and delivers
+immutable transport envelopes to the central Sentinel HTTPS endpoint.  The
+agent never sends abuse mail or changes firewall state.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ except ModuleNotFoundError:
     sys.modules.setdefault("local_protection", local_protection)
     _LOCAL_PROTECTION_SPEC.loader.exec_module(local_protection)
 
-APP_VERSION = "0.5.5.1"
+APP_VERSION = "0.5.6.0"
 UTC = dt.timezone.utc
 LOG = logging.getLogger("argent-sentinel-agent")
 
@@ -99,6 +99,19 @@ DEFAULTS: dict[str, Any] = {
         "initial_lookback_minutes": 5,
         "destination_ip": "",
         "destination_port": 22,
+        "max_events_per_batch": 500,
+    },
+    # Observe-only mail authentication ingest.  One ``mail`` service covers
+    # Dovecot (IMAP/POP3/ManageSieve/Submission login processes) and Postfix
+    # SMTP AUTH (SASL) so one mailbox keeps one privacy token across protocols.
+    "mail": {
+        "enabled": False,
+        "units": ["dovecot.service", "postfix@-.service"],
+        "cursor_file": "/var/lib/argent-sentinel/agent/mail.cursor",
+        "privacy_key_file": "/etc/argent-sentinel/agent-privacy.key",
+        "initial_lookback_minutes": 5,
+        "destination_ip": "",
+        "postfix_service_ports": {"smtp": 25, "submission": 587, "smtps": 465},
         "max_events_per_batch": 500,
     },
 }
@@ -163,6 +176,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
     destination_ip = str(sshd.get("destination_ip", "")).strip()
     if destination_ip:
         ipaddress.ip_address(destination_ip)
+    validate_mail_config(config.get("mail", {}))
     protection = config.get("local_address_protection", {})
     if not isinstance(protection, Mapping):
         raise AgentError("local_address_protection must be an object")
@@ -175,6 +189,37 @@ def validate_config(config: Mapping[str, Any]) -> None:
             path = Path(str(config.get(name, "")))
             if not path.is_file() or path.stat().st_size == 0:
                 raise AgentError(f"{name} is missing or empty: {path}")
+
+
+def validate_mail_config(mail: Any) -> None:
+    if not isinstance(mail, Mapping):
+        raise AgentError("mail must be an object")
+    if int(mail.get("initial_lookback_minutes", 0)) < 1:
+        raise AgentError("mail.initial_lookback_minutes must be positive")
+    if int(mail.get("max_events_per_batch", 0)) < 1:
+        raise AgentError("mail.max_events_per_batch must be positive")
+    units = mail.get("units")
+    if (
+        not isinstance(units, list)
+        or not units
+        or not all(isinstance(unit, str) and UNIT_NAME_RE.fullmatch(unit) for unit in units)
+    ):
+        raise AgentError("mail.units must be a non-empty list of systemd unit names")
+    destination_ip = str(mail.get("destination_ip", "")).strip()
+    if destination_ip:
+        try:
+            ipaddress.ip_address(destination_ip)
+        except ValueError as exc:
+            raise AgentError("mail.destination_ip must be an IP address") from exc
+    ports = mail.get("postfix_service_ports", {})
+    if not isinstance(ports, Mapping):
+        raise AgentError("mail.postfix_service_ports must be an object")
+    for name, port in ports.items():
+        if not isinstance(name, str) or not 1 <= int(port) <= 65535:
+            raise AgentError("mail.postfix_service_ports values must be valid ports")
+
+
+UNIT_NAME_RE = re.compile(r"[A-Za-z0-9@:._\\-]{1,255}")
 
 
 @contextlib.contextmanager
@@ -290,8 +335,9 @@ INVALID_USER_RE = re.compile(
 
 
 
-def privacy_token(secret: bytes, node_id: str, username: str) -> str:
-    material = f"sshd\0{node_id}\0{username.casefold()}".encode("utf-8", "replace")
+def privacy_token(secret: bytes, node_id: str, username: str, domain: str = "sshd") -> str:
+    """HMAC-pseudonymise an account name; ``domain`` separates services."""
+    material = f"{domain}\0{node_id}\0{username.casefold()}".encode("utf-8", "replace")
     return hmac.new(secret, material, hashlib.sha256).hexdigest()
 
 
@@ -364,13 +410,31 @@ def parse_sshd_row(
 
 def journal_rows(config: Mapping[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
     sshd = config["sshd"]
-    cursor_path = Path(str(sshd["cursor_file"]))
-    command = ["journalctl", "--no-pager", "--output=json", "--show-cursor", "-u", str(sshd["unit"])]
+    return read_journal(
+        [str(sshd["unit"])],
+        Path(str(sshd["cursor_file"])),
+        int(sshd["initial_lookback_minutes"]),
+    )
+
+
+def read_journal(
+    units: Sequence[str],
+    cursor_path: Path,
+    initial_lookback_minutes: int,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Read JSON journal rows for one or more units after a durable cursor.
+
+    Repeated ``-u`` options are OR-ed by journalctl, so several units share one
+    interleaved stream and one cursor.
+    """
+    command = ["journalctl", "--no-pager", "--output=json", "--show-cursor"]
+    for unit in units:
+        command.extend(["-u", str(unit)])
     cursor = cursor_path.read_text(encoding="utf-8").strip() if cursor_path.exists() else ""
     if cursor:
         command.append(f"--after-cursor={cursor}")
     else:
-        command.append(f"--since=-{int(sshd['initial_lookback_minutes'])}min")
+        command.append(f"--since=-{int(initial_lookback_minutes)}min")
     result = subprocess.run(command, text=True, capture_output=True, timeout=30, check=False)
     if result.returncode != 0:
         raise AgentError(result.stderr.strip() or f"journalctl exited {result.returncode}")
@@ -452,6 +516,271 @@ def collect_sshd(config: Mapping[str, Any]) -> int:
     # Advance the cursor only after every resulting batch is durably staged.
     if final_cursor:
         atomic_write(Path(str(config["sshd"]["cursor_file"])), (final_cursor + "\n").encode(), 0o600)
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Observe-only mail authentication ingest (Dovecot + Postfix SASL)
+# ---------------------------------------------------------------------------
+
+MAIL_PRIVACY_DOMAIN = "mail"
+
+DOVECOT_LOGIN_RE = re.compile(
+    r"^(?P<proto>imap|pop3|managesieve|submission)-login:\s+"
+    r"(?:(?:Info|Warning|Error):\s+)?",
+    re.IGNORECASE,
+)
+DOVECOT_AUTH_FAILED_RE = re.compile(
+    r"\(auth failed, (?P<attempts>\d+) attempts?\b",
+    re.IGNORECASE,
+)
+DOVECOT_USER_RE = re.compile(r"\buser=<(?P<user>[^>]{0,512})>")
+DOVECOT_METHOD_RE = re.compile(r"\bmethod=(?P<method>[A-Za-z0-9_-]{1,32})")
+DOVECOT_RIP_RE = re.compile(r"\brip=(?P<ip>[0-9A-Fa-f:.]+)")
+DOVECOT_LIP_RE = re.compile(r"\blip=(?P<ip>[0-9A-Fa-f:.]+)")
+DOVECOT_RPORT_RE = re.compile(r"\brport=(?P<port>\d{1,5})\b")
+DOVECOT_LPORT_RE = re.compile(r"\blport=(?P<port>\d{1,5})\b")
+DOVECOT_TLS_RE = re.compile(r",\s*(?:TLS|TLS handshaking)(?=[,:\s]|$)")
+
+POSTFIX_SASL_FAILED_RE = re.compile(
+    r"(?:^|\s)(?:warning:\s+)?(?P<client>[^\s\[\]]{1,255})\[(?P<ip>[^\]\s]{1,64})\]:\s+"
+    r"SASL (?P<mech>[A-Za-z0-9_-]{1,32}) authentication failed:"
+    r"(?P<reason>[^,]*)"
+    r"(?:,\s*sasl_username=(?P<user>\S{1,512}))?",
+)
+# Base64 SASL LOGIN challenges that Postfix echoes as the failure "reason".
+POSTFIX_SASL_STAGES = {
+    "UGFzc3dvcmQ6": "password",   # "Password:"
+    "VXNlcm5hbWU6": "username",   # "Username:"
+}
+
+
+def journal_message(row: Mapping[str, Any]) -> str:
+    """Return MESSAGE as text; journald emits non-UTF-8 values as byte arrays."""
+    value = row.get("MESSAGE", "")
+    if isinstance(value, list):
+        try:
+            return bytes(int(item) & 0xFF for item in value).decode("utf-8", "replace")
+        except (TypeError, ValueError):
+            return ""
+    return str(value or "")
+
+
+def normalize_mail_ip(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = value.strip()
+    if text.lower().startswith("ipv6:"):
+        text = text[5:]
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        return None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return str(address)
+
+
+def _mail_port(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        port = int(value)
+    except ValueError:
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
+def postfix_service_name(identifier: str) -> str | None:
+    """Map ``postfix/submission/smtpd`` style identifiers to a master.cf name."""
+    parts = [part for part in identifier.strip().split("/") if part]
+    if len(parts) < 2 or not parts[0].lower().startswith("postfix") or parts[-1].lower() != "smtpd":
+        return None
+    return parts[1].lower() if len(parts) >= 3 else "smtp"
+
+
+def parse_mail_row(
+    row: Mapping[str, Any],
+    *,
+    node_id: str,
+    secret: bytes,
+    destination_ip: str,
+    postfix_service_ports: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Parse one Dovecot or Postfix SASL authentication-failure journal row.
+
+    Only high-confidence summary lines are accepted, so one failed connection
+    produces one event:
+
+    * Dovecot ``<proto>-login: ... (auth failed, N attempts ...): user=<..>,
+      method=.., rip=.., lip=..`` disconnect/abort lines.  Auth-worker detail
+      lines (``passwd-file(...)``, ``pam(...)``) are ignored as companions.
+    * Postfix ``warning: host[ip]: SASL MECH authentication failed: ...`` from
+      any ``postfix*/.../smtpd`` identifier.
+
+    Account names are never exported; only an HMAC token in the ``mail``
+    privacy domain is emitted.
+    """
+    message = journal_message(row)
+    if not message:
+        return None
+    identifier = str(row.get("SYSLOG_IDENTIFIER", "") or "")
+    metadata: dict[str, Any]
+    source_port: int | None = None
+    destination_port: int | None = None
+    local_ip: str | None = None
+    username: str | None
+
+    login = DOVECOT_LOGIN_RE.match(message)
+    if login:
+        failed = DOVECOT_AUTH_FAILED_RE.search(message)
+        if not failed:
+            return None
+        rip = DOVECOT_RIP_RE.search(message)
+        source_ip = normalize_mail_ip(rip.group("ip") if rip else None)
+        if source_ip is None:
+            return None
+        protocol = login.group("proto").lower()
+        user_match = DOVECOT_USER_RE.search(message)
+        username = user_match.group("user").strip() if user_match else None
+        method_match = DOVECOT_METHOD_RE.search(message)
+        lip = DOVECOT_LIP_RE.search(message)
+        local_ip = normalize_mail_ip(lip.group("ip") if lip else None)
+        rport = DOVECOT_RPORT_RE.search(message)
+        lport = DOVECOT_LPORT_RE.search(message)
+        source_port = _mail_port(rport.group("port") if rport else None)
+        destination_port = _mail_port(lport.group("port") if lport else None)
+        application_protocol = protocol.upper()
+        metadata = {
+            "mail_component": "dovecot",
+            "protocol": protocol,
+            "auth_mechanism": method_match.group("method").upper() if method_match else None,
+            "attempts": min(int(failed.group("attempts")), 1000),
+            "tls": bool(DOVECOT_TLS_RE.search(message)),
+        }
+    else:
+        sasl = POSTFIX_SASL_FAILED_RE.search(message)
+        if not sasl:
+            return None
+        service = postfix_service_name(identifier) if identifier else "smtp"
+        if identifier and service is None:
+            return None
+        service = service or "smtp"
+        source_ip = normalize_mail_ip(sasl.group("ip"))
+        if source_ip is None:
+            return None
+        username = (sasl.group("user") or "").strip() or None
+        reason = sasl.group("reason").strip()
+        ports = postfix_service_ports or {}
+        destination_port = _mail_port(str(ports[service])) if service in ports else None
+        application_protocol = "SMTP"
+        metadata = {
+            "mail_component": "postfix",
+            "protocol": "smtp",
+            "postfix_service": service[:64],
+            "auth_mechanism": sasl.group("mech").upper(),
+            "attempts": 1,
+            "sasl_stage": POSTFIX_SASL_STAGES.get(reason, "other" if reason else "none"),
+        }
+
+    if username:
+        metadata["account_class"] = "submitted"
+        account_key: str | None = privacy_token(secret, node_id, username, MAIL_PRIVACY_DOMAIN)
+    else:
+        metadata["account_class"] = "empty" if metadata["mail_component"] == "dovecot" else "unresolved"
+        account_key = None
+    cursor = str(row.get("__CURSOR", ""))
+    identity = cursor or f"{row.get('__REALTIME_TIMESTAMP', '')}\0{message}"
+    event_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"argent-sentinel:mail:{node_id}:{identity}"))
+    event: dict[str, Any] = {
+        "event_uuid": event_uuid,
+        "occurred_at": utc_text(parse_journal_time(row)),
+        "recorded_at": utc_text(),
+        "event_type": "mail_auth_failed",
+        "outcome": "denied",
+        "source_ip": source_ip,
+        "source_port": source_port,
+        "destination_ip": local_ip or destination_ip or None,
+        "destination_port": destination_port,
+        "transport_protocol": "TCP",
+        "application_protocol": application_protocol,
+        "metadata": metadata,
+    }
+    if account_key:
+        event["account_key"] = account_key
+    return event
+
+
+def load_privacy_secret(path: Path, label: str) -> bytes:
+    try:
+        secret = path.read_bytes()
+    except FileNotFoundError as exc:
+        raise AgentError(f"{label} privacy key missing: {path}") from exc
+    if len(secret) < 32:
+        raise AgentError(f"{label} privacy key must contain at least 32 bytes")
+    return secret
+
+
+def build_mail_batches(config: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    mail = config["mail"]
+    secret = load_privacy_secret(Path(str(mail["privacy_key_file"])), "Mail")
+    node_id = str(config["node"]["id"])
+    destination_ip = str(mail.get("destination_ip", "")).strip()
+    ports = mail.get("postfix_service_ports") or {}
+    events: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        event = parse_mail_row(
+            row,
+            node_id=node_id,
+            secret=secret,
+            destination_ip=destination_ip,
+            postfix_service_ports=ports,
+        )
+        if event is not None and event["event_uuid"] not in seen:
+            seen.add(event["event_uuid"])
+            events.append(event)
+    if not events:
+        return []
+    limit = int(mail["max_events_per_batch"])
+    fqdn = config["node"].get("fqdn") or node_id
+    batches: list[dict[str, Any]] = []
+    for offset in range(0, len(events), limit):
+        batches.append({
+            "schema_version": 1,
+            "batch_uuid": str(uuid.uuid4()),
+            "created_at": utc_text(),
+            "source": {
+                "host": node_id,
+                "site_id": f"mail-{node_id}",
+                "site_url": f"mail://{fqdn}/",
+                "service": "mail",
+                "plugin_version": APP_VERSION,
+            },
+            "events": events[offset:offset + limit],
+        })
+    return batches
+
+
+def collect_mail(config: Mapping[str, Any]) -> int:
+    mail = config.get("mail") or {}
+    if not mail.get("enabled"):
+        return 0
+    cursor_path = Path(str(mail["cursor_file"]))
+    rows, final_cursor = read_journal(
+        [str(unit) for unit in mail["units"]],
+        cursor_path,
+        int(mail["initial_lookback_minutes"]),
+    )
+    batches = build_mail_batches(config, rows)
+    total = 0
+    for batch in batches:
+        payload = (json.dumps(batch, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        save_envelope(config, make_envelope(str(config["node"]["id"]), "event_batch", payload))
+        total += len(batch["events"])
+    # Advance the cursor only after every resulting batch is durably staged.
+    if final_cursor:
+        atomic_write(cursor_path, (final_cursor + "\n").encode(), 0o600)
     return total
 
 
@@ -592,6 +921,7 @@ def run_agent(config: Mapping[str, Any]) -> dict[str, int]:
         return {
             "staged": 0,
             "sshd_events": 0,
+            "mail_events": 0,
             "protection_inventories": 0,
             "acknowledged": 0,
             "rejected": 0,
@@ -608,9 +938,11 @@ def run_agent(config: Mapping[str, Any]) -> dict[str, int]:
         stage_file(config, path, "abuse_context")
         staged += 1
     sshd_events = collect_sshd(config)
+    mail_events = collect_mail(config)
     counts = {
         "staged": staged,
         "sshd_events": sshd_events,
+        "mail_events": mail_events,
         "protection_inventories": protection_inventories,
         "acknowledged": 0,
         "rejected": 0,
@@ -666,6 +998,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "node": config["node"],
                 "central_url": config["central_url"],
                 "sshd_enabled": bool(config["sshd"]["enabled"]),
+                "mail_enabled": bool((config.get("mail") or {}).get("enabled")),
                 "local_address_protection": inventory,
                 "pending": len(list(Path(config["pending_dir"]).glob("*.json"))),
             }, indent=2, sort_keys=True))
@@ -687,9 +1020,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         with process_lock(Path(config["lock_file"])):
             counts = run_agent(config)
         LOG.info(
-            "Agent run complete: staged=%d sshd_events=%d protection_inventories=%d "
-            "acknowledged=%d rejected=%d retried=%d",
-            counts["staged"], counts["sshd_events"],
+            "Agent run complete: staged=%d sshd_events=%d mail_events=%d "
+            "protection_inventories=%d acknowledged=%d rejected=%d retried=%d",
+            counts["staged"], counts["sshd_events"], counts["mail_events"],
             counts["protection_inventories"], counts["acknowledged"],
             counts["rejected"], counts["retried"],
         )

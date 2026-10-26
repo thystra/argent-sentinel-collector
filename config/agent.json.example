@@ -33,6 +33,20 @@
     "destination_port": 22,
     "max_events_per_batch": 500
   },
+  "mail": {
+    "enabled": false,
+    "units": ["dovecot.service", "postfix@-.service"],
+    "cursor_file": "/var/lib/argent-sentinel/agent/mail.cursor",
+    "privacy_key_file": "/etc/argent-sentinel/agent-privacy.key",
+    "initial_lookback_minutes": 5,
+    "destination_ip": "",
+    "postfix_service_ports": {
+      "smtp": 25,
+      "submission": 587,
+      "smtps": 465
+    },
+    "max_events_per_batch": 500
+  },
   "local_address_protection": {
     "enabled": true,
     "mode": "host",

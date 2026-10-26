@@ -1,3 +1,21 @@
+## Implemented in 0.5.6.0 — mail authentication ingest (observe-only, PR1)
+
+- [x] Observe-only Dovecot and Postfix SASL auth-failure ingest as service
+  `mail` (`mail_auth_failed`), HMAC-pseudonymised account tokens, API/collector
+  allowlist, examples, docs, and unit tests. Not deployed.
+- [ ] Deploy to nidhoggur via IT Manager after approval: enable `mail` in
+  `agent.json`, add `mail` to `nodes.d/nidhoggur.json`, and consider
+  `rport`/`lport` in Dovecot `login_log_format_elements`.
+- [ ] PR2 policy: per-IP CrowdSec decision after N failures on one target
+  account token from M distinct source IPs (propose N/M defaults from observed
+  data); keep the policy disabled until production review.
+- [ ] PR2 policy: prefix and ASN aggregation as review-only proposals; no
+  country or ASN automatic bans.
+- [ ] PR2 policy: protected-account list for real mailboxes (operator-held list,
+  including the primary personal mailboxes, `postmaster@`, and `merchant@`),
+  matched by privacy token, never by stored plaintext.
+- [ ] Dashboard/reporting views for `mail` events and XARF mapping (deferred).
+
 ## Implemented in 0.5.5.1 — version-aware PHP-FPM observation
 
 - [x] Discover the active versioned PHP-FPM systemd service in auto mode.
