@@ -46,6 +46,33 @@
   view gain a `mail` family. Account tokens and names are never exported.
 - Add `tests/test_v0560_mail_slowburn.py`.
 
+### Access Guard registration-abuse policy (PR4, same unreleased 0.5.6.0)
+
+- Add collector `registration_abuse_policy` for ArgentWolf Access Guard
+  `registration_abuse` events carried in ordinary `wordpress` batches (connector
+  0.2.6 handoff or Access Guard direct drop). Ingest stays site agnostic: every
+  `drop/wordpress/<site>/incoming` is read and there is no site allowlist.
+- Per source IP across all sites in a 24 h window, qualifying events are
+  `denied` with Access Guard score ≥ `min_score` (6.0) and confidence in
+  `accepted_confidences` (high, medium). Rules:
+  `wordpress-registration-abuse` (≥ 3 qualifying events, or qualifying events
+  on ≥ 2 sites) and `wordpress-registration-abuse-high-confidence` (≥ 2 events
+  with confidence high and score ≥ 9.0). `observed` events are context only.
+  Incidents are cross-site (`site_id` NULL) with provider reporting suppressed.
+- CrowdSec is operator-gated: disabled policy by default, and when enabled
+  decisions stay `dry-run` until `registration_abuse_policy.crowdsec_enforcement`
+  is true in addition to the global `crowdsec.enabled`. Decisions are per IP
+  (`ban_duration` 168 h); no country, ASN, or range automatic bans.
+- Review-only fingerprint campaigns (`registration_abuse_campaigns` in
+  `status`) group events by Access Guard `fingerprint_signature` with bounded
+  prefix proposals and cached-ASN groups.
+- Add `wordpress_drop.site_mismatch` (`warn` default, or `reject`) comparing the
+  drop directory name with batch `source.site_id`.
+- XARF tags for the new rules use `attack:registration-abuse`.
+- fail2ban and the existing WordPress login policies are unchanged.
+- Add `docs/registration-abuse-policy.md` and
+  `tests/test_v0560_registration_abuse.py`.
+
 ## 0.5.5.1
 ### Debian revision 0.5.5.1-2
 

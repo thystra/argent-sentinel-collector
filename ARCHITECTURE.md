@@ -77,6 +77,17 @@ the plaintext list, if used, is a root-only host file hashed at runtime, and
 exports carry a derived `campaign_id` instead of the token. fail2ban remains
 the first, per-source layer.
 
+## Access Guard registration-abuse correlation
+
+Access Guard decides registration locally and emits `registration_abuse`
+evidence (score, confidence, rule IDs, fingerprint signature) through the
+WordPress connector queue or a protected direct drop. The collector ingests it
+from any `drop/wordpress/<site>/` without a site allowlist and, when
+`registration_abuse_policy` is enabled, groups qualifying denied events by
+source IP across sites into per-IP incidents. CrowdSec decisions stay dry-run
+until the operator sets `crowdsec_enforcement`; fingerprint, prefix, and ASN
+groupings are review-only.
+
 ## Policy classes
 
 - OpenSSH: trusted source addresses are excluded; external failed

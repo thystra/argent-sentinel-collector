@@ -173,6 +173,26 @@
     "window_seconds": 900
   },
   "processing_dir": "/var/lib/argent-sentinel/collector/processing",
+  "registration_abuse_policy": {
+    "abuse_reporting_enabled": false,
+    "accepted_confidences": [
+      "high",
+      "medium"
+    ],
+    "ban_duration": "168h",
+    "campaign_prefix_min_ips": 2,
+    "campaign_review_distinct_ips": 3,
+    "cross_site_distinct_sites": 2,
+    "crowdsec_enforcement": false,
+    "enabled": false,
+    "event_threshold": 3,
+    "high_confidence_event_threshold": 2,
+    "high_confidence_score": 9.0,
+    "incident_merge_seconds": 86400,
+    "max_campaign_sample_ips": 10,
+    "min_score": 6.0,
+    "window_seconds": 86400
+  },
   "rejected_dir": "/var/lib/argent-sentinel/collector/rejected",
   "report_batching": {
     "ban_only": {
@@ -234,6 +254,9 @@
     ],
     "suspicious_threshold": 3,
     "window_seconds": 600
+  },
+  "wordpress_drop": {
+    "site_mismatch": "warn"
   },
   "protection_inventory": {
     "incoming_globs": [

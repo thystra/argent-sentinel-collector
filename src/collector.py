@@ -2,8 +2,8 @@
 """Argent Sentinel host collector.
 
 Imports immutable WordPress, OpenSSH, and mail event batches, deduplicates
-events, correlates credential-spray, SSH brute-force, and account-keyed mail
-slow-burn incidents, imports Nginx
+events, correlates credential-spray, SSH brute-force, account-keyed mail
+slow-burn, and Access Guard registration-abuse incidents, imports Nginx
 abuse-context observations, correlates network tuples, and optionally submits
 CrowdSec decisions and sanitized abuse reports.
 """
@@ -146,6 +146,35 @@ DEFAULTS: dict[str, Any] = {
         "protected_account_tokens": [],
         "protected_accounts_file": "",
         "privacy_key_file": "/etc/argent-sentinel/agent-privacy.key",
+    },
+    # ArgentWolf Access Guard ``registration_abuse`` evidence carried in ordinary
+    # WordPress batches. Site agnostic: any site under drop/wordpress/<site>/
+    # may produce it. Disabled by default. Even when enabled, CrowdSec stays
+    # dry-run until ``crowdsec_enforcement`` is true *and* the global
+    # ``crowdsec.enabled`` guard is on. Decisions are per source IP only;
+    # fingerprint/prefix/ASN grouping is review-only.
+    "registration_abuse_policy": {
+        "enabled": False,
+        "crowdsec_enforcement": False,
+        "window_seconds": 86400,
+        "min_score": 6.0,
+        "accepted_confidences": ["high", "medium"],
+        "event_threshold": 3,
+        "cross_site_distinct_sites": 2,
+        "high_confidence_score": 9.0,
+        "high_confidence_event_threshold": 2,
+        "incident_merge_seconds": 86400,
+        "ban_duration": "168h",
+        "abuse_reporting_enabled": False,
+        "campaign_review_distinct_ips": 3,
+        "campaign_prefix_min_ips": 2,
+        "max_campaign_sample_ips": 10,
+    },
+    # Site identity for WordPress batches comes from batch ``source.site_id``.
+    # When a batch arrives under drop/wordpress/<dir>/incoming and <dir> differs
+    # from that site_id, "warn" logs and imports; "reject" rejects the batch.
+    "wordpress_drop": {
+        "site_mismatch": "warn",
     },
     "legacy_reporting": {
         "marker_state_dir": "/var/lib/nginx-abuse-drafts",
@@ -575,6 +604,13 @@ def validate_config(config: Mapping[str, Any]) -> None:
                 f"persistent_wordpress_policy.{name} must be boolean"
             )
     validate_mail_account_policy(config.get("mail_account_policy", {}))
+    validate_registration_abuse_policy(config.get("registration_abuse_policy", {}))
+    site_mismatch = str(config.get("wordpress_drop", {}).get("site_mismatch", "warn"))
+    if site_mismatch not in WORDPRESS_DROP_SITE_MISMATCH_MODES:
+        raise CollectorError(
+            "wordpress_drop.site_mismatch must be one of: "
+            + ", ".join(WORDPRESS_DROP_SITE_MISMATCH_MODES)
+        )
     batching = config["report_batching"]
     if not isinstance(batching.get("enabled"), bool):
         raise CollectorError(
@@ -704,6 +740,13 @@ MAIL_PRIVACY_DOMAIN = "mail"
 MAIL_ACCOUNT_KEY_RE = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}:account:)?[0-9a-f]{64}$")
 MAIL_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:-]{0,63}$")
 MAIL_RULES = ("mail-account-slow-burn", "mail-protected-account-slow-burn")
+REGISTRATION_RULES = (
+    "wordpress-registration-abuse",
+    "wordpress-registration-abuse-high-confidence",
+)
+REGISTRATION_EVENT_TYPE = "registration_abuse"
+REGISTRATION_CONFIDENCES = ("low", "medium", "high")
+WORDPRESS_DROP_SITE_MISMATCH_MODES = ("warn", "reject")
 
 
 def mail_privacy_token(secret: bytes, node_id: str, account: str) -> str:
@@ -787,6 +830,100 @@ def validate_mail_account_policy(policy: Mapping[str, Any]) -> None:
     for name in ("protected_accounts_file", "privacy_key_file"):
         if not isinstance(policy.get(name, ""), str):
             raise CollectorError(f"mail_account_policy.{name} must be a string path")
+
+
+def validate_registration_abuse_policy(policy: Mapping[str, Any]) -> None:
+    for name in (
+        "window_seconds",
+        "event_threshold",
+        "cross_site_distinct_sites",
+        "high_confidence_event_threshold",
+        "incident_merge_seconds",
+        "campaign_review_distinct_ips",
+        "campaign_prefix_min_ips",
+        "max_campaign_sample_ips",
+    ):
+        value = policy.get(name, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise CollectorError(
+                f"registration_abuse_policy.{name} must be a positive integer"
+            )
+    for name in ("enabled", "crowdsec_enforcement", "abuse_reporting_enabled"):
+        if not isinstance(policy.get(name), bool):
+            raise CollectorError(f"registration_abuse_policy.{name} must be boolean")
+    for name in ("min_score", "high_confidence_score"):
+        value = policy.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= float(value) <= 100:
+            raise CollectorError(
+                f"registration_abuse_policy.{name} must be a number from 0 to 100"
+            )
+    if float(policy["high_confidence_score"]) < float(policy["min_score"]):
+        raise CollectorError(
+            "registration_abuse_policy.high_confidence_score must not be below min_score"
+        )
+    confidences = policy.get("accepted_confidences")
+    if (
+        not isinstance(confidences, list)
+        or not confidences
+        or any(item not in REGISTRATION_CONFIDENCES for item in confidences)
+    ):
+        raise CollectorError(
+            "registration_abuse_policy.accepted_confidences must be a non-empty "
+            "list drawn from low, medium, high"
+        )
+    if int(policy["cross_site_distinct_sites"]) < 2:
+        raise CollectorError(
+            "registration_abuse_policy.cross_site_distinct_sites must be at least 2"
+        )
+    if not re.fullmatch(r"[1-9][0-9]*[smh]", str(policy.get("ban_duration", ""))):
+        raise CollectorError("registration_abuse_policy.ban_duration must look like 168h")
+
+
+def registration_evidence(metadata_json: Any) -> dict[str, Any]:
+    """Access Guard assessment fields from stored event metadata (bounded)."""
+    try:
+        metadata = json.loads(str(metadata_json or "{}"))
+    except (TypeError, ValueError):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    try:
+        score = float(metadata.get("score", 0.0))
+    except (TypeError, ValueError):
+        score = 0.0
+    if score != score or score in (float("inf"), float("-inf")):
+        score = 0.0
+    confidence = str(metadata.get("confidence", "low") or "low").strip().lower()
+    if confidence not in REGISTRATION_CONFIDENCES:
+        confidence = "low"
+    raw_rules = metadata.get("rule_ids")
+    rule_ids = [
+        str(item)[:128] for item in raw_rules if isinstance(item, (str, int))
+    ][:50] if isinstance(raw_rules, list) else []
+    signature = str(metadata.get("fingerprint_signature", "") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", signature):
+        signature = ""
+    return {
+        "score": score,
+        "confidence": confidence,
+        "rule_ids": rule_ids,
+        "fingerprint_signature": signature,
+        "policy_action": clean_optional(metadata.get("policy_action"), 64),
+        "producer": clean_optional(metadata.get("producer"), 128),
+    }
+
+
+def wordpress_drop_site(path: Path) -> str | None:
+    """Return <site> for .../drop/wordpress/<site>/incoming/<file>, else None."""
+    parts = path.parts
+    for index in range(len(parts) - 4, -1, -1):
+        if (
+            parts[index] == "drop"
+            and parts[index + 1] == "wordpress"
+            and parts[index + 3] == "incoming"
+        ):
+            return parts[index + 2]
+    return None
 
 
 def valid_email_header(value: str) -> bool:
@@ -1386,6 +1523,23 @@ class StateDB:
                      AND outcome = 'denied'
                      AND source_ip IS NOT NULL
                      AND account_key IS NOT NULL
+                     AND occurred_epoch BETWEEN ? AND ?
+                   ORDER BY occurred_epoch ASC, event_uuid ASC""",
+                (start_epoch, end_epoch),
+            )
+        )
+
+    def registration_abuse_events(self, start_epoch: int, end_epoch: int) -> list[sqlite3.Row]:
+        """Access Guard registration_abuse events from any WordPress site, oldest first."""
+        return list(
+            self.conn.execute(
+                """SELECT event_uuid, occurred_epoch, occurred_at, site_id, account_key,
+                          source_ip, outcome, user_agent, request_method, request_path,
+                          request_id, metadata_json
+                   FROM events
+                   WHERE service = 'wordpress'
+                     AND event_type = 'registration_abuse'
+                     AND source_ip IS NOT NULL
                      AND occurred_epoch BETWEEN ? AND ?
                    ORDER BY occurred_epoch ASC, event_uuid ASC""",
                 (start_epoch, end_epoch),
@@ -2977,6 +3131,7 @@ class Collector:
                 self.reject_file(claimed or path, str(exc))
         self.evaluate_persistent_wordpress_recent()
         self.evaluate_mail_account_slowburn()
+        self.evaluate_registration_abuse()
         context_files = self.import_abuse_context_files()
         protection_files = self.import_protection_inventory_files()
         self.publish_effective_protection_state()
@@ -3474,6 +3629,7 @@ class Collector:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise CollectorError(f"Batch is not valid UTF-8 JSON: {exc}") from exc
         batch, events = normalize_batch(raw)
+        self.check_wordpress_drop_site(batch, original_path)
         if self.db.batch_exists(batch["batch_uuid"]):
             archive = self.archive_file(path, original_path.name, batch["batch_uuid"], duplicate=True)
             LOG.info("Archived duplicate batch %s as %s", batch["batch_uuid"], archive)
@@ -3486,6 +3642,23 @@ class Collector:
             batch["batch_uuid"], len(imported), len(events),
         )
         self.evaluate_new_events(imported)
+
+    def check_wordpress_drop_site(self, batch: Mapping[str, Any], original_path: Path) -> None:
+        """Compare drop/wordpress/<dir>/ with batch source.site_id (no allowlist)."""
+        source = batch["source"]
+        if source.get("service") != "wordpress":
+            return
+        directory_site = wordpress_drop_site(original_path)
+        if directory_site is None or directory_site == source["site_id"]:
+            return
+        mode = str(self.config.get("wordpress_drop", {}).get("site_mismatch", "warn"))
+        message = (
+            f"WordPress batch site_id {source['site_id']!r} does not match its "
+            f"drop directory {directory_site!r}"
+        )
+        if mode == "reject":
+            raise CollectorError(message)
+        LOG.warning("%s; importing under batch site_id", message)
 
     def archive_file(self, path: Path, original_name: str, batch_uuid: str, duplicate: bool) -> Path:
         now = utc_now()
@@ -3639,11 +3812,14 @@ class Collector:
     def mail_prefix_proposals(
         self,
         per_ip: Mapping[str, Sequence[Any]],
+        minimum_ips: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Review-only bounded prefix aggregation for one account campaign."""
+        """Review-only bounded prefix aggregation for one campaign."""
         mail_policy = self.config["mail_account_policy"]
         policy = self.config["policy"]
-        minimum = int(mail_policy["campaign_prefix_min_ips"])
+        minimum = int(
+            minimum_ips if minimum_ips is not None else mail_policy["campaign_prefix_min_ips"]
+        )
         groups: dict[str, list[ipaddress.IPv4Address | ipaddress.IPv6Address]] = {}
         failures: dict[str, int] = {}
         for source_ip, rows in per_ip.items():
@@ -3793,6 +3969,164 @@ class Collector:
                 "updated_at": utc_text(),
             })
         return len(changed)
+
+    def registration_abuse_window(
+        self,
+        now_epoch: int | None = None,
+    ) -> dict[str, list[tuple[sqlite3.Row, dict[str, Any]]]]:
+        """Untrusted-source registration_abuse rows in the policy window, by IP."""
+        policy = self.config["registration_abuse_policy"]
+        end_epoch = int(now_epoch if now_epoch is not None else utc_now().timestamp())
+        start_epoch = end_epoch - int(policy["window_seconds"])
+        by_ip: dict[str, list[tuple[sqlite3.Row, dict[str, Any]]]] = {}
+        for row in self.db.registration_abuse_events(start_epoch, end_epoch):
+            source_ip = str(row["source_ip"])
+            try:
+                if self.trusted_ip(source_ip):
+                    continue
+            except ValueError:
+                continue
+            by_ip.setdefault(source_ip, []).append(
+                (row, registration_evidence(row["metadata_json"]))
+            )
+        return by_ip
+
+    def registration_qualifies(self, row: sqlite3.Row, evidence: Mapping[str, Any]) -> bool:
+        policy = self.config["registration_abuse_policy"]
+        return (
+            str(row["outcome"]) == "denied"
+            and float(evidence["score"]) >= float(policy["min_score"])
+            and evidence["confidence"] in policy["accepted_confidences"]
+        )
+
+    def qualify_registration_abuse(
+        self,
+        rows: Sequence[tuple[sqlite3.Row, Mapping[str, Any]]],
+    ) -> tuple[str, list[sqlite3.Row]] | None:
+        """Per-source-IP registration-abuse decision across all WordPress sites.
+
+        Only ``denied`` events whose Access Guard score and confidence pass the
+        policy qualify. ``observed`` events are reputation context only.
+        """
+        policy = self.config["registration_abuse_policy"]
+        qualifying = [row for row, evidence in rows if self.registration_qualifies(row, evidence)]
+        if not qualifying:
+            return None
+        high = [
+            row for row, evidence in rows
+            if self.registration_qualifies(row, evidence)
+            and evidence["confidence"] == "high"
+            and float(evidence["score"]) >= float(policy["high_confidence_score"])
+        ]
+        if len(high) >= int(policy["high_confidence_event_threshold"]):
+            return REGISTRATION_RULES[1], qualifying
+        sites = {str(row["site_id"]) for row in qualifying}
+        if (
+            len(qualifying) >= int(policy["event_threshold"])
+            or len(sites) >= int(policy["cross_site_distinct_sites"])
+        ):
+            return REGISTRATION_RULES[0], qualifying
+        return None
+
+    def evaluate_registration_abuse(self, now_epoch: int | None = None) -> int:
+        """Turn Access Guard ``registration_abuse`` evidence into per-IP incidents.
+
+        Site agnostic: events from every WordPress site in the window are
+        grouped by source IP. Incidents are cross-site (``site_id`` NULL) and
+        flow through the normal decision path, where ``apply_decision`` keeps
+        them dry-run unless ``crowdsec_enforcement`` is true. Fail2ban remains
+        the first layer; this policy never touches login rules.
+        """
+        policy = self.config.get("registration_abuse_policy", {})
+        if not policy.get("enabled"):
+            return 0
+        report_enabled = bool(policy.get("abuse_reporting_enabled"))
+        report_status = "pending" if report_enabled else "suppressed"
+        report_detail = None if report_enabled else (
+            "Registration-abuse reporting disabled pending production review"
+        )
+        changed: set[str] = set()
+        for source_ip, rows in sorted(self.registration_abuse_window(now_epoch).items()):
+            candidate = self.qualify_registration_abuse(rows)
+            if candidate is None:
+                continue
+            rule_id, evidence = candidate
+            prior = self.db.recent_incident(source_ip, rule_id)
+            prior_count = int(prior["event_count"]) if prior is not None else -1
+            incident_uuid = self.db.create_or_merge_incident(
+                source_ip,
+                rule_id,
+                evidence,
+                int(policy["incident_merge_seconds"]),
+                initial_report_status=report_status,
+                initial_report_detail=report_detail,
+            )
+            incident = self.db.incident(incident_uuid)
+            if prior is None or int(incident["event_count"]) != prior_count:
+                changed.add(incident_uuid)
+                LOG.warning(
+                    "Registration abuse incident %s: ip=%s rule=%s events=%d sites=%d enforcement=%s",
+                    incident_uuid,
+                    source_ip,
+                    rule_id,
+                    int(incident["event_count"]),
+                    int(incident["site_count"]),
+                    "on" if policy.get("crowdsec_enforcement") else "dry-run",
+                )
+        return len(changed)
+
+    def registration_abuse_campaigns(self, now_epoch: int | None = None) -> list[dict[str, Any]]:
+        """Review-only grouping by Access Guard fingerprint signature.
+
+        Never creates incidents or decisions; prefix and ASN groups are
+        proposals for an operator, not automatic range or ASN bans.
+        """
+        policy = self.config.get("registration_abuse_policy", {})
+        if not policy.get("enabled"):
+            return []
+        groups: dict[str, dict[str, list[sqlite3.Row]]] = {}
+        details: dict[str, dict[str, Any]] = {}
+        for source_ip, rows in self.registration_abuse_window(now_epoch).items():
+            for row, evidence in rows:
+                signature = evidence["fingerprint_signature"]
+                if not signature:
+                    continue
+                groups.setdefault(signature, {}).setdefault(source_ip, []).append(row)
+                detail = details.setdefault(signature, {"sites": set(), "denied": 0, "rule_ids": {}})
+                detail["sites"].add(str(row["site_id"]))
+                if str(row["outcome"]) == "denied":
+                    detail["denied"] += 1
+                for rule in evidence["rule_ids"]:
+                    detail["rule_ids"][rule] = detail["rule_ids"].get(rule, 0) + 1
+        campaigns: list[dict[str, Any]] = []
+        minimum = int(policy["campaign_review_distinct_ips"])
+        sample_limit = int(policy["max_campaign_sample_ips"])
+        for signature, per_ip in groups.items():
+            if len(per_ip) < minimum:
+                continue
+            detail = details[signature]
+            all_rows = [row for rows in per_ip.values() for row in rows]
+            ranked = sorted(per_ip, key=lambda ip: (-len(per_ip[ip]), ip))
+            top_rules = sorted(detail["rule_ids"].items(), key=lambda item: (-item[1], item[0]))
+            campaigns.append({
+                "fingerprint_signature": signature,
+                "status": "review",
+                "events": len(all_rows),
+                "denied_events": int(detail["denied"]),
+                "distinct_source_ips": len(per_ip),
+                "sites": sorted(detail["sites"]),
+                "first_seen": epoch_text(min(int(row["occurred_epoch"]) for row in all_rows)),
+                "last_seen": epoch_text(max(int(row["occurred_epoch"]) for row in all_rows)),
+                "top_rule_ids": [rule for rule, _ in top_rules[:10]],
+                "sample_source_ips": ranked[:sample_limit],
+                "prefix_proposals": self.mail_prefix_proposals(
+                    per_ip, int(policy["campaign_prefix_min_ips"])
+                ),
+                "asn_summary": self.mail_asn_summary(list(per_ip)),
+                "review_only": True,
+            })
+        campaigns.sort(key=lambda item: (-item["distinct_source_ips"], -item["events"], item["fingerprint_signature"]))
+        return campaigns
 
     def evaluate_new_events(self, events: Sequence[Mapping[str, Any]]) -> None:
         wordpress_events = [
@@ -4428,6 +4762,14 @@ class Collector:
         settings = self.config["crowdsec"]
         if not settings.get("enabled"):
             return "dry-run", "CrowdSec enforcement disabled in configuration"
+        if (
+            str(incident["rule_id"]) in REGISTRATION_RULES
+            and not self.config["registration_abuse_policy"].get("crowdsec_enforcement")
+        ):
+            return "dry-run", (
+                "Registration-abuse CrowdSec enforcement is operator-gated "
+                "(registration_abuse_policy.crowdsec_enforcement is false)"
+            )
         maximum_age = int(self.config["policy"]["max_enforcement_age_days"]) * 86400
         if int(utc_now().timestamp()) - int(incident["last_seen_epoch"]) > maximum_age:
             return "stale", "Incident is older than the configured enforcement window"
@@ -4443,6 +4785,8 @@ class Collector:
         duration = str(self.config["policy"]["ban_duration"])
         if str(incident["rule_id"]) in MAIL_RULES:
             duration = str(self.config["mail_account_policy"]["ban_duration"])
+        elif str(incident["rule_id"]) in REGISTRATION_RULES:
+            duration = str(self.config["registration_abuse_policy"]["ban_duration"])
         command = [
             cscli, "decisions", "add", "--ip", source_ip,
             "--duration", duration,
@@ -5075,6 +5419,13 @@ class Collector:
             tags = ['attack:login', 'service:mail', f'rule:{rule_id}']
             tuple_description = 'Correlated mail (IMAP/POP3/SMTP AUTH) connection tuples and sanitized authentication evidence'
             normalized_description = 'Sanitized normalized mail authentication evidence'
+        elif rule_id in REGISTRATION_RULES:
+            report_type = 'login_attack'
+            scan_type = 'credential_attack'
+            service = 'wordpress'
+            tags = ['attack:registration-abuse', 'service:wordpress', f'rule:{rule_id}']
+            tuple_description = 'Correlated WordPress connection tuples and sanitized registration-abuse evidence'
+            normalized_description = 'Sanitized normalized WordPress registration-abuse evidence'
         elif rule_id.startswith('wordpress-'):
             report_type = 'login_attack'
             scan_type = 'credential_attack'
@@ -5392,6 +5743,9 @@ def status_output(collector: Collector) -> dict[str, Any]:
             "protected_accounts_configured": len(collector.protected_mail_accounts()),
         },
         "mail_account_campaigns": collector.db.mail_campaigns(50),
+        "registration_abuse_policy": collector.config["registration_abuse_policy"],
+        "registration_abuse_campaigns": collector.registration_abuse_campaigns()[:50],
+        "wordpress_drop": collector.config["wordpress_drop"],
         "legacy_reporting": collector.config["legacy_reporting"],
         "crowdsec_enabled": bool(collector.config["crowdsec"]["enabled"]),
         "abuse_reporting_enabled": bool(collector.config["abuse_reporting"]["enabled"]),
