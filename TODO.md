@@ -1,3 +1,10 @@
+## Repository CI
+
+- [x] Forgejo Actions workflow `.forgejo/workflows/ci.yml` with
+  `scripts/ci-check.sh` (lint, full unit suite, build-only `.deb` job).
+- [ ] Optionally protect `main` on Forgejo so the `CI` checks are required
+  before merge.
+
 ## Implemented in 0.5.6.0 — mail authentication ingest (observe-only, PR1)
 
 - [x] Observe-only Dovecot and Postfix SASL auth-failure ingest as service
