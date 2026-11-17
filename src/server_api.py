@@ -26,6 +26,7 @@ import re
 import socket
 import socketserver
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import urllib.parse
@@ -75,6 +76,11 @@ DEFAULTS: dict[str, Any] = {
     "ban_sync": {
         "enabled": False,
         "store_db": "/var/lib/argent-sentinel/server/ban-sync.sqlite3",
+        # Responses are signed whenever this key exists.  require_signing
+        # refuses to serve unsigned views once every agent pins the key.
+        "signing_key_file": "/etc/argent-sentinel/ban-sync/signing.key",
+        "require_signing": False,
+        "openssl_path": "openssl",
     },
 }
 
@@ -375,7 +381,23 @@ def serve_decisions(config: Mapping[str, Any], node_id: str, cursor: int) -> dic
     except (ban_sync.BanSyncError, sqlite3.Error) as exc:
         LOG.error("Ban-sync view failed for %s: %s", node_id, exc)
         raise APIError(503, "Ban-sync store is unavailable") from exc
-    return view
+    return sign_decisions_view(settings, view)
+
+
+def sign_decisions_view(settings: Mapping[str, Any], view: dict[str, Any]) -> dict[str, Any]:
+    """Attach the Ed25519 signature; never serve unsigned once a key exists."""
+    key_value = str(settings.get("signing_key_file") or "")
+    key_file = Path(key_value) if key_value else None
+    if key_file is None or not key_file.exists():
+        if settings.get("require_signing"):
+            LOG.error("Ban-sync signing required but no key at %s", key_value or "(unset)")
+            raise APIError(503, "Ban-sync signing is unavailable")
+        return view
+    try:
+        return ban_sync.sign_view(view, key_file, openssl=str(settings.get("openssl_path", "openssl")))
+    except (ban_sync.BanSyncError, OSError, subprocess.SubprocessError) as exc:
+        LOG.error("Ban-sync signing failed: %s", exc)
+        raise APIError(503, "Ban-sync signing is unavailable") from exc
 
 
 class ReceiptDB:
@@ -567,10 +589,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("serve")
     sub.add_parser("validate-config")
+    keygen = sub.add_parser("ban-sync-keygen", help="Create the Ed25519 ban-sync signing key (0600) and .pub")
+    keygen.add_argument("--key", help="Private key path (default: ban_sync.signing_key_file)")
+    keygen.add_argument("--force", action="store_true", help="Replace an existing key")
     args = parser.parse_args(argv)
     configure_logging(args.verbose)
     try:
         config = load_config(Path(args.config))
+        if args.command == "ban-sync-keygen":
+            settings = config.get("ban_sync") or {}
+            target = Path(args.key or str(settings.get("signing_key_file") or DEFAULTS["ban_sync"]["signing_key_file"]))
+            try:
+                created = ban_sync.generate_signing_key(
+                    target, force=bool(args.force), openssl=str(settings.get("openssl_path", "openssl"))
+                )
+            except ban_sync.BanSyncError as exc:
+                LOG.error("%s", exc)
+                return 1
+            print(json.dumps(created, indent=2))
+            return 0
         if args.command == "validate-config":
             print(json.dumps({"status": "ok", "version": APP_VERSION}, indent=2))
             return 0

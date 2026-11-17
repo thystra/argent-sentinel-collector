@@ -19,7 +19,9 @@ import hashlib
 import ipaddress
 import io
 import json
+import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -72,12 +74,14 @@ class FakeCrowdSec:
         self.calls: list[list[str]] = []
         self.next_id = 100
         self.allowlisted = allowlisted or set()
+        self.now = NOW
 
     def add_foreign(self, value: str, scenario: str, origin: str = "crowdsec", scope: str = "Ip",
                     duration: str = "3h59m0s") -> None:
         self.next_id += 1
         self.decisions.append({"id": self.next_id, "value": value, "scope": scope, "scenario": scenario,
-                               "origin": origin, "type": "ban", "duration": duration, "simulated": False})
+                               "origin": origin, "type": "ban", "duration": duration, "simulated": False,
+                               "until_epoch": self.now + ban_sync.parse_go_duration(duration)})
 
     def mutating_calls(self) -> list[list[str]]:
         return [call for call in self.calls if call[1:3] in (["decisions", "add"], ["decisions", "delete"])]
@@ -94,7 +98,12 @@ class FakeCrowdSec:
                 selected = [d for d in selected if d["value"] == args[args.index("--ip") + 1]]
             if "--range" in args:
                 selected = [d for d in selected if d["value"] == args[args.index("--range") + 1]]
-            alerts = [{"start_at": epoch_text(NOW - 60), "decisions": [d]} for d in selected]
+            alerts = []
+            for decision in selected:
+                listed = {key: value for key, value in decision.items() if key != "until_epoch"}
+                if "until_epoch" in decision:  # remaining time shrinks like real CrowdSec
+                    listed["duration"] = f"{decision['until_epoch'] - self.now}s"
+                alerts.append({"start_at": epoch_text(NOW - 60), "decisions": [listed]})
             return subprocess.CompletedProcess(args, 0, json.dumps(alerts) if alerts else "null", "")
         if args[1:3] == ["decisions", "add"]:
             scope = "Ip" if "--ip" in args else "Range"
@@ -104,6 +113,7 @@ class FakeCrowdSec:
                 "id": self.next_id, "value": value, "scope": scope,
                 "scenario": args[args.index("--reason") + 1], "origin": "cscli", "type": "ban",
                 "duration": args[args.index("--duration") + 1], "simulated": False,
+                "until_epoch": self.now + ban_sync.parse_go_duration(args[args.index("--duration") + 1]),
             })
             return subprocess.CompletedProcess(args, 0, "Decision successfully added\n", "")
         if args[1:3] == ["decisions", "delete"]:
@@ -124,6 +134,8 @@ class StoreOpener:
         self.clock = clock
         self.requests: list[int] = []
         self.tamper = None
+        self.sign_key: Path | None = None
+        self.post_sign = None
 
     def __call__(self, request, timeout):
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)
@@ -132,6 +144,10 @@ class StoreOpener:
         view = self.store.node_view(self.node, cursor, now_epoch=self.clock[0])
         if self.tamper is not None:
             view = self.tamper(view)
+        if self.sign_key is not None:
+            view = ban_sync.sign_view(view, self.sign_key)
+        if self.post_sign is not None:
+            view = self.post_sign(view)
         self.store.record_pull(self.node, cursor, view["cursor"], view["reset"], 0, now_epoch=self.clock[0])
         return contextlib.closing(io.BytesIO(json.dumps(view).encode()))
 
@@ -271,76 +287,88 @@ class LoopPreventionTest(unittest.TestCase):
             alert("AS1234", "x", "cscli", scope="AS"),
         ])
 
-    def test_agent_never_reports_sentinel_reasons_or_capi(self) -> None:
+    def test_agent_reports_collector_bans_but_never_synced_ones_or_capi(self) -> None:
         found, skipped = ban_sync.parse_cscli_decisions(self.alerts(), now_epoch=NOW)
-        self.assertEqual([HOSTILE_A, HOSTILE_B], [item["value"] for item in found])
-        self.assertEqual(2, skipped["loop"])
+        # Collector bans ("argent-sentinel/<rule>") are ordinary local bans and
+        # are reported; only the sync marker "argent-sentinel:" is skipped.
+        self.assertEqual([HOSTILE_A, HOSTILE_B, HOSTILE_C], [item["value"] for item in found])
+        self.assertNotIn("4.4.4.4", [item["value"] for item in found])
+        self.assertEqual(1, skipped["loop"])
         self.assertEqual(2, skipped["origin"])
         self.assertEqual(1, skipped["type"])
         self.assertEqual(1, skipped["simulated"])
         self.assertEqual(1, skipped["scope"])
         self.assertEqual(epoch_text(NOW + 7200), found[0]["until"])
 
-    def test_central_keeps_collector_decisions_but_not_synced_ones(self) -> None:
-        found, skipped = ban_sync.parse_cscli_decisions(self.alerts(), now_epoch=NOW, skip_reason=ban_sync.is_sync_reason)
-        self.assertIn(HOSTILE_C, [item["value"] for item in found])
-        self.assertNotIn("4.4.4.4", [item["value"] for item in found])
-        self.assertEqual(1, skipped["loop"])
-
-    def test_merge_drops_sync_reasons_and_node_sentinel_reasons(self) -> None:
+    def test_merge_drops_sync_reasons_capi_and_legacy_central_rows(self) -> None:
+        legacy = candidate("nidhoggur", "3.3.3.3", reason="crowdsecurity/ssh-bf")
+        legacy["channel"] = "central"
         candidates = [
             candidate("hermod", HOSTILE_A, reason="argent-sentinel:nidhoggur:sshd"),
-            candidate("hermod", HOSTILE_B, reason="argent-sentinel/sshd-credential-spray"),
-            candidate("nidhoggur", HOSTILE_C, reason="argent-sentinel/sshd-credential-spray", channel="central", origin="cscli"),
-            candidate("nidhoggur", "4.4.4.4", reason="argent-sentinel:hermod:x", channel="central", origin="cscli"),
+            candidate("hermod", HOSTILE_B, reason="crowdsecurity/nginx-bf"),
+            candidate("nidhoggur", HOSTILE_C, reason="argent-sentinel/sshd-credential-spray", origin="cscli"),
+            candidate("nidhoggur", "4.4.4.4", reason="argent-sentinel:hermod:x", origin="cscli"),
             candidate("hermod", "5.5.5.5", origin="CAPI"),
+            legacy,
         ]
         computed, _, stats = ban_sync.compute_effective(candidates, {}, now_epoch=NOW)
-        self.assertEqual([HOSTILE_C], [entry["value"] for entry in computed.values()])
-        self.assertEqual(3, stats["loop"])
-        self.assertEqual(1, stats["origin"])
+        self.assertEqual(sorted([HOSTILE_B, HOSTILE_C]), sorted(entry["value"] for entry in computed.values()))
+        self.assertEqual(2, stats["loop"])
+        self.assertEqual(2, stats["origin"])
 
     def test_agent_upstream_skips_its_own_synced_decisions(self) -> None:
         fake = FakeCrowdSec()
         fake.add_foreign(HOSTILE_A, "crowdsecurity/ssh-bf")
         fake.add_foreign(HOSTILE_B, "argent-sentinel:nidhoggur:sshd", origin="cscli")
+        fake.add_foreign(HOSTILE_C, "argent-sentinel/sshd-credential-spray", origin="cscli")
         settings = ban_sync.AGENT_DEFAULTS | {"upstream": ban_sync.AGENT_DEFAULTS["upstream"] | {"fail2ban_enabled": False}}
         decisions, info = ban_sync.collect_upstream_decisions(settings, now_epoch=NOW, runner=fake)
-        self.assertEqual([HOSTILE_A], [item["value"] for item in decisions])
+        self.assertEqual([HOSTILE_A, HOSTILE_C], [item["value"] for item in decisions])
         self.assertEqual(1, info["crowdsec"]["skipped"]["loop"])
 
 
 class ExpiryCapTest(unittest.TestCase):
+    def test_default_cap_is_30_days(self) -> None:
+        self.assertEqual(30 * 86400, ban_sync.DEFAULT_MAX_DURATION_SECONDS)
+        self.assertEqual(2592000, ban_sync.CENTRAL_DEFAULTS["max_duration_seconds"])
+
     def test_capped_until(self) -> None:
-        week = 7 * 86400
-        self.assertEqual(NOW + 3600, ban_sync.capped_until(NOW + 3600, started_epoch=NOW, first_seen_epoch=NOW, max_duration_seconds=week))
-        self.assertEqual(NOW + week, ban_sync.capped_until(NOW + 30 * 86400, started_epoch=NOW, first_seen_epoch=NOW, max_duration_seconds=week))
+        month = 30 * 86400
+        self.assertEqual(NOW + 3600, ban_sync.capped_until(NOW + 3600, started_epoch=NOW, first_seen_epoch=NOW, max_duration_seconds=month))
+        # Original duration kept below the cap (nidhoggur's 719h collector bans).
+        self.assertEqual(NOW + 719 * 3600, ban_sync.capped_until(NOW + 719 * 3600, started_epoch=NOW, first_seen_epoch=NOW, max_duration_seconds=month))
+        self.assertEqual(NOW + month, ban_sync.capped_until(NOW + 90 * 86400, started_epoch=NOW, first_seen_epoch=NOW, max_duration_seconds=month))
         # Anchored on the decision's own start, not on when central saw it.
-        self.assertEqual(NOW - 86400 + week, ban_sync.capped_until(NOW + 30 * 86400, started_epoch=NOW - 86400, first_seen_epoch=NOW, max_duration_seconds=week))
-        # Permanent fail2ban ban takes the cap; cap disabled uses the 30-day ceiling.
-        self.assertEqual(NOW + week, ban_sync.capped_until(None, started_epoch=None, first_seen_epoch=NOW, max_duration_seconds=week))
-        self.assertEqual(NOW + 30 * 86400, ban_sync.capped_until(None, started_epoch=None, first_seen_epoch=NOW, max_duration_seconds=0))
+        self.assertEqual(NOW - 86400 + month, ban_sync.capped_until(NOW + 90 * 86400, started_epoch=NOW - 86400, first_seen_epoch=NOW, max_duration_seconds=month))
+        # Permanent fail2ban ban takes the 30-day cap; cap disabled uses the 30-day ceiling.
+        self.assertEqual(NOW - 60 + month, ban_sync.capped_until(None, started_epoch=NOW - 60, first_seen_epoch=NOW, max_duration_seconds=month))
+        self.assertEqual(NOW + month, ban_sync.capped_until(None, started_epoch=None, first_seen_epoch=NOW, max_duration_seconds=0))
         self.assertEqual(NOW + 90 * 86400, ban_sync.capped_until(NOW + 90 * 86400, started_epoch=NOW, first_seen_epoch=NOW, max_duration_seconds=0))
 
     def test_merge_applies_cap_and_drops_capped_out_entries(self) -> None:
+        permanent = candidate("hermod", HOSTILE_C, until=None, started=NOW - 60, origin="fail2ban",
+                              reason="fail2ban-recidive")
         candidates = [
-            candidate("nidhoggur", HOSTILE_A, until=NOW + 30 * 86400, started=NOW - 3600, channel="central", origin="cscli",
+            candidate("nidhoggur", HOSTILE_A, until=NOW + 90 * 86400, started=NOW - 3600, origin="cscli",
                       reason="argent-sentinel/sshd-credential-spray"),
-            candidate("hermod", HOSTILE_B, until=NOW + 30 * 86400, started=NOW - 8 * 86400),
+            candidate("hermod", HOSTILE_B, until=NOW + 90 * 86400, started=NOW - 31 * 86400),
+            permanent,
         ]
         computed, _, stats = ban_sync.compute_effective(candidates, {}, now_epoch=NOW)
-        self.assertEqual(NOW - 3600 + 7 * 86400, computed[ban_sync.entry_id("Ip", HOSTILE_A)]["until_epoch"])
+        self.assertEqual(NOW - 3600 + 30 * 86400, computed[ban_sync.entry_id("Ip", HOSTILE_A)]["until_epoch"])
+        self.assertEqual(NOW - 60 + 30 * 86400, computed[ban_sync.entry_id("Ip", HOSTILE_C)]["until_epoch"])
         self.assertNotIn(ban_sync.entry_id("Ip", HOSTILE_B), computed)
         self.assertEqual(1, stats["expired"])
 
-    def test_latest_expiry_wins_across_nodes(self) -> None:
+    def test_latest_expiry_wins_and_every_contributor_is_recorded(self) -> None:
         candidates = [
             candidate("hermod", HOSTILE_A, until=NOW + 3600),
-            candidate("nidhoggur", HOSTILE_A, until=NOW + 7200, channel="central", origin="cscli"),
+            candidate("nidhoggur", HOSTILE_A, until=NOW + 7200, origin="cscli"),
         ]
         computed, _, _ = ban_sync.compute_effective(candidates, {}, now_epoch=NOW)
         entry = computed[ban_sync.entry_id("Ip", HOSTILE_A)]
         self.assertEqual(("nidhoggur", NOW + 7200), (entry["origin_node"], entry["until_epoch"]))
+        self.assertEqual(["hermod", "nidhoggur"], entry["contributors"])
 
 
 class DeltaCursorTest(unittest.TestCase):
@@ -357,7 +385,7 @@ class DeltaCursorTest(unittest.TestCase):
         return self.store.reconcile(computed, removed, now_epoch=now, tombstone_retention_seconds=86400)
 
     def test_snapshot_then_delta_then_removal(self) -> None:
-        self.publish([candidate("nidhoggur", HOSTILE_A, channel="central", origin="cscli"),
+        self.publish([candidate("nidhoggur", HOSTILE_A, origin="cscli"),
                       candidate("hermod", HOSTILE_B)])
         snapshot = self.store.node_view("hermod", 0, now_epoch=NOW)
         self.assertTrue(snapshot["reset"])
@@ -371,7 +399,7 @@ class DeltaCursorTest(unittest.TestCase):
         self.assertEqual(([], []), (again["upserts"], again["removals"]))
         self.assertEqual(snapshot["snapshot_sha256"], again["snapshot_sha256"])
         # A new central decision and a revocation of HOSTILE_A.
-        self.publish([candidate("nidhoggur", HOSTILE_C, channel="central", origin="cscli"),
+        self.publish([candidate("nidhoggur", HOSTILE_C, origin="cscli"),
                       candidate("hermod", HOSTILE_B)])
         delta = self.store.node_view("hermod", snapshot["cursor"], now_epoch=NOW)
         self.assertEqual([HOSTILE_C], [entry["value"] for entry in delta["upserts"]])
@@ -428,6 +456,16 @@ class DeltaCursorTest(unittest.TestCase):
         with self.assertRaises(ban_sync.BanSyncError):
             ban_sync.validate_view(view)
 
+    def test_report_intake_drops_sync_marker_before_sanitising(self) -> None:
+        report = ban_sync.validate_decisions_report(ban_sync.build_decisions_report("hermod", [
+            {"source": "crowdsec", "source_id": "1", "scope": "Ip", "value": HOSTILE_A, "origin": "cscli",
+             "scenario": "argent-sentinel:nidhoggur:x", "reason": "argent-sentinel:nidhoggur:x"},
+            {"source": "crowdsec", "source_id": "2", "scope": "Ip", "value": HOSTILE_B, "origin": "cscli",
+             "scenario": "argent-sentinel/sshd-credential-spray", "reason": "argent-sentinel/sshd-credential-spray"},
+        ]), "hermod")
+        self.assertEqual(1, report["dropped_loop"])
+        self.assertEqual([HOSTILE_B], [item["value"] for item in report["decisions"]])
+
     def test_node_report_replacement_dedup_and_staleness(self) -> None:
         report = ban_sync.validate_decisions_report(ban_sync.build_decisions_report("hermod", [
             {"source": "crowdsec", "source_id": "1", "scope": "Ip", "value": HOSTILE_A, "origin": "crowdsec",
@@ -469,7 +507,7 @@ class AgentApplyTest(unittest.TestCase):
         )
 
     def central(self, value, until=NOW + 7200):
-        return candidate("nidhoggur", value, until=until, channel="central", origin="cscli",
+        return candidate("nidhoggur", value, until=until, origin="cscli",
                          reason="argent-sentinel/sshd-credential-spray")
 
     def test_dry_run_is_default_and_never_calls_cscli_mutations(self) -> None:
@@ -496,7 +534,7 @@ class AgentApplyTest(unittest.TestCase):
     def test_apply_is_idempotent_and_removes_only_owned_decisions(self) -> None:
         self.publish([self.central(HOSTILE_A), self.central(HOSTILE_RANGE.replace("1.0.0.0", "1.0.0.0"))])
         self.publish([self.central(HOSTILE_A), candidate("nidhoggur", HOSTILE_RANGE, scope="Range", until=NOW + 7200,
-                                                          channel="central", origin="cscli", reason="manual")])
+                                                          origin="cscli", reason="manual")])
         config = agent_config(self.root, dry_run=False)
         first = self.sync(config)
         self.assertEqual((2, 0, 0), (first["applied"], first["removed"], first["failed"]))
@@ -515,7 +553,7 @@ class AgentApplyTest(unittest.TestCase):
         self.fake.add_foreign(HOSTILE_A, "crowdsecurity/ssh-bf")
         self.fake.add_foreign(HOSTILE_A, "argent-sentinel/sshd-credential-spray", origin="cscli")
         self.publish([candidate("nidhoggur", HOSTILE_RANGE, scope="Range", until=NOW + 7200,
-                                channel="central", origin="cscli", reason="manual")])
+                                origin="cscli", reason="manual")])
         self.clock[0] += 300
         third = self.sync(config)
         self.assertEqual((0, 1), (third["applied"], third["removed"]))
@@ -577,7 +615,217 @@ class AgentApplyTest(unittest.TestCase):
         self.assertEqual([], self.fake.mutating_calls())
 
 
+@unittest.skipUnless(shutil.which("openssl"), "openssl CLI is required for Ed25519 signing")
+class SigningTest(unittest.TestCase):
+    """Ed25519 detached signatures.  Keys are generated during the test run;
+    no key material is committed."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.keys = tempfile.TemporaryDirectory()
+        root = Path(cls.keys.name)
+        cls.central = ban_sync.generate_signing_key(root / "central" / "signing.key")
+        cls.rogue = ban_sync.generate_signing_key(root / "rogue" / "signing.key")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.keys.cleanup()
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.store = ban_sync.BanSyncStore(self.root / "ban-sync.sqlite3")
+        self.clock = [NOW]
+        self.opener = StoreOpener(self.store, "hermod", self.clock)
+        self.opener.sign_key = Path(self.central["key_file"])
+        self.fake = FakeCrowdSec()
+        computed, removed, _ = ban_sync.compute_effective(
+            [candidate("nidhoggur", HOSTILE_A, origin="cscli", reason="argent-sentinel/sshd-credential-spray")],
+            {}, now_epoch=NOW)
+        self.store.reconcile(computed, removed, now_epoch=NOW, tombstone_retention_seconds=86400)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.temporary.cleanup()
+
+    def pinned_config(self, *keys: str, **overrides):
+        return agent_config(self.root, dry_run=False, signing_public_key_files=list(keys), **overrides)
+
+    def sync(self, config):
+        return ban_sync.run_agent_sync(config, force=True, runner=self.fake, opener=self.opener, now_epoch=self.clock[0],
+                                       interfaces=[], inventory_cidrs=[], crowdsec_present=True)
+
+    def assert_rejected(self, config, fragment: str) -> None:
+        result = self.sync(config)
+        self.assertEqual("signature-failed", result["status"])
+        self.assertIn(fragment, result["error"])
+        self.assertEqual([], self.fake.mutating_calls())
+        state = json.loads(Path(config["ban_sync"]["apply"]["state_file"]).read_text())
+        self.assertNotIn("cursor", state)
+        self.assertEqual({}, state.get("mirror", {}))
+        status = ban_sync.agent_status(config)
+        self.assertTrue(status["signature_required"])
+        self.assertGreaterEqual(status["signature_failures"], 1)
+        self.assertEqual("signature-failed", status["last_status"])
+        self.assertTrue(status["signature_status"].startswith("failed:"))
+
+    def test_key_generation_permissions_and_no_overwrite(self) -> None:
+        key = Path(self.central["key_file"])
+        self.assertEqual(0o600, key.stat().st_mode & 0o777)
+        self.assertEqual(0o700, key.parent.stat().st_mode & 0o777)
+        self.assertEqual(0o644, Path(self.central["public_key_file"]).stat().st_mode & 0o777)
+        self.assertRegex(self.central["key_id"], r"^[0-9a-f]{16}$")
+        self.assertNotEqual(self.central["key_id"], self.rogue["key_id"])
+        with self.assertRaises(ban_sync.SignatureError):
+            ban_sync.generate_signing_key(key)
+
+    def test_signed_message_binds_view_cursor_and_node(self) -> None:
+        view = self.store.node_view("hermod", 0, now_epoch=NOW)
+        base = ban_sync.signed_view_message(view)
+        self.assertTrue(base.startswith(ban_sync.SIGNATURE_CONTEXT))
+        for name, value in (("node_id", "odin"), ("cursor", 99), ("requested_cursor", 5),
+                            ("snapshot_sha256", "0" * 64), ("generated_epoch", NOW + 1), ("set_id", "x")):
+            self.assertNotEqual(base, ban_sync.signed_view_message(dict(view, **{name: value})), name)
+        self.assertNotEqual(base, ban_sync.signed_view_message(dict(view, entries=[])))
+
+    def test_group_readable_key_is_refused(self) -> None:
+        key = Path(self.central["key_file"])
+        os.chmod(key, 0o640)
+        try:
+            with self.assertRaises(ban_sync.SignatureError):
+                ban_sync.sign_view(self.store.node_view("hermod", 0, now_epoch=NOW), key)
+        finally:
+            os.chmod(key, 0o600)
+
+    def test_pinned_key_accepts_valid_signatures(self) -> None:
+        config = self.pinned_config(self.central["public_key_file"])
+        result = self.sync(config)
+        self.assertEqual(("ok", 1), (result["status"], result["applied"]))
+        status = ban_sync.agent_status(config)
+        self.assertEqual(f"verified ({self.central['key_id']})", status["signature_status"])
+        self.assertEqual(0, status["signature_failures"])
+        # Delta pulls are verified too.
+        self.clock[0] += 300
+        self.assertEqual("ok", self.sync(config)["status"])
+
+    def test_rotation_accepts_any_pinned_key(self) -> None:
+        self.opener.sign_key = Path(self.rogue["key_file"])
+        config = self.pinned_config(self.central["public_key_file"], self.rogue["public_key_file"])
+        self.assertEqual("ok", self.sync(config)["status"])
+
+    def test_unsigned_response_rejected_when_key_pinned(self) -> None:
+        self.opener.sign_key = None
+        self.assert_rejected(self.pinned_config(self.central["public_key_file"]), "unsigned")
+
+    def test_unpinned_signer_rejected(self) -> None:
+        self.opener.sign_key = Path(self.rogue["key_file"])
+        self.assert_rejected(self.pinned_config(self.central["public_key_file"]), "unpinned key")
+
+    def test_tampered_entry_rejected(self) -> None:
+        def tamper(view):
+            view = json.loads(json.dumps(view))
+            view["entries"][0]["until"] = epoch_text(NOW + 999999)
+            return view
+        self.opener.post_sign = tamper
+        self.assert_rejected(self.pinned_config(self.central["public_key_file"]), "verification failed")
+
+    def test_tampered_signature_rejected(self) -> None:
+        def flip(view):
+            raw = bytearray(base64.b64decode(view["signature"]["value"]))
+            raw[0] ^= 1
+            return dict(view, signature=dict(view["signature"], value=base64.b64encode(bytes(raw)).decode()))
+        self.opener.post_sign = flip
+        self.assert_rejected(self.pinned_config(self.central["public_key_file"]), "verification failed")
+
+    def test_view_for_another_node_rejected(self) -> None:
+        self.opener.node = "odin"
+        self.assert_rejected(self.pinned_config(self.central["public_key_file"]), "another node")
+
+    def test_replayed_cursor_rejected(self) -> None:
+        self.opener.tamper = lambda view: dict(view, requested_cursor=7)
+        self.assert_rejected(self.pinned_config(self.central["public_key_file"]), "cursor")
+
+    def test_stale_and_rollback_rejected(self) -> None:
+        config = self.pinned_config(self.central["public_key_file"])
+        self.opener.tamper = lambda view: dict(view, generated_epoch=NOW - 3600)
+        self.assert_rejected(config, "stale")
+        self.opener.tamper = None
+        self.assertEqual("ok", self.sync(config)["status"])
+        self.opener.tamper = lambda view: dict(view, generated_epoch=NOW - 60)
+        result = self.sync(config)
+        self.assertEqual("signature-failed", result["status"])
+        self.assertIn("rollback", result["error"])
+
+    def test_unreadable_pinned_key_fails_closed(self) -> None:
+        result = self.sync(self.pinned_config(str(self.root / "missing.pub")))
+        self.assertEqual("signature-failed", result["status"])
+        self.assertEqual([], self.fake.mutating_calls())
+
+    def test_no_pinned_key_signatures_optional(self) -> None:
+        config = self.pinned_config()
+        self.assertEqual("ok", self.sync(config)["status"])
+        self.assertEqual("unverified (no pinned key)", ban_sync.agent_status(config)["signature_status"])
+        self.assertFalse(ban_sync.agent_status(config)["signature_required"])
+        self.opener.sign_key = None
+        self.clock[0] += 300
+        self.assertEqual("ok", self.sync(config)["status"])
+        self.assertEqual("unsigned", ban_sync.agent_status(config)["signature_status"])
+
+    def test_api_signs_when_key_present_and_enforces_require_signing(self) -> None:
+        settings = {"signing_key_file": self.central["key_file"], "require_signing": False}
+        view = self.store.node_view("hermod", 0, now_epoch=NOW)
+        signed = server_api.sign_decisions_view(settings, view)
+        self.assertEqual(self.central["key_id"], signed["signature"]["key_id"])
+        pinned = ban_sync.load_pinned_keys([self.central["public_key_file"]])
+        self.assertTrue(ban_sync.verify_view_signature(
+            signed, pinned, node_id="hermod", requested_cursor=0, now_epoch=NOW,
+            last_generated_epoch=0, max_age_seconds=900).startswith("verified"))
+        missing = {"signing_key_file": str(self.root / "absent.key"), "require_signing": False}
+        self.assertNotIn("signature", server_api.sign_decisions_view(missing, view))
+        with self.assertRaises(server_api.APIError) as raised:
+            server_api.sign_decisions_view(dict(missing, require_signing=True), view)
+        self.assertEqual(503, raised.exception.status)
+        key = Path(self.central["key_file"])
+        os.chmod(key, 0o644)
+        try:
+            with self.assertRaises(server_api.APIError) as raised:
+                server_api.sign_decisions_view(settings, view)
+            self.assertEqual(503, raised.exception.status)
+        finally:
+            os.chmod(key, 0o600)
+
+    def test_api_keygen_command(self) -> None:
+        config_path = self.root / "server-api.json"
+        key = self.root / "etc" / "ban-sync" / "signing.key"
+        config_path.write_text(json.dumps({"ban_sync": {"signing_key_file": str(key)}}))
+        with mock.patch.object(server_api, "load_config", return_value=server_api.deep_merge(
+                server_api.DEFAULTS, {"ban_sync": {"signing_key_file": str(key)}})), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(0, server_api.main(["--config", str(config_path), "ban-sync-keygen"]))
+        created = json.loads(output.getvalue())
+        self.assertEqual(str(key), created["key_file"])
+        self.assertEqual(0o600, key.stat().st_mode & 0o777)
+        self.assertNotIn("PRIVATE", created["public_key_pem"])
+        with mock.patch.object(server_api, "load_config", return_value=server_api.deep_merge(
+                server_api.DEFAULTS, {"ban_sync": {"signing_key_file": str(key)}})):
+            self.assertEqual(1, server_api.main(["--config", str(config_path), "ban-sync-keygen"]))
+
+    def test_no_private_keys_in_repository(self) -> None:
+        marker = b"-----BEGIN " + b"PRIVATE KEY-----"
+        tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=False).stdout.split()
+        for name in tracked:
+            path = ROOT / name
+            if path.is_file() and path.stat().st_size < 4_000_000:
+                self.assertNotIn(marker, path.read_bytes(), name)
+
+
 class Fail2banSourceTest(unittest.TestCase):
+    def test_all_jails_by_default(self) -> None:
+        self.assertEqual([], ban_sync.AGENT_DEFAULTS["upstream"]["fail2ban_jails"])
+        self.assertTrue(ban_sync.AGENT_DEFAULTS["upstream"]["fail2ban_enabled"])
+        example = json.loads((ROOT / "config/agent.json.example").read_text())
+        self.assertEqual([], example["ban_sync"]["upstream"].get("fail2ban_jails", []))
+
     def test_current_and_permanent_bans(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "fail2ban.sqlite3"
@@ -685,7 +933,7 @@ class ApiTest(unittest.TestCase):
 
     def test_get_decisions_authorization_and_pull_record(self) -> None:
         store = ban_sync.BanSyncStore(Path(self.config["ban_sync"]["store_db"]))
-        computed, removed, _ = ban_sync.compute_effective([candidate("nidhoggur", HOSTILE_A, channel="central", origin="cscli")],
+        computed, removed, _ = ban_sync.compute_effective([candidate("nidhoggur", HOSTILE_A, origin="cscli")],
                                                           {}, now_epoch=int(time.time()))
         store.reconcile(computed, removed, now_epoch=int(time.time()), tombstone_retention_seconds=86400)
         store.close()
@@ -727,72 +975,172 @@ class ApiTest(unittest.TestCase):
         self.assertIn("if ($ssl_client_verify != SUCCESS)", block[:300])
 
 
+def write_report(root: Path, node: str, decisions: list[dict], name: str, now: int = NOW) -> None:
+    incoming = root / "remote" / node / "decisions" / "incoming"
+    incoming.mkdir(parents=True, exist_ok=True)
+    report = ban_sync.build_decisions_report(node, decisions, now=dt.datetime.fromtimestamp(now, dt.timezone.utc))
+    (incoming / name).write_text(json.dumps(report))
+
+
+def central_config(root: Path, state: Path) -> dict:
+    return {
+        "node": {"id": "nidhoggur"},
+        "trusted_cidrs": ["127.0.0.0/8"],
+        "enforcement_protection": {"protected_cidrs": [], "dynamic_state_file": str(state)},
+        "ban_sync": ban_sync.CENTRAL_DEFAULTS | {
+            "enabled": True,
+            "store_db": str(root / "ban-sync.sqlite3"),
+            "status_file": str(root / "ban-sync-status.json"),
+            "incoming_globs": [str(root / "remote/*/decisions/incoming/*.json")],
+            "archive_dir": str(root / "archive"),
+            "rejected_dir": str(root / "rejected"),
+        },
+    }
+
+
 class CollectorMergeTest(unittest.TestCase):
-    def test_merge_ingests_reports_reads_central_and_publishes_status(self) -> None:
+    def test_merge_uses_node_reports_only_and_publishes_status(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state = root / "effective.json"
             state.write_text(json.dumps({"schema_version": 1, "generated_epoch": NOW, "dynamic_cidrs": [], "nodes": []}))
-            incoming = root / "remote/hermod/decisions/incoming"
-            incoming.mkdir(parents=True)
-            report = ban_sync.build_decisions_report("hermod", [
+            write_report(root, "hermod", [
                 {"source": "fail2ban", "source_id": f"probe:{HOSTILE_B}", "scope": "Ip", "value": HOSTILE_B,
                  "origin": "fail2ban", "scenario": "fail2ban/argentwolf-nginx-probe",
                  "reason": "fail2ban-argentwolf-nginx-probe", "started_at": epoch_text(NOW - 60), "until": None},
-            ], now=dt.datetime.fromtimestamp(NOW, dt.timezone.utc))
-            (incoming / "r1.json").write_text(json.dumps(report))
+            ], "r1.json")
+            # Nidhoggur's agent reports the collector's own ban like any node.
+            write_report(root, "nidhoggur", [
+                {"source": "crowdsec", "source_id": "7", "scope": "Ip", "value": HOSTILE_A, "origin": "cscli",
+                 "scenario": "argent-sentinel/sshd-credential-spray", "reason": "argent-sentinel/sshd-credential-spray",
+                 "started_at": epoch_text(NOW - 60), "until": epoch_text(NOW - 60 + 719 * 3600)},
+                {"source": "crowdsec", "source_id": "8", "scope": "Ip", "value": HOSTILE_C, "origin": "cscli",
+                 "scenario": "argent-sentinel:hermod:x", "reason": "argent-sentinel:hermod:x",
+                 "until": epoch_text(NOW + 3600)},
+            ], "r2.json")
             # A report claiming another node under hermod's drop path is rejected.
-            (incoming / "r2.json").write_text(json.dumps(ban_sync.build_decisions_report("nidhoggur", [])))
-            fake = FakeCrowdSec()
-            fake.add_foreign(HOSTILE_A, "argent-sentinel/sshd-credential-spray", origin="cscli", duration="719h0m0s")
-            fake.add_foreign(HOSTILE_C, "argent-sentinel:hermod:fail2ban-sshd", origin="cscli")
-            config = {
-                "node": {"id": "nidhoggur"},
-                "trusted_cidrs": ["127.0.0.0/8"],
-                "enforcement_protection": {"protected_cidrs": [], "dynamic_state_file": str(state)},
-                "crowdsec": {"cscli_path": "/usr/bin/cscli", "command_timeout_seconds": 5},
-                "ban_sync": ban_sync.CENTRAL_DEFAULTS | {
-                    "enabled": True,
-                    "store_db": str(root / "ban-sync.sqlite3"),
-                    "status_file": str(root / "ban-sync-status.json"),
-                    "incoming_globs": [str(root / "remote/*/decisions/incoming/*.json")],
-                    "archive_dir": str(root / "archive"),
-                    "rejected_dir": str(root / "rejected"),
-                },
-            }
-            result = ban_sync.run_central_merge(config, runner=fake, now_epoch=NOW)
-            self.assertEqual("ok", result["status"])
-            self.assertEqual(1, result["imported"])
-            self.assertEqual(2, result["active"])
-            self.assertEqual([], list(incoming.glob("*.json")))
-            self.assertEqual(1, len(list((root / "rejected").rglob("*.error.txt"))))
-            self.assertEqual("not-due", ban_sync.run_central_merge(config, runner=fake, now_epoch=NOW + 5)["status"])
+            (root / "remote/hermod/decisions/incoming/r3.json").write_text(
+                json.dumps(ban_sync.build_decisions_report("nidhoggur", [])))
+            config = central_config(root, state)
+            # Rows from the pre-release central direct read are purged.
             store = ban_sync.BanSyncStore(root / "ban-sync.sqlite3")
-            view = store.node_view("hermod", 0, now_epoch=NOW)
+            legacy = ban_sync.validate_decisions_report(ban_sync.build_decisions_report("nidhoggur", [
+                {"source": "crowdsec", "source_id": "1", "scope": "Ip", "value": "4.4.4.4", "origin": "crowdsec",
+                 "scenario": "x", "reason": "x", "until": epoch_text(NOW + 600)}],
+                now=dt.datetime.fromtimestamp(NOW, dt.timezone.utc)), "nidhoggur")
+            store.record_node_report(legacy, "e" * 64, channel="central", now_epoch=NOW)
             store.close()
-            entries = {entry["value"]: entry for entry in view["entries"]}
-            # Hermod receives nidhoggur's collector ban (capped to 7 days from
-            # its start), not its own fail2ban ban or the synced decision.
+            with mock.patch.object(ban_sync, "read_cscli_decisions", side_effect=AssertionError("no central read")):
+                result = ban_sync.run_central_merge(config, now_epoch=NOW)
+            self.assertEqual("ok", result["status"])
+            self.assertEqual(2, result["imported"])
+            self.assertEqual(2, result["active"])
+            # The synced decision in nidhoggur's report is dropped at intake.
+            self.assertNotIn(HOSTILE_C, [row["value"] for row in ban_sync.BanSyncStore(root / "ban-sync.sqlite3").candidate_decisions()])
+            self.assertEqual(1, len(list((root / "rejected").rglob("*.error.txt"))))
+            self.assertEqual("not-due", ban_sync.run_central_merge(config, now_epoch=NOW + 5)["status"])
+            store = ban_sync.BanSyncStore(root / "ban-sync.sqlite3")
+            self.assertFalse(any(row["channel"] == "central" for row in store.candidate_decisions()))
+            hermod_view = store.node_view("hermod", 0, now_epoch=NOW)
+            nidhoggur_view = store.node_view("nidhoggur", 0, now_epoch=NOW)
+            store.close()
+            entries = {entry["value"]: entry for entry in hermod_view["entries"]}
+            # Hermod receives nidhoggur's collector ban with its original 719h
+            # duration (below the 30-day cap), never its own fail2ban ban.
             self.assertEqual([HOSTILE_A], list(entries))
-            self.assertEqual(epoch_text(NOW - 60 + 7 * 86400), entries[HOSTILE_A]["until"])
+            self.assertEqual(epoch_text(NOW - 60 + 719 * 3600), entries[HOSTILE_A]["until"])
             self.assertEqual("nidhoggur", entries[HOSTILE_A]["origin_node"])
+            # Nidhoggur receives hermod's permanent fail2ban ban capped at 30 days.
+            self.assertEqual([(HOSTILE_B, epoch_text(NOW - 60 + 30 * 86400))],
+                             [(entry["value"], entry["until"]) for entry in nidhoggur_view["entries"]])
             status = ban_sync.publish_status(config, now_epoch=NOW)
             self.assertEqual(2, status["active_entries"])
             published = json.loads((root / "ban-sync-status.json").read_text())
             self.assertNotIn("entries", published)
             # Stale protection state: fail closed, nothing new published.
-            result = ban_sync.run_central_merge(config, runner=fake, now_epoch=NOW + 3600, force=True)
+            result = ban_sync.run_central_merge(config, now_epoch=NOW + 3600, force=True)
             self.assertEqual("protection-unavailable", result["status"])
 
     def test_collector_defaults_and_status(self) -> None:
         self.assertFalse(collector.DEFAULTS["ban_sync"]["enabled"])
-        self.assertEqual(604800, collector.DEFAULTS["ban_sync"]["max_duration_seconds"])
+        self.assertEqual(2592000, collector.DEFAULTS["ban_sync"]["max_duration_seconds"])
+        self.assertNotIn("include_central_crowdsec", collector.DEFAULTS["ban_sync"])
         example = json.loads((ROOT / "config/collector.json.example").read_text())
         self.assertFalse(example["ban_sync"]["enabled"])
+        self.assertEqual(2592000, example["ban_sync"]["max_duration_seconds"])
+        self.assertEqual(["134.199.206.240/32", "108.226.59.220/32"], example["ban_sync"]["protected_cidrs"])
+        self.assertNotIn("include_central_crowdsec", example["ban_sync"])
         ban_sync.validate_central_settings(example["ban_sync"])
+        # A leftover pre-release key is ignored rather than breaking the collector.
+        ban_sync.validate_central_settings(example["ban_sync"] | {"include_central_crowdsec": True})
         with self.assertRaises(ban_sync.BanSyncError):
             ban_sync.validate_central_settings(example["ban_sync"] | {"allowed_origins": ["crowdsec", "lists"]})
         self.assertEqual({"enabled": False}, collector.ban_sync_status({"ban_sync": {"enabled": False}}))
+
+
+class NodePathTest(unittest.TestCase):
+    """Nidhoggur is an ordinary node: it reports through its agent and pulls
+    the merged list; loop prevention holds and nothing churns."""
+
+    def test_two_node_round_trip_is_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "effective.json"
+            state.write_text(json.dumps({"schema_version": 1, "generated_epoch": NOW, "dynamic_cidrs": [], "nodes": []}))
+            config = central_config(root, state)
+            clock = [NOW]
+            crowdsec = {"nidhoggur": FakeCrowdSec(), "hermod": FakeCrowdSec()}
+            crowdsec["nidhoggur"].add_foreign(HOSTILE_A, "argent-sentinel/sshd-credential-spray", origin="cscli",
+                                              duration="719h0m0s")
+            crowdsec["nidhoggur"].add_foreign("5.5.5.5", "update : +15000/-0 IPs", origin="CAPI")
+            crowdsec["hermod"].add_foreign(HOSTILE_B, "crowdsecurity/nginx-bf", duration="4h0m0s")
+            crowdsec["hermod"].add_foreign(HOSTILE_C, "crowdsecurity/ssh-bf", duration="4h0m0s")
+            crowdsec["nidhoggur"].add_foreign(HOSTILE_C, "argent-sentinel/sshd-credential-spray", origin="cscli",
+                                              duration="2h0m0s")
+            settings = json.loads(json.dumps(ban_sync.AGENT_DEFAULTS))
+            settings["upstream"]["fail2ban_enabled"] = False
+
+            def report_all(name: str) -> None:
+                for node, fake in crowdsec.items():
+                    decisions, _ = ban_sync.collect_upstream_decisions(settings, now_epoch=clock[0], runner=fake)
+                    write_report(root, node, decisions, f"{node}-{name}.json", now=clock[0])
+                ban_sync.run_central_merge(config, now_epoch=clock[0], force=True)
+
+            def pull_all() -> None:
+                for node, fake in crowdsec.items():
+                    store = ban_sync.BanSyncStore(root / "ban-sync.sqlite3")
+                    try:
+                        node_config = agent_config(root / node, node=node, dry_run=False)
+                        ban_sync.run_agent_sync(node_config, force=True, runner=fake,
+                                                opener=StoreOpener(store, node, clock), now_epoch=clock[0],
+                                                interfaces=[], inventory_cidrs=[], crowdsec_present=True)
+                    finally:
+                        store.close()
+
+            report_all("1")
+            pull_all()
+            synced = {node: sorted(d["value"] for d in fake.decisions if ban_sync.is_sync_reason(d["scenario"]))
+                      for node, fake in crowdsec.items()}
+            # Each node gets the other's bans; HOSTILE_C is banned on both
+            # nodes locally, so neither receives it back; CAPI never syncs.
+            self.assertEqual({"hermod": [HOSTILE_A], "nidhoggur": [HOSTILE_B]}, synced)
+            store = ban_sync.BanSyncStore(root / "ban-sync.sqlite3")
+            head = store.head_seq()
+            store.close()
+            # Second cycle: synced decisions are not re-reported, so the
+            # effective set, the cursor and CrowdSec stay unchanged.
+            clock[0] += 300
+            for fake in crowdsec.values():
+                fake.now = clock[0]
+            before = {node: len(fake.mutating_calls()) for node, fake in crowdsec.items()}
+            report_all("2")
+            pull_all()
+            store = ban_sync.BanSyncStore(root / "ban-sync.sqlite3")
+            self.assertEqual(head, store.head_seq())
+            candidates = store.candidate_decisions()
+            store.close()
+            self.assertFalse(any(ban_sync.is_sync_reason(row["reason"]) for row in candidates))
+            self.assertEqual(before, {node: len(fake.mutating_calls()) for node, fake in crowdsec.items()})
 
 
 class ObservabilityTest(unittest.TestCase):

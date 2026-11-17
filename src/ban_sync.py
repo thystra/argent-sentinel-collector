@@ -10,12 +10,14 @@ filters:
 
 * upstream  - the agent snapshots local CrowdSec decisions (origin crowdsec /
   cscli, scope Ip / Range) and current fail2ban bans into a ``decisions``
-  transport payload;
-* central   - the collector stores node reports plus central's own CrowdSec
-  decisions, filters them through enforcement protection and publishes one
-  effective ban set with a monotonic cursor into a dedicated SQLite store;
+  transport payload (every node, including the central host, reports
+  through its own agent);
+* central   - the collector stores node reports, filters them through
+  enforcement protection and publishes one effective ban set with a
+  monotonic cursor into a dedicated SQLite store;
 * downstream - the API serves a per-node snapshot or delta plus a SHA-256
-  digest of the node's full view;
+  digest of the node's full view, signed with Ed25519 when a central signing
+  key exists;
 * apply     - the agent mirrors the view, re-checks local protection and
   converges CrowdSec with ``cscli decisions add|delete``, touching only
   decisions whose reason carries the sync prefix.
@@ -27,6 +29,7 @@ false.
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import glob
 import hashlib
@@ -36,6 +39,7 @@ import os
 import re
 import sqlite3
 import ssl
+import stat
 import subprocess
 import tempfile
 import time
@@ -54,8 +58,11 @@ STORE_SCHEMA_VERSION = 1
 
 # Every Sentinel-managed CrowdSec reason starts with "argent-sentinel".  The
 # collector's own enforcement uses "argent-sentinel/<rule>"; decisions written
-# by this sync use "argent-sentinel:<origin_node>:<reason>".  Removal only ever
-# touches the colon form; upstream reporting skips both forms.
+# by this sync use "argent-sentinel:<origin_node>:<reason>".  The colon form is
+# the loop-prevention marker: it is never reported upstream, never merged and
+# is the only form removal ever touches.  The collector's slash form is an
+# ordinary local ban and is reported by the central host's own agent like any
+# other node's bans.
 SENTINEL_REASON_PREFIX = "argent-sentinel"
 SYNC_REASON_PREFIX = "argent-sentinel:"
 
@@ -67,7 +74,7 @@ FAIL2BAN_ORIGIN = "fail2ban"
 EXCLUDED_ORIGINS = ("CAPI", "capi", "lists", "console", "cscli-import")
 MIN_IPV4_RANGE_PREFIX = 24
 MIN_IPV6_RANGE_PREFIX = 48
-DEFAULT_MAX_DURATION_SECONDS = 7 * 86400
+DEFAULT_MAX_DURATION_SECONDS = 30 * 86400  # 720h
 PERMANENT_CEILING_SECONDS = 30 * 86400
 MAX_REPORT_DECISIONS = 20000
 REASON_SAFE_RE = re.compile(r"[^A-Za-z0-9._/@+-]+")
@@ -247,6 +254,225 @@ def view_digest(entries: Iterable[Mapping[str, Any]], generated_epoch: int) -> s
     return hashlib.sha256(canonical_json(active)).hexdigest()
 
 
+# --------------------------------------------------------------------------
+# Detached Ed25519 signatures over the downstream view
+#
+# The API signs every /v1/decisions response with the central signing key;
+# agents verify with a pinned public key.  The signed message binds the
+# canonical view digest, the cursor pair, the requesting node, the store
+# set_id, the server timestamp and the SHA-256 of the exact delta body, under
+# a fixed domain-separation prefix.  OpenSSL (already a package dependency)
+# does the Ed25519 work so the code stays stdlib-only.
+
+SIGNATURE_ALG = "ed25519"
+SIGNATURE_CONTEXT = b"argent-sentinel-ban-sync-view-v1\n"
+SIGNED_VIEW_FIELDS = (
+    "schema_version", "set_id", "node_id", "cursor", "requested_cursor",
+    "reset", "generated_epoch", "count", "snapshot_sha256",
+)
+ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
+PEM_PUBLIC_RE = re.compile(r"-----BEGIN PUBLIC KEY-----(.*?)-----END PUBLIC KEY-----", re.S)
+_SIGNING_KEY_CACHE: dict[tuple[str, int, int], str] = {}
+
+
+class SignatureError(BanSyncError):
+    """A downstream response failed signature policy or verification."""
+
+
+def view_body_sha256(payload: Mapping[str, Any]) -> str:
+    body = {name: payload.get(name, []) for name in ("entries", "upserts", "removals")}
+    return hashlib.sha256(canonical_json(body)).hexdigest()
+
+
+def signed_view_message(payload: Mapping[str, Any]) -> bytes:
+    header = {name: payload.get(name) for name in SIGNED_VIEW_FIELDS}
+    header["body_sha256"] = view_body_sha256(payload)
+    return SIGNATURE_CONTEXT + canonical_json(header)
+
+
+def ed25519_public_keys(pem_text: str) -> list[bytes]:
+    """DER SubjectPublicKeyInfo blobs of every Ed25519 key in a PEM text."""
+    keys = []
+    for block in PEM_PUBLIC_RE.findall(pem_text):
+        try:
+            der = base64.b64decode("".join(block.split()), validate=True)
+        except (ValueError, base64.binascii.Error) as exc:
+            raise SignatureError("public key PEM is not valid base64") from exc
+        if len(der) != 44 or not der.startswith(ED25519_SPKI_PREFIX):
+            raise SignatureError("public key is not an Ed25519 key")
+        keys.append(der)
+    return keys
+
+
+def public_key_id(der: bytes) -> str:
+    return hashlib.sha256(der).hexdigest()[:16]
+
+
+def _openssl(runner: Runner, args: Sequence[str], timeout: int = 15) -> subprocess.CompletedProcess:
+    return runner(list(args), capture_output=True, timeout=timeout, check=False)
+
+
+def signing_key_id(key_file: Path, *, openssl: str = "openssl", runner: Runner = subprocess.run) -> str:
+    """Key id of a private signing key; refuses group/other-accessible keys."""
+    try:
+        info = key_file.stat()
+    except OSError as exc:
+        raise SignatureError(f"signing key unavailable: {exc}") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise SignatureError("signing key is not a regular file")
+    if info.st_mode & 0o077:
+        raise SignatureError("signing key must not be accessible by group or others (chmod 0600)")
+    cache_key = (str(key_file), int(info.st_mtime_ns), int(info.st_size))
+    cached = _SIGNING_KEY_CACHE.get(cache_key)
+    if cached:
+        return cached
+    result = _openssl(runner, [openssl, "pkey", "-in", str(key_file), "-pubout"])
+    if result.returncode != 0:
+        raise SignatureError("cannot derive the public key from the signing key")
+    keys = ed25519_public_keys(result.stdout.decode("ascii", "replace"))
+    if len(keys) != 1:
+        raise SignatureError("signing key is not a single Ed25519 key")
+    identifier = public_key_id(keys[0])
+    _SIGNING_KEY_CACHE.clear()
+    _SIGNING_KEY_CACHE[cache_key] = identifier
+    return identifier
+
+
+def sign_view(
+    view: Mapping[str, Any],
+    key_file: Path,
+    *,
+    openssl: str = "openssl",
+    runner: Runner = subprocess.run,
+) -> dict[str, Any]:
+    """Return ``view`` with a detached Ed25519 ``signature`` object."""
+    identifier = signing_key_id(key_file, openssl=openssl, runner=runner)
+    with tempfile.TemporaryDirectory(prefix="ban-sync-sign-") as temporary:
+        message = Path(temporary) / "message"
+        message.write_bytes(signed_view_message(view))
+        result = _openssl(runner, [openssl, "pkeyutl", "-sign", "-inkey", str(key_file), "-rawin", "-in", str(message)])
+    if result.returncode != 0 or len(result.stdout) != 64:
+        raise SignatureError("Ed25519 signing failed")
+    signed = dict(view)
+    signed["signature"] = {
+        "alg": SIGNATURE_ALG,
+        "key_id": identifier,
+        "value": base64.b64encode(result.stdout).decode("ascii"),
+    }
+    return signed
+
+
+def generate_signing_key(key_file: Path, *, force: bool = False, openssl: str = "openssl",
+                         runner: Runner = subprocess.run) -> dict[str, str]:
+    """Create a 0600 Ed25519 key (directory 0700) and its 0644 ``.pub``."""
+    if key_file.exists() and not force:
+        raise SignatureError(f"{key_file} already exists (use --force to replace it)")
+    key_file.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(key_file.parent, 0o700)
+    temporary = key_file.with_name(f".{key_file.name}.new")
+    previous = os.umask(0o077)
+    try:
+        temporary.unlink(missing_ok=True)
+        result = _openssl(runner, [openssl, "genpkey", "-algorithm", "ed25519", "-out", str(temporary)])
+        if result.returncode != 0:
+            raise SignatureError("openssl genpkey failed")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, key_file)
+    finally:
+        os.umask(previous)
+        temporary.unlink(missing_ok=True)
+    result = _openssl(runner, [openssl, "pkey", "-in", str(key_file), "-pubout"])
+    if result.returncode != 0:
+        raise SignatureError("cannot export the public key")
+    public_pem = result.stdout.decode("ascii")
+    public_file = key_file.with_name(key_file.name + ".pub")
+    public_file.write_text(public_pem, encoding="ascii")
+    os.chmod(public_file, 0o644)
+    return {
+        "key_file": str(key_file),
+        "public_key_file": str(public_file),
+        "key_id": public_key_id(ed25519_public_keys(public_pem)[0]),
+        "public_key_pem": public_pem,
+    }
+
+
+def load_pinned_keys(paths: Sequence[str]) -> dict[str, Path]:
+    """key_id -> public key file for every pinned key (fail closed)."""
+    pinned: dict[str, Path] = {}
+    for value in paths:
+        path = Path(str(value))
+        try:
+            text = path.read_text(encoding="ascii")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise SignatureError(f"pinned signing key {path} is unreadable: {exc}") from exc
+        keys = ed25519_public_keys(text)
+        if len(keys) != 1:
+            raise SignatureError(f"pinned signing key {path} must hold exactly one Ed25519 public key")
+        pinned[public_key_id(keys[0])] = path
+    return pinned
+
+
+def verify_view_signature(
+    payload: Mapping[str, Any],
+    pinned: Mapping[str, Path],
+    *,
+    node_id: str,
+    requested_cursor: int,
+    now_epoch: int,
+    last_generated_epoch: int,
+    max_age_seconds: int,
+    openssl: str = "openssl",
+    runner: Runner = subprocess.run,
+) -> str:
+    """Enforce the signature policy on a raw response; returns a status.
+
+    No pinned key: signatures are optional (rollout phase) and the response
+    is reported as ``unsigned`` or ``unverified``.  Pinned key(s): the
+    response must carry a valid signature by one of them, be addressed to
+    this node and this request, be fresh, and not be older than the last
+    accepted response (rollback).  Any failure raises SignatureError.
+    """
+    signature = payload.get("signature")
+    if not pinned:
+        return "unsigned" if signature is None else "unverified (no pinned key)"
+    if not isinstance(signature, Mapping):
+        raise SignatureError("response is unsigned but a signing key is pinned")
+    if signature.get("alg") != SIGNATURE_ALG:
+        raise SignatureError("unsupported signature algorithm")
+    key_path = pinned.get(str(signature.get("key_id", "")))
+    if key_path is None:
+        raise SignatureError(f"response signed by unpinned key {str(signature.get('key_id'))[:32]!r}")
+    try:
+        raw = base64.b64decode(str(signature.get("value", "")), validate=True)
+    except (ValueError, base64.binascii.Error) as exc:
+        raise SignatureError("signature is not valid base64") from exc
+    if len(raw) != 64:
+        raise SignatureError("Ed25519 signature must be 64 bytes")
+    if payload.get("node_id") != node_id:
+        raise SignatureError("signed response is addressed to another node")
+    if payload.get("requested_cursor") != int(requested_cursor):
+        raise SignatureError("signed response does not answer this request's cursor")
+    generated = payload.get("generated_epoch")
+    if not isinstance(generated, int) or isinstance(generated, bool):
+        raise SignatureError("signed response lacks generated_epoch")
+    if abs(int(now_epoch) - generated) > int(max_age_seconds):
+        raise SignatureError("signed response is stale or from the future (check NTP)")
+    if generated < int(last_generated_epoch):
+        raise SignatureError("signed response is older than the last accepted one (rollback)")
+    with tempfile.TemporaryDirectory(prefix="ban-sync-verify-") as temporary:
+        message = Path(temporary) / "message"
+        sigfile = Path(temporary) / "signature"
+        message.write_bytes(signed_view_message(payload))
+        sigfile.write_bytes(raw)
+        result = _openssl(runner, [
+            openssl, "pkeyutl", "-verify", "-pubin", "-inkey", str(key_path),
+            "-rawin", "-in", str(message), "-sigfile", str(sigfile),
+        ])
+    if result.returncode != 0:
+        raise SignatureError("Ed25519 signature verification failed")
+    return f"verified ({signature.get('key_id')})"
+
+
 def atomic_write_json(path: Path, value: Any, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(prefix=f".{path.name}.", dir=path.parent, delete=False) as handle:
@@ -269,12 +495,16 @@ def load_json_file(path: Path) -> dict[str, Any]:
 Runner = Callable[..., subprocess.CompletedProcess]
 
 
+def contributors_text(entry: Mapping[str, Any]) -> str:
+    return ",".join(sorted({str(item) for item in entry.get("contributors") or [entry["origin_node"]]}))
+
+
 def run_command(runner: Runner, args: Sequence[str], timeout: int) -> subprocess.CompletedProcess:
     return runner(list(args), text=True, capture_output=True, timeout=timeout, check=False)
 
 
 # --------------------------------------------------------------------------
-# Local decision sources (agent upstream and central's own read)
+# Local decision sources (agent upstream)
 
 
 def parse_cscli_decisions(
@@ -282,7 +512,7 @@ def parse_cscli_decisions(
     *,
     now_epoch: int,
     origins: Sequence[str] = CROWDSEC_ORIGINS,
-    skip_reason: Callable[[Any], bool] = is_sentinel_reason,
+    skip_reason: Callable[[Any], bool] = is_sync_reason,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Parse ``cscli decisions list -o json`` alerts into decision records.
 
@@ -361,7 +591,7 @@ def read_cscli_decisions(
     now_epoch: int,
     runner: Runner = subprocess.run,
     origins: Sequence[str] = CROWDSEC_ORIGINS,
-    skip_reason: Callable[[Any], bool] = is_sentinel_reason,
+    skip_reason: Callable[[Any], bool] = is_sync_reason,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     try:
         result = run_command(
@@ -484,10 +714,16 @@ def validate_decisions_report(report: Any, node_id: str) -> dict[str, Any]:
     if not isinstance(decisions, list) or len(decisions) > MAX_REPORT_DECISIONS:
         raise BanSyncError("decisions must be a bounded list")
     normalized: list[dict[str, Any]] = []
+    dropped_loop = 0
     for index, raw in enumerate(decisions):
         where = f"decisions[{index}]"
         if not isinstance(raw, Mapping):
             raise BanSyncError(f"{where} must be an object")
+        # Central loop-prevention backstop.  Must run before sanitising,
+        # which rewrites the ":" of the sync marker.
+        if is_sync_reason(raw.get("reason")) or is_sync_reason(raw.get("scenario")):
+            dropped_loop += 1
+            continue
         scope = normalize_scope(raw.get("scope"))
         if scope is None:
             raise BanSyncError(f"{where}.scope must be Ip or Range")
@@ -520,6 +756,7 @@ def validate_decisions_report(report: Any, node_id: str) -> dict[str, Any]:
         "node_id": node_id,
         "generated_epoch": generated,
         "decisions": normalized,
+        "dropped_loop": dropped_loop,
     }
 
 
@@ -576,7 +813,8 @@ STORE_DDL = (
         active INTEGER NOT NULL,
         removed_reason TEXT,
         seq INTEGER NOT NULL,
-        updated_epoch INTEGER NOT NULL
+        updated_epoch INTEGER NOT NULL,
+        contributors TEXT NOT NULL DEFAULT ''
     )""",
     "CREATE INDEX IF NOT EXISTS effective_seq ON effective(seq)",
     """CREATE TABLE IF NOT EXISTS node_pulls (
@@ -642,6 +880,9 @@ class BanSyncStore:
         with self.transaction():
             for statement in STORE_DDL:
                 self.conn.execute(statement)
+            columns = {row[1] for row in self.conn.execute("PRAGMA table_info(effective)")}
+            if "contributors" not in columns:  # pre-release 0.5.8.0 stores
+                self.conn.execute("ALTER TABLE effective ADD COLUMN contributors TEXT NOT NULL DEFAULT ''")
             existing = self.meta("schema_version")
             if existing is None:
                 self.set_meta("schema_version", str(STORE_SCHEMA_VERSION))
@@ -762,6 +1003,7 @@ class BanSyncStore:
                         abs(int(row["until_epoch"]) - int(entry["until_epoch"])) > update_tolerance_seconds
                         or row["origin_node"] != entry["origin_node"]
                         or row["reason"] != entry["reason"]
+                        or (row["contributors"] or "") != contributors_text(entry)
                     )
                     if not changed:
                         continue
@@ -771,15 +1013,17 @@ class BanSyncStore:
                 seq += 1
                 first_seen = int(row["first_seen_epoch"]) if row is not None else int(entry["first_seen_epoch"])
                 self.conn.execute(
-                    "INSERT INTO effective VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?) "
+                    "INSERT INTO effective (id, scope, value, until_epoch, reason, scenario, origin, origin_node, "
+                    "first_seen_epoch, active, removed_reason, seq, updated_epoch, contributors) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?, ?) "
                     "ON CONFLICT(id) DO UPDATE SET scope=excluded.scope, value=excluded.value, "
                     "until_epoch=excluded.until_epoch, reason=excluded.reason, scenario=excluded.scenario, "
                     "origin=excluded.origin, origin_node=excluded.origin_node, active=1, removed_reason=NULL, "
-                    "seq=excluded.seq, updated_epoch=excluded.updated_epoch",
+                    "seq=excluded.seq, updated_epoch=excluded.updated_epoch, contributors=excluded.contributors",
                     (
                         identifier, entry["scope"], entry["value"], int(entry["until_epoch"]),
                         entry["reason"], entry["scenario"], entry["origin"], entry["origin_node"],
-                        first_seen, seq, now_epoch,
+                        first_seen, seq, now_epoch, contributors_text(entry),
                     ),
                 )
             for identifier, row in sorted(existing.items()):
@@ -806,6 +1050,13 @@ class BanSyncStore:
             self.set_meta("head_seq", str(seq))
         return counts
 
+    def purge_channel(self, channel: str) -> int:
+        """Drop every report and decision of one channel (legacy cleanup)."""
+        with self.transaction():
+            removed = self.conn.execute("DELETE FROM node_decisions WHERE channel=?", (channel,)).rowcount
+            self.conn.execute("DELETE FROM node_reports WHERE channel=?", (channel,))
+        return int(removed or 0)
+
     def record_merge_run(self, now_epoch: int, status: str, detail: str, stats: Mapping[str, int]) -> None:
         with self.transaction():
             self.conn.execute(
@@ -828,8 +1079,13 @@ class BanSyncStore:
         """Snapshot (cursor 0, unknown, ahead or collected) or delta for one
         node, read inside one transaction so cursor, rows and digest agree.
 
-        Entries originating from the requesting node are withheld from it: it
-        already holds that ban locally until at least the published expiry.
+        Entries the requesting node itself currently reports (it is one of
+        the entry's contributors, not only the winning origin) are withheld
+        from it: the node already holds that ban locally, and receiving it
+        back would only add a redundant synced decision that churns whenever
+        the winning origin changes.  Once the node stops reporting the target
+        (its local ban ended) the entry becomes visible to it on the next
+        merge if another node still bans it.
         """
         now = int(now_epoch if now_epoch is not None else time.time())
         with self.transaction():
@@ -838,8 +1094,11 @@ class BanSyncStore:
             min_cursor = int(self.meta("min_cursor") or 0)
             rows = list(self.conn.execute("SELECT * FROM effective ORDER BY id"))
 
+        def own(row: sqlite3.Row) -> bool:
+            return row["origin_node"] == node_id or node_id in str(row["contributors"] or "").split(",")
+
         def visible(row: sqlite3.Row) -> bool:
-            return int(row["active"]) == 1 and row["origin_node"] != node_id and int(row["until_epoch"]) > now
+            return int(row["active"]) == 1 and not own(row) and int(row["until_epoch"]) > now
 
         def to_entry(row: sqlite3.Row) -> dict[str, Any]:
             return {
@@ -877,7 +1136,7 @@ class BanSyncStore:
                 else:
                     reason = row["removed_reason"]
                     if not reason:
-                        reason = "origin-node" if row["origin_node"] == node_id else "expired"
+                        reason = "origin-node" if own(row) else "expired"
                     response["removals"].append({"id": row["id"], "reason": reason})
         return response
 
@@ -989,8 +1248,6 @@ CENTRAL_DEFAULTS: dict[str, Any] = {
     "archive_dir": "/var/lib/argent-sentinel/collector/decisions-archive",
     "rejected_dir": "/var/lib/argent-sentinel/collector/decisions-rejected",
     "max_file_bytes": 8 * 1024 * 1024,
-    "include_central_crowdsec": True,
-    "central_origins": list(CROWDSEC_ORIGINS),
     "allowed_origins": list(CROWDSEC_ORIGINS) + [FAIL2BAN_ORIGIN],
     "max_duration_seconds": DEFAULT_MAX_DURATION_SECONDS,
     "protected_cidrs": [],
@@ -1005,15 +1262,15 @@ CENTRAL_DEFAULTS: dict[str, Any] = {
 def validate_central_settings(settings: Mapping[str, Any]) -> None:
     if not isinstance(settings, Mapping):
         raise BanSyncError("ban_sync must be an object")
-    for name in ("enabled", "include_central_crowdsec"):
-        if not isinstance(settings.get(name, False), bool):
-            raise BanSyncError(f"ban_sync.{name} must be boolean")
+    if not isinstance(settings.get("enabled", False), bool):
+        raise BanSyncError("ban_sync.enabled must be boolean")
+    # include_central_crowdsec / central_origins (pre-release) are ignored:
+    # the central host reports through its own agent like every node.
     if not str(settings.get("store_db", "")).startswith("/"):
         raise BanSyncError("ban_sync.store_db must be an absolute path")
-    for name in ("central_origins", "allowed_origins"):
-        values = settings.get(name, [])
-        if not isinstance(values, list) or any(str(item) in EXCLUDED_ORIGINS for item in values):
-            raise BanSyncError(f"ban_sync.{name} must be a list without CAPI/lists/console")
+    values = settings.get("allowed_origins", [])
+    if not isinstance(values, list) or any(str(item) in EXCLUDED_ORIGINS for item in values):
+        raise BanSyncError("ban_sync.allowed_origins must be a list without CAPI/lists/console")
     if int(settings.get("max_duration_seconds", 0)) < 0:
         raise BanSyncError("ban_sync.max_duration_seconds must be zero (no cap) or positive")
     if int(settings.get("tombstone_retention_seconds", 0)) < 86400:
@@ -1110,6 +1367,7 @@ def compute_effective(
     stats = {"candidates": 0, "origin": 0, "loop": 0, "unsafe": 0, "protected": 0, "expired": 0}
     removed: dict[str, str] = {}
     best: dict[str, dict[str, Any]] = {}
+    contributors: dict[str, set[str]] = {}
     for item in candidates:
         stats["candidates"] += 1
         origin = str(item.get("origin", ""))
@@ -1119,14 +1377,14 @@ def compute_effective(
         reason = str(item.get("reason", ""))
         scenario = str(item.get("scenario", ""))
         channel = str(item.get("channel", "agent"))
-        # Never re-originate a synced decision.  Node reports additionally
-        # drop every Sentinel-managed reason; central's own read keeps the
-        # collector's "argent-sentinel/<rule>" decisions, which is the point.
+        # Never re-originate a synced decision.  Agents already skip them;
+        # this is the central backstop.  Legacy "central" channel rows (0.5.8.0
+        # pre-release direct read) are ignored.
         if is_sync_reason(reason) or is_sync_reason(scenario):
             stats["loop"] += 1
             continue
-        if channel != "central" and (is_sentinel_reason(reason) or is_sentinel_reason(scenario)):
-            stats["loop"] += 1
+        if channel != "agent":
+            stats["origin"] += 1
             continue
         scope = str(item["scope"])
         value = str(item["value"])
@@ -1162,13 +1420,15 @@ def compute_effective(
             "origin_node": str(item["node_id"]),
             "first_seen_epoch": first_seen,
         }
+        contributors.setdefault(identifier, set()).add(entry["origin_node"])
         current = best.get(identifier)
         if current is None or (entry["until_epoch"], entry["origin_node"]) > (
             current["until_epoch"], current["origin_node"]
         ):
             best[identifier] = entry
-    for identifier in best:
+    for identifier, entry in best.items():
         removed.pop(identifier, None)
+        entry["contributors"] = sorted(contributors.get(identifier, {entry["origin_node"]}))
     stats["active"] = len(best)
     return best, removed, stats
 
@@ -1250,12 +1510,14 @@ def publish_status(config: Mapping[str, Any], *, now_epoch: int | None = None) -
 def run_central_merge(
     config: Mapping[str, Any],
     *,
-    runner: Runner = subprocess.run,
     now_epoch: int | None = None,
     log: Any = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    """One collector-side merge pass.  No-op unless ``ban_sync.enabled``."""
+    """One collector-side merge pass.  No-op unless ``ban_sync.enabled``.
+
+    Inputs are node reports only; the central host's local CrowdSec bans
+    arrive through its own agent like any other node's."""
     settings = dict(CENTRAL_DEFAULTS) | dict(config.get("ban_sync") or {})
     if not settings.get("enabled"):
         return {"status": "disabled"}
@@ -1266,37 +1528,16 @@ def run_central_merge(
         if not force and last is not None and now - int(last["run_epoch"]) < int(settings["refresh_seconds"]):
             return {"status": "not-due"}
         imported = ingest_report_files(store, settings, now_epoch=now, log=log)
-        central_node = str((config.get("node") or {}).get("id", "")).strip() or "central"
-        central_status = "disabled"
-        if settings.get("include_central_crowdsec", True):
-            crowdsec = config.get("crowdsec") or {}
-            cscli = str(settings.get("cscli_path") or crowdsec.get("cscli_path", "/usr/bin/cscli"))
-            if runner is not subprocess.run or Path(cscli).is_file():
-                try:
-                    decisions, _skipped = read_cscli_decisions(
-                        cscli,
-                        timeout=int(crowdsec.get("command_timeout_seconds", 20)),
-                        now_epoch=now,
-                        runner=runner,
-                        origins=tuple(settings.get("central_origins", CROWDSEC_ORIGINS)),
-                        skip_reason=is_sync_reason,
-                    )
-                except BanSyncError as exc:
-                    central_status = f"error: {exc}"
-                else:
-                    report = validate_decisions_report(build_decisions_report(central_node, decisions), central_node)
-                    store.record_node_report(
-                        report, decisions_report_digest(decisions), channel="central", now_epoch=now
-                    )
-                    central_status = f"ok: {len(decisions)} decisions"
-            else:
-                central_status = f"cscli not found: {cscli}"
+        # The central host's own bans arrive through its own agent's node
+        # report like every other node's; there is no direct central read.
+        # Rows from the pre-release direct-read channel are purged.
+        store.purge_channel("central")
         protected, problem = central_protection(config, now_epoch=now)
         if problem is not None:
             # Fail closed: publish nothing while the never-ban boundary is
             # unknown.  Existing entries stay; agents re-check locally.
             store.record_merge_run(now, "protection-unavailable", problem, {})
-            return {"status": "protection-unavailable", "detail": problem, "imported": imported, "central": central_status}
+            return {"status": "protection-unavailable", "detail": problem, "imported": imported}
         candidates = store.candidate_decisions()
         computed, removed, stats = compute_effective(
             candidates,
@@ -1312,8 +1553,8 @@ def run_central_merge(
             tombstone_retention_seconds=int(settings["tombstone_retention_seconds"]),
         )
         stats.update(changes)
-        store.record_merge_run(now, "ok", central_status, stats)
-        return {"status": "ok", "imported": imported, "central": central_status, "head_cursor": store.head_seq()} | stats
+        store.record_merge_run(now, "ok", f"imported {imported} report(s)", stats)
+        return {"status": "ok", "imported": imported, "head_cursor": store.head_seq()} | stats
     finally:
         store.close()
 
@@ -1333,7 +1574,7 @@ AGENT_DEFAULTS: dict[str, Any] = {
         "fail2ban_db": "/var/lib/fail2ban/fail2ban.sqlite3",
         "fail2ban_jails": [],
         "heartbeat_seconds": 900,
-        "max_decisions": 5000,
+        "max_decisions": MAX_REPORT_DECISIONS,
         "state_file": "/var/lib/argent-sentinel/agent/ban-sync-upstream-state.json",
     },
     "apply": {
@@ -1349,6 +1590,11 @@ AGENT_DEFAULTS: dict[str, Any] = {
         "max_changes_per_run": 500,
         "max_response_bytes": 16 * 1024 * 1024,
         "max_preview_entries": 200,
+        # Pinned central signing public key(s).  Empty: signatures optional
+        # (rollout).  Non-empty: every response must be signed by one of them.
+        "signing_public_key_files": [],
+        "max_view_age_seconds": 900,
+        "openssl_path": "openssl",
     },
 }
 
@@ -1391,6 +1637,11 @@ def validate_agent_settings(settings: Mapping[str, Any]) -> None:
     for name in ("min_remaining_seconds", "update_tolerance_seconds"):
         if int(apply.get(name, -1)) < 0:
             raise BanSyncError(f"ban_sync.apply.{name} must not be negative")
+    keys = apply.get("signing_public_key_files", [])
+    if not isinstance(keys, list) or not all(str(item).startswith("/") for item in keys):
+        raise BanSyncError("ban_sync.apply.signing_public_key_files must be a list of absolute paths")
+    if not 60 <= int(apply.get("max_view_age_seconds", 900)) <= 86400:
+        raise BanSyncError("ban_sync.apply.max_view_age_seconds must be between 60 and 86400")
     allowlist = apply.get("local_allowlist", [])
     if not isinstance(allowlist, list):
         raise BanSyncError("ban_sync.apply.local_allowlist must be a list")
@@ -1409,8 +1660,9 @@ def collect_upstream_decisions(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Local decisions eligible for upstream reporting.
 
-    Loop prevention: every decision whose reason starts with
-    ``argent-sentinel`` (collector-applied or sync-applied) is skipped.
+    Loop prevention: every decision written by this sync (reason prefix
+    ``argent-sentinel:``) is skipped.  Collector bans (``argent-sentinel/``)
+    are ordinary local bans and are reported.
     """
     upstream = settings["upstream"]
     info: dict[str, Any] = {"crowdsec": "absent", "fail2ban": "disabled"}
@@ -1423,7 +1675,7 @@ def collect_upstream_decisions(
             now_epoch=now_epoch,
             runner=runner,
             origins=tuple(upstream.get("crowdsec_origins", CROWDSEC_ORIGINS)),
-            skip_reason=is_sentinel_reason,
+            skip_reason=is_sync_reason,
         )
         decisions.extend(found)
         info["crowdsec"] = {"decisions": len(found), "skipped": skipped}
@@ -1572,7 +1824,13 @@ def validate_view(payload: Any) -> dict[str, Any]:
     return result
 
 
-def fetch_view(config: Mapping[str, Any], cursor: int, *, opener: Callable[..., Any] | None = None) -> dict[str, Any]:
+def fetch_view(
+    config: Mapping[str, Any],
+    cursor: int,
+    *,
+    opener: Callable[..., Any] | None = None,
+    verifier: Callable[[Mapping[str, Any], int], str] | None = None,
+) -> dict[str, Any]:
     """GET <central_url>/v1/decisions?cursor=N over the agent's mTLS identity."""
     settings = config["ban_sync"]["apply"]
     base = str(config["central_url"]).rstrip("/")
@@ -1604,7 +1862,12 @@ def fetch_view(config: Mapping[str, Any], cursor: int, *, opener: Callable[..., 
         payload = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise BanSyncError(f"decisions response is invalid JSON: {exc}") from exc
-    return validate_view(payload)
+    # The signature covers the raw response, so it is checked before any
+    # normalisation in validate_view.
+    signature_status = verifier(payload, int(cursor)) if verifier is not None else "unchecked"
+    view = validate_view(payload)
+    view["signature_status"] = signature_status
+    return view
 
 
 def merge_view(state: Mapping[str, Any], view: Mapping[str, Any]) -> tuple[dict[str, dict[str, Any]], bool]:
@@ -1759,11 +2022,29 @@ def run_agent_sync(
     timeout = int(settings["command_timeout_seconds"])
     if crowdsec_present is None:
         crowdsec_present = Path(cscli).is_file()
+    signature_state = dict(state.get("signature") or {})
+    key_files = [str(item) for item in apply.get("signing_public_key_files", [])]
+    signature_state["required"] = bool(key_files)
+    state["signature"] = signature_state
     try:
-        view = fetch_view(config, int(state.get("cursor", 0) or 0), opener=opener)
+        pinned = load_pinned_keys(key_files)
+
+        def verifier(payload: Mapping[str, Any], requested: int) -> str:
+            return verify_view_signature(
+                payload,
+                pinned,
+                node_id=node_id,
+                requested_cursor=requested,
+                now_epoch=now,
+                last_generated_epoch=int(state.get("last_generated_epoch", 0) or 0),
+                max_age_seconds=int(apply.get("max_view_age_seconds", 900)),
+                openssl=str(apply.get("openssl_path", "openssl")),
+            )
+
+        view = fetch_view(config, int(state.get("cursor", 0) or 0), opener=opener, verifier=verifier)
         mirror, digest_ok = merge_view(state, view)
         if not digest_ok and not view["reset"]:
-            view = fetch_view(config, 0, opener=opener)
+            view = fetch_view(config, 0, opener=opener, verifier=verifier)
             mirror, digest_ok = merge_view({}, view)
         if not digest_ok:
             raise BanSyncError("snapshot digest mismatch after full resync; nothing applied")
@@ -1776,8 +2057,11 @@ def run_agent_sync(
                 "last_pull_at": epoch_text(now),
                 "last_reset": bool(view["reset"]),
                 "snapshot_sha256": view["snapshot_sha256"],
+                "last_generated_epoch": int(view["generated_epoch"]),
             }
         )
+        signature_state["last_status"] = view.get("signature_status")
+        signature_state["last_checked_at"] = epoch_text(now)
         protected = local_protection_sets(
             config, interfaces=interfaces, inventory_cidrs=inventory_cidrs, runner=runner
         )
@@ -1880,7 +2164,15 @@ def run_agent_sync(
         else:
             state.pop("last_error", None)
         result = {"status": state["last_status"], "mode": mode, "cursor": view["cursor"], "reset": view["reset"]} | counts
-    except (BanSyncError, OSError, ValueError) as exc:
+    except SignatureError as exc:
+        # Reject the whole response: no mirror, cursor or CrowdSec change.
+        signature_state["last_status"] = f"failed: {exc}"[:300]
+        signature_state["failures"] = int(signature_state.get("failures", 0) or 0) + 1
+        signature_state["last_failure_at"] = epoch_text(now)
+        state["last_status"] = "signature-failed"
+        state["last_error"] = f"signature verification failed: {exc}"[:500]
+        result = {"status": "signature-failed", "error": str(exc)[:500]}
+    except (BanSyncError, OSError, ValueError, subprocess.SubprocessError) as exc:
         state["last_status"] = "error"
         state["last_error"] = str(exc)[:500]
         result = {"status": "error", "error": str(exc)[:500]}
@@ -1915,6 +2207,10 @@ def agent_status(config: Mapping[str, Any]) -> dict[str, Any]:
         "skipped_protection": int(counts.get("skipped_protection", 0)),
         "would_apply": int(counts.get("would_apply", 0)),
         "would_remove": int(counts.get("would_remove", 0)),
+        "signature_required": bool(apply.get("signing_public_key_files")),
+        "signature_status": (state.get("signature") or {}).get("last_status"),
+        "signature_failures": int((state.get("signature") or {}).get("failures", 0) or 0),
+        "signature_last_failure_at": (state.get("signature") or {}).get("last_failure_at"),
         "upstream_last_staged_at": upstream_state.get("last_staged_at"),
         "upstream_decisions": upstream_state.get("decisions"),
         "upstream_last_error": upstream_state.get("last_error"),

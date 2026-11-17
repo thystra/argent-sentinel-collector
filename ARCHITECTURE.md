@@ -90,15 +90,16 @@ groupings are review-only.
 
 ## Cross-node ban sync (0.5.8.0)
 
-Agents report their current CrowdSec (and optional fail2ban) bans as a
-`decisions` transport envelope. The collector merges them with the central
-host's own non-CAPI decisions into a separate store
+Every agent, the central host's included, reports its current CrowdSec and
+fail2ban (all jails) bans as a `decisions` transport envelope; there is no
+central direct read. The collector merges the node reports into a separate store
 (`/var/lib/argent-sentinel/server/ban-sync.sqlite3`), applying loop
 prevention, the enforcement-protection filter, every node's protection
-inventory and an expiry cap, and maintains a monotonic-sequence effective set
-with tombstones. The API serves each node, authenticated by client
-certificate CN and the `decisions` service, a SHA-256-digested snapshot or
-delta that excludes the node's own bans. Agents converge local CrowdSec,
+inventory and a 30-day expiry cap, and maintains a monotonic-sequence
+effective set with tombstones. The API serves each node, authenticated by
+client certificate CN and the `decisions` service, a SHA-256-digested
+snapshot or delta that excludes bans the node itself reports, signed with an
+Ed25519 key kept root-only on the server and pinned by agents. Agents converge local CrowdSec,
 owning only decisions with reason prefix `argent-sentinel:`, after re-checking
 local protection; dry-run is the default. The dashboard and watchdog read a
 sanitized status file published by the collector, never the store. See

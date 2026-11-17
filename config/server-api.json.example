@@ -9,6 +9,9 @@
   "require_proxy_verified_client": true,
   "ban_sync": {
     "enabled": false,
-    "store_db": "/var/lib/argent-sentinel/server/ban-sync.sqlite3"
+    "store_db": "/var/lib/argent-sentinel/server/ban-sync.sqlite3",
+    "signing_key_file": "/etc/argent-sentinel/ban-sync/signing.key",
+    "require_signing": false,
+    "openssl_path": "openssl"
   }
 }

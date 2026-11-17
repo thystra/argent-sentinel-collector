@@ -7,12 +7,15 @@ Disabled by default; the agent apply step is dry-run by default. Design:
 
 - New transport kind `decisions`: the agent reports its current CrowdSec
   decisions (origins `crowdsec`/`cscli`, scopes `Ip`/`Range`, `--limit 0`)
-  and, optionally, current fail2ban bans (read-only SQLite) as a full
+  and current fail2ban bans from all jails (read-only SQLite) as a full
   snapshot over the existing mTLS envelope (UUID + SHA-256 dedupe). Reports
   are staged only when their digest changes or after
-  `upstream.heartbeat_seconds` (900). Decisions whose reason starts with
-  `argent-sentinel` are never reported (loop prevention); CAPI/lists are
+  `upstream.heartbeat_seconds` (900). Synced decisions (reason prefix
+  `argent-sentinel:`) are never reported (loop prevention); collector bans
+  (`argent-sentinel/<rule>`) are reported like any local ban; CAPI/lists are
   never reported.
+- Every host is an ordinary node, including the central host: nidhoggur's
+  own agent reports its bans and pulls the merged list.
 - `nodes.d` must list the new `decisions` service; `node_id` in the payload
   must equal the certificate CN.
 
@@ -20,29 +23,38 @@ Disabled by default; the agent apply step is dry-run by default. Design:
 
 - New store `/var/lib/argent-sentinel/server/ban-sync.sqlite3` (own schema
   v1, created on demand; collector schema unchanged). Each collector run
-  (throttled to `refresh_seconds`) imports node reports, reads Nidhoggur's
-  own non-CAPI CrowdSec decisions (collector `argent-sentinel/<rule>` bans
-  included, synced `argent-sentinel:` decisions excluded), filters against
+  (throttled to `refresh_seconds`) imports node reports only (no central
+  direct read; sync-marker decisions dropped at intake), filters against
   `trusted_cidrs`, `enforcement_protection` (static + dynamic), every node's
   protection inventory and `ban_sync.protected_cidrs`, drops non-global
   targets and ranges broader than /24 (IPv4) or /48 (IPv6), caps expiry at
-  `max_duration_seconds` (default 7 days) from the decision start, and
+  `max_duration_seconds` (default 30 days / 720 h; permanent fail2ban bans
+  take the cap) from the decision start, and
   reconciles a monotonic-`seq` effective set with tombstones. Fails closed
   when the dynamic protection state is stale.
-- New `argent-sentinel-collector ban-sync-merge`; `status` gains `ban_sync`.
+- New `argent-sentinel ban-sync-merge`; `status` gains `ban_sync`.
 
 ### Downstream API
 
 - `GET /v1/decisions?cursor=N` (mTLS, CN + `decisions` service): snapshot
   (`reset: true`) or delta (`upserts`/`removals`) with `snapshot_sha256` over
-  the node's canonical view; a node never receives its own bans. 404 when
+  the node's canonical view; a node never receives a ban it itself reports.
+  Responses carry an Ed25519 detached signature (OpenSSL) over the digest,
+  cursor pair, node, set id, time and delta body when
+  `/etc/argent-sentinel/ban-sync/signing.key` (0600) exists; new
+  `argent-sentinel-api ban-sync-keygen`; `require_signing` refuses unsigned
+  service. 404 when
   `server-api.json` `ban_sync.enabled` is false. Nginx examples gain
   `location = /v1/decisions`.
 
 ### Apply (agent)
 
 - Every `apply.interval_minutes` (5) within `argent-sentinel-agent run`, or
-  `argent-sentinel-agent ban-sync [--force]`: verify the digest (full resync
+  `argent-sentinel-agent ban-sync [--force]`: verify the signature when
+  `apply.signing_public_key_files` pins a key (required then; optional while
+  unpinned; bound to node, requested cursor, freshness and no rollback;
+  failure rejects the response, applies nothing and is counted in status),
+  verify the digest (full resync
   on mismatch), re-check own interface addresses, the local protection
   inventory (fail closed if unavailable), `apply.local_allowlist` and CrowdSec
   allowlists, then `cscli decisions add --ip|--range X --duration <remaining>s
@@ -52,7 +64,10 @@ Disabled by default; the agent apply step is dry-run by default. Design:
   applied set). Nothing is done when CrowdSec is absent or `dry_run` is true
   (default); the dry-run `would_apply` list is kept in the state file.
 - `argent-sentinel-agent status` gains `ban_sync` (last pull, applied,
-  removed, skipped by protection, would-apply).
+  removed, skipped by protection, would-apply, signature status/failures).
+- Example configs list hermod `134.199.206.240/32` and home
+  `108.226.59.220/32` in `ban_sync.protected_cidrs` and
+  `apply.local_allowlist`.
 
 ### Observability
 

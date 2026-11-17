@@ -62,4 +62,8 @@ decisions (`kind: decisions` envelopes on `/v1/ingest`) and to read the
 effective cross-node ban set at `GET /v1/decisions`. It is not in the default
 service list. Grant it by adding `"decisions"` to `services` in
 `/etc/argent-sentinel/nodes.d/NODE.json` (no re-signing needed), or with
-`--service decisions` when signing. See `docs/cross-node-ban-sync.md`.
+`--service decisions` when signing. Grant it to the central host's own node
+record as well: nidhoggur's agent reports and pulls like any other node.
+Responses are signed with the Ed25519 key created by
+`argent-sentinel-api ban-sync-keygen`; agents pin its public key in
+`ban_sync.apply.signing_public_key_files`. See `docs/cross-node-ban-sync.md`.

@@ -78,7 +78,7 @@
       "fail2ban_db": "/var/lib/fail2ban/fail2ban.sqlite3",
       "fail2ban_jails": [],
       "heartbeat_seconds": 900,
-      "max_decisions": 5000,
+      "max_decisions": 20000,
       "state_file": "/var/lib/argent-sentinel/agent/ban-sync-upstream-state.json"
     },
     "apply": {
@@ -87,13 +87,16 @@
       "endpoint_path": "/v1/decisions",
       "interval_minutes": 5,
       "state_file": "/var/lib/argent-sentinel/agent/ban-sync-state.json",
-      "local_allowlist": [],
+      "local_allowlist": ["134.199.206.240/32", "108.226.59.220/32"],
       "check_crowdsec_allowlists": true,
       "min_remaining_seconds": 60,
       "update_tolerance_seconds": 300,
       "max_changes_per_run": 500,
       "max_response_bytes": 16777216,
-      "max_preview_entries": 200
+      "max_preview_entries": 200,
+      "signing_public_key_files": [],
+      "max_view_age_seconds": 900,
+      "openssl_path": "openssl"
     }
   },
   "local_address_protection": {

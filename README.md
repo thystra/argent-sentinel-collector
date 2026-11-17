@@ -529,10 +529,12 @@ decisions only. Fingerprint/prefix/ASN campaigns are review-only. See
 
 When enabled, a hostile IP banned on one enrolled host (CrowdSec, collector
 policy bans, optionally fail2ban) is banned on every other host on its next
-pull cycle (default 5 minutes). Agents report their bans over the `decisions`
-transport kind; the collector merges them with Nidhoggur's own decisions,
-filters protected/trusted/inventory networks, caps expiry at 7 days, and
-serves a digest-verified snapshot/delta at `GET /v1/decisions`. Agents add
+pull cycle (default 5 minutes). Every host, the central one included, reports
+its bans through its agent over the `decisions` transport kind (CrowdSec and
+all fail2ban jails); the collector merges node reports, filters
+protected/trusted/inventory networks, keeps each ban's duration capped at 30
+days, and serves a digest-verified, Ed25519-signed snapshot/delta at
+`GET /v1/decisions` (agents pin the public key). Agents add
 CrowdSec decisions with reason `argent-sentinel:<origin_node>:<reason>` and
 only ever remove decisions with that prefix. Everything ships disabled and
 the agent apply step defaults to `dry_run: true`. Architecture, API, security

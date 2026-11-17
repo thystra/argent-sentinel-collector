@@ -289,18 +289,16 @@
     "archive_dir": "/var/lib/argent-sentinel/collector/decisions-archive",
     "rejected_dir": "/var/lib/argent-sentinel/collector/decisions-rejected",
     "max_file_bytes": 8388608,
-    "include_central_crowdsec": true,
-    "central_origins": [
-      "crowdsec",
-      "cscli"
-    ],
     "allowed_origins": [
       "crowdsec",
       "cscli",
       "fail2ban"
     ],
-    "max_duration_seconds": 604800,
-    "protected_cidrs": [],
+    "max_duration_seconds": 2592000,
+    "protected_cidrs": [
+      "134.199.206.240/32",
+      "108.226.59.220/32"
+    ],
     "tombstone_retention_seconds": 691200,
     "refresh_seconds": 60
   }

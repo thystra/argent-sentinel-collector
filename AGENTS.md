@@ -137,13 +137,15 @@ After implementation or deployment decisions, review and update:
 
 ## Current reporting checkpoint
 - Version 0.5.8.0 (branch `feature/cross-node-ban-sync`) adds cross-node ban
-  sync: agents report CrowdSec/fail2ban bans (`decisions` transport kind,
-  `nodes.d` service `decisions`), the collector merges them with nidhoggur's
-  own non-CAPI decisions into `/var/lib/argent-sentinel/server/ban-sync.sqlite3`
-  (protection filter, 7-day cap, loop prevention), and agents pull
-  `GET /v1/decisions` and converge CrowdSec with reason
+  sync: every agent, nidhoggur's included, reports CrowdSec/fail2ban (all
+  jails) bans (`decisions` transport kind, `nodes.d` service `decisions`);
+  the collector merges node reports only into
+  `/var/lib/argent-sentinel/server/ban-sync.sqlite3` (protection filter,
+  30-day cap, loop prevention), and agents pull an Ed25519-signed
+  `GET /v1/decisions` (key `/etc/argent-sentinel/ban-sync/signing.key`, 0600;
+  agents pin the `.pub`) and converge CrowdSec with reason
   `argent-sentinel:<origin_node>:<reason>`. All switches default off and
-  `apply.dry_run` defaults true. Not deployed: needs Alan's OK; rollout in
+  `apply.dry_run` defaults true. Never commit signing keys. Not deployed: needs Alan's OK; rollout in
   `docs/cross-node-ban-sync.md` (one day dry-run on nidhoggur + hermod first).
 - Version 0.5.7.0 (branch `feature/mail-account-exists-postfix-tail`) adds
   ingest-time mail account-existence classification (`account_exists`,
