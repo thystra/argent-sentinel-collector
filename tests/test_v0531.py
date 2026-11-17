@@ -27,11 +27,11 @@ UTC = dt.timezone.utc
 
 class V0531Test(unittest.TestCase):
     def test_release_and_schema_markers(self) -> None:
-        self.assertEqual("0.5.7.0", (ROOT / "VERSION").read_text().strip())
-        self.assertEqual("0.5.7.0", collector.APP_VERSION)
-        self.assertEqual("0.5.7.0", dashboard.APP_VERSION)
-        self.assertEqual("0.5.7.0", dashboard_snapshot.APP_VERSION)
-        self.assertEqual("0.5.7.0", review_processor.APP_VERSION)
+        self.assertEqual("0.5.8.0", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.8.0", collector.APP_VERSION)
+        self.assertEqual("0.5.8.0", dashboard.APP_VERSION)
+        self.assertEqual("0.5.8.0", dashboard_snapshot.APP_VERSION)
+        self.assertEqual("0.5.8.0", review_processor.APP_VERSION)
         self.assertEqual(9, review_queue.SCHEMA_VERSION)
 
     def test_collector_accepts_dedicated_protected_cidrs(self) -> None:

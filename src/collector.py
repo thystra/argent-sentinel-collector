@@ -41,9 +41,22 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
+try:
+    import ban_sync
+except ModuleNotFoundError:
+    import importlib.util
+
+    _BAN_SYNC_PATH = Path(__file__).with_name("ban_sync.py")
+    _BAN_SYNC_SPEC = importlib.util.spec_from_file_location("ban_sync", _BAN_SYNC_PATH)
+    if _BAN_SYNC_SPEC is None or _BAN_SYNC_SPEC.loader is None:
+        raise
+    ban_sync = importlib.util.module_from_spec(_BAN_SYNC_SPEC)
+    sys.modules.setdefault("ban_sync", ban_sync)
+    _BAN_SYNC_SPEC.loader.exec_module(ban_sync)
+
 LOG = logging.getLogger("argent-sentinel")
 UTC = dt.timezone.utc
-APP_VERSION = "0.5.7.0"
+APP_VERSION = "0.5.8.0"
 SCHEMA_VERSION = 9
 
 DEFAULTS: dict[str, Any] = {
@@ -200,6 +213,8 @@ DEFAULTS: dict[str, Any] = {
     "enforcement_protection": {
         "protected_cidrs": [],
     },
+    # Cross-node ban sync central merge (0.5.8.0); disabled by default.
+    "ban_sync": json.loads(json.dumps(ban_sync.CENTRAL_DEFAULTS)),
     "policy": {
         "window_seconds": 900,
         "failure_threshold": 5,
@@ -548,6 +563,10 @@ def validate_config(config: Mapping[str, Any]) -> None:
                 ipaddress.ip_network(str(cidr), strict=False)
             except ValueError as exc:
                 raise CollectorError(f"{label} contains invalid CIDR {cidr!r}") from exc
+    try:
+        ban_sync.validate_central_settings(config.get("ban_sync", {}))
+    except (ban_sync.BanSyncError, TypeError, ValueError) as exc:
+        raise CollectorError(str(exc)) from exc
     node = config.get("node", {})
     if not str(node.get("id", "")).strip():
         raise CollectorError("node.id is required")
@@ -3429,6 +3448,7 @@ class Collector:
         context_files = self.import_abuse_context_files()
         protection_files = self.import_protection_inventory_files()
         self.publish_effective_protection_state()
+        self.run_ban_sync_merge()
         linked = self.db.correlate_network_observations(
             int(self.config["abuse_context"]["fallback_correlation_seconds"])
         )
@@ -3692,6 +3712,28 @@ class Collector:
         }
         atomic_write_json(protection_state_path(self.config), payload, 0o600)
         return payload
+
+    def ban_sync_config(self) -> dict[str, Any]:
+        """Collector config with the resolved dynamic protection state path."""
+        merged = dict(self.config)
+        protection = dict(merged.get("enforcement_protection") or {})
+        protection["dynamic_state_file"] = str(protection_state_path(self.config))
+        merged["enforcement_protection"] = protection
+        return merged
+
+    def run_ban_sync_merge(self, force: bool = False) -> dict[str, Any]:
+        """Build the cross-node effective ban set.  Never fails the run."""
+        if not (self.config.get("ban_sync") or {}).get("enabled"):
+            return {"status": "disabled"}
+        try:
+            result = ban_sync.run_central_merge(self.ban_sync_config(), log=LOG, force=force)
+            ban_sync.publish_status(self.config)
+        except (ban_sync.BanSyncError, sqlite3.Error, OSError, ValueError) as exc:
+            LOG.exception("Ban-sync merge failed: %s", exc)
+            return {"status": "error", "error": str(exc)}
+        if result.get("status") not in {"not-due", "disabled"}:
+            LOG.info("Ban-sync merge: %s", json.dumps(result, sort_keys=True))
+        return result
 
     def claim_context_file(self, path: Path) -> Path:
         initial = path.lstat()
@@ -6171,7 +6213,26 @@ def status_output(collector: Collector) -> dict[str, Any]:
         "network_candidates": collector.db.network_candidates(collector.config["policy"]),
         "network_cases": [dict(row) for row in collector.db.network_cases(100)],
         "local_address_protection": protection_state,
+        "ban_sync": ban_sync_status(collector.config),
     }
+
+
+def ban_sync_status(config: Mapping[str, Any]) -> dict[str, Any]:
+    settings = config.get("ban_sync") or {}
+    result: dict[str, Any] = {"enabled": bool(settings.get("enabled"))}
+    if not settings.get("enabled"):
+        return result
+    path = Path(str(settings.get("store_db", "")))
+    try:
+        store = ban_sync.BanSyncStore(path, readonly=True)
+    except (ban_sync.BanSyncError, sqlite3.Error) as exc:
+        return result | {"status": "unavailable", "error": str(exc)}
+    try:
+        return result | {"status": "ok"} | store.summary()
+    except sqlite3.Error as exc:
+        return result | {"status": "unavailable", "error": str(exc)}
+    finally:
+        store.close()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -6186,6 +6247,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser(
         "protection-state-refresh",
         help="Regenerate the effective local-address protection state",
+    )
+    sub.add_parser(
+        "ban-sync-merge",
+        help="Rebuild the cross-node effective ban set now (requires ban_sync.enabled)",
     )
     network_report = sub.add_parser("network-report", help="Send a manual network escalation/update report")
     network_report.add_argument("--cidr", required=True)
@@ -6263,6 +6328,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     collector.close()
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0
+        if args.command == "ban-sync-merge":
+            with process_lock(Path(config["lock_file"])):
+                collector = Collector(config)
+                try:
+                    payload = collector.run_ban_sync_merge(force=True)
+                finally:
+                    collector.close()
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload.get("status") in {"ok", "disabled"} else 1
         if args.command in {"status", "network-list", "network-set", "network-report", "legacy-import"}:
             collector = Collector(config)
             try:

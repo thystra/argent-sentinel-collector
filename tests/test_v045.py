@@ -79,17 +79,17 @@ class V045Test(unittest.TestCase):
         self.assertEqual([first, later], candidates)
 
     def test_release_versions_are_consistent(self) -> None:
-        self.assertEqual("0.5.7.0", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.8.0", (ROOT / "VERSION").read_text().strip())
         for relative in (
             "src/collector.py",
             "src/agent.py",
             "src/server_api.py",
         ):
             source = (ROOT / relative).read_text()
-            self.assertIn('APP_VERSION = "0.5.7.0"', source)
+            self.assertIn('APP_VERSION = "0.5.8.0"', source)
 
         builder = (ROOT / "packaging/build_debs.py").read_text()
-        self.assertIn('if upstream != "0.5.7.0":', builder)
+        self.assertIn('if upstream != "0.5.8.0":', builder)
         self.assertIn('"test_v045.py"', builder)
 
 

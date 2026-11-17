@@ -67,6 +67,35 @@
       "auth_verbose_fallback": true
     }
   },
+  "ban_sync": {
+    "enabled": false,
+    "cscli_path": "/usr/bin/cscli",
+    "command_timeout_seconds": 20,
+    "upstream": {
+      "enabled": true,
+      "crowdsec_origins": ["crowdsec", "cscli"],
+      "fail2ban_enabled": true,
+      "fail2ban_db": "/var/lib/fail2ban/fail2ban.sqlite3",
+      "fail2ban_jails": [],
+      "heartbeat_seconds": 900,
+      "max_decisions": 5000,
+      "state_file": "/var/lib/argent-sentinel/agent/ban-sync-upstream-state.json"
+    },
+    "apply": {
+      "enabled": true,
+      "dry_run": true,
+      "endpoint_path": "/v1/decisions",
+      "interval_minutes": 5,
+      "state_file": "/var/lib/argent-sentinel/agent/ban-sync-state.json",
+      "local_allowlist": [],
+      "check_crowdsec_allowlists": true,
+      "min_remaining_seconds": 60,
+      "update_tolerance_seconds": 300,
+      "max_changes_per_run": 500,
+      "max_response_bytes": 16777216,
+      "max_preview_entries": 200
+    }
+  },
   "local_address_protection": {
     "enabled": true,
     "mode": "host",

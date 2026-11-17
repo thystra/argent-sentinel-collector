@@ -3,7 +3,7 @@
 Argent Sentinel is a self-hosted security event collector, correlation engine,
 CrowdSec decision bridge, and guarded abuse-reporting system.
 
-Version 0.5.7.0 combines authenticated event transport, central policy,
+Version 0.5.8.0 combines authenticated event transport, central policy,
 a read-only dashboard, and per-site traffic analytics:
 
 ```text
@@ -39,9 +39,9 @@ Validate redirected test mode before production delivery.
 
 | File | Purpose | Important options |
 | --- | --- | --- |
-| `/etc/argent-sentinel/collector.json` | Central ingestion, correlation, enforcement, and reporting policy | `incoming_globs`, `abuse_context`, `protection_inventory`, `policy`, `sshd_policy`, `web_policy`, `trusted_cidrs`, `enforcement_protection`, `crowdsec`, `enrichment`, `abuse_reporting` |
-| `/etc/argent-sentinel/agent.json` | Node transport, dynamic local-address protection, SSH and observe-only mail-auth collection | `enabled`, `node`, `central_url`, certificate paths, local WordPress/Nginx globs, `local_address_protection`, `sshd`, `mail` (see `docs/mail-auth-events.md`) |
-| `/etc/argent-sentinel/server-api.json` | Unix-socket ingestion API | `socket_path`, `socket_group`, `nodes_dir`, `receipt_db`, `event_drop_root` |
+| `/etc/argent-sentinel/collector.json` | Central ingestion, correlation, enforcement, and reporting policy | `incoming_globs`, `abuse_context`, `protection_inventory`, `policy`, `sshd_policy`, `web_policy`, `trusted_cidrs`, `enforcement_protection`, `crowdsec`, `enrichment`, `abuse_reporting`, `ban_sync` |
+| `/etc/argent-sentinel/agent.json` | Node transport, dynamic local-address protection, SSH and observe-only mail-auth collection | `enabled`, `node`, `central_url`, certificate paths, local WordPress/Nginx globs, `local_address_protection`, `sshd`, `mail` (see `docs/mail-auth-events.md`), `ban_sync` (see `docs/cross-node-ban-sync.md`) |
+| `/etc/argent-sentinel/server-api.json` | Unix-socket ingestion API | `socket_path`, `socket_group`, `nodes_dir`, `receipt_db`, `event_drop_root`, `ban_sync` |
 | `/etc/argent-sentinel/nodes.d/NAME.json` | Per-node enrollment and service authorization | `node_id`, `enabled`, allowed `services`, allowed WordPress `site_ids` |
 | `/etc/logrotate.d/argent-sentinel-nginx` | Hourly rotation and staging of the filtered Nginx JSONL log | retention, compression, stage helper |
 | `/etc/nginx/conf.d/argent-sentinel-log-format.conf` | Dedicated structured Nginx format and conditional logging maps | JSON fields and suspicious-request conditions |
@@ -524,6 +524,20 @@ stay dry-run unless both `crowdsec.enabled` and
 `registration_abuse_policy.crowdsec_enforcement` are true; then per-IP 168 h
 decisions only. Fingerprint/prefix/ASN campaigns are review-only. See
 `docs/registration-abuse-policy.md`.
+
+## Cross-node ban sync (0.5.8.0)
+
+When enabled, a hostile IP banned on one enrolled host (CrowdSec, collector
+policy bans, optionally fail2ban) is banned on every other host on its next
+pull cycle (default 5 minutes). Agents report their bans over the `decisions`
+transport kind; the collector merges them with Nidhoggur's own decisions,
+filters protected/trusted/inventory networks, caps expiry at 7 days, and
+serves a digest-verified snapshot/delta at `GET /v1/decisions`. Agents add
+CrowdSec decisions with reason `argent-sentinel:<origin_node>:<reason>` and
+only ever remove decisions with that prefix. Everything ships disabled and
+the agent apply step defaults to `dry_run: true`. Architecture, API, security
+model, configuration keys and the rollout procedure are in
+`docs/cross-node-ban-sync.md`.
 
 ## SSH collection
 

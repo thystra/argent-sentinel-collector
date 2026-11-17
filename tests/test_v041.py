@@ -71,17 +71,17 @@ class V041Test(unittest.TestCase):
         self.assertNotIn("alan", json.dumps(event))
 
     def test_v041_runtime_layout_and_versions(self) -> None:
-        self.assertEqual("0.5.7.0", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.8.0", (ROOT / "VERSION").read_text().strip())
         for name in ("agent.py", "collector.py", "server_api.py"):
             self.assertIn(
-                'APP_VERSION = "0.5.7.0"',
+                'APP_VERSION = "0.5.8.0"',
                 (ROOT / "src" / name).read_text(),
             )
 
         package_builder = (
             ROOT / "packaging/build_debs.py"
         ).read_text()
-        self.assertIn('if upstream != "0.5.7.0":', package_builder)
+        self.assertIn('if upstream != "0.5.8.0":', package_builder)
         self.assertIn('"test_v041.py"', package_builder)
         self.assertIn('"test_v042.py"', package_builder)
 
@@ -112,7 +112,8 @@ class V041Test(unittest.TestCase):
             api_example["socket_path"],
         )
         nginx = (ROOT / "config/nginx-sentinel.conf.example").read_text()
-        self.assertEqual(2, nginx.count("/run/argent-sentinel-api/api.sock"))
+        # /v1/ingest, /v1/decisions (0.5.8.0 ban sync) and /healthz.
+        self.assertEqual(3, nginx.count("/run/argent-sentinel-api/api.sock"))
 
 
 if __name__ == "__main__":

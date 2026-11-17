@@ -53,11 +53,11 @@ class FakeRunner:
 
 class V0540Test(unittest.TestCase):
     def test_release_and_schema_markers(self) -> None:
-        self.assertEqual("0.5.7.0", (ROOT / "VERSION").read_text().strip())
-        self.assertEqual("0.5.7.0", agent.APP_VERSION)
-        self.assertEqual("0.5.7.0", local_protection.APP_VERSION)
-        self.assertEqual("0.5.7.0", collector.APP_VERSION)
-        self.assertEqual("0.5.7.0", server_api.APP_VERSION)
+        self.assertEqual("0.5.8.0", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.8.0", agent.APP_VERSION)
+        self.assertEqual("0.5.8.0", local_protection.APP_VERSION)
+        self.assertEqual("0.5.8.0", collector.APP_VERSION)
+        self.assertEqual("0.5.8.0", server_api.APP_VERSION)
         self.assertEqual(9, collector.SCHEMA_VERSION)
         self.assertEqual(9, review_queue.SCHEMA_VERSION)
 

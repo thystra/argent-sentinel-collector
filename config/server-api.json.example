@@ -6,5 +6,9 @@
   "nodes_dir": "/etc/argent-sentinel/nodes.d",
   "receipt_db": "/var/lib/argent-sentinel/server/ingress.sqlite3",
   "event_drop_root": "/var/lib/argent-sentinel/drop/remote",
-  "require_proxy_verified_client": true
+  "require_proxy_verified_client": true,
+  "ban_sync": {
+    "enabled": false,
+    "store_db": "/var/lib/argent-sentinel/server/ban-sync.sqlite3"
+  }
 }

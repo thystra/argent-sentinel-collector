@@ -5,7 +5,9 @@ Stages local producer files, captures bounded OpenSSH and mail (Dovecot,
 Postfix SASL) authentication failures from systemd-journald and the Postfix
 mail log file, and delivers
 immutable transport envelopes to the central Sentinel HTTPS endpoint.  The
-agent never sends abuse mail or changes firewall state.
+agent never sends abuse mail.  It changes CrowdSec state only through the
+opt-in cross-node ban sync (``ban_sync``), which defaults to disabled and,
+once enabled, to dry-run.
 """
 
 from __future__ import annotations
@@ -52,7 +54,18 @@ except ModuleNotFoundError:
     sys.modules.setdefault("local_protection", local_protection)
     _LOCAL_PROTECTION_SPEC.loader.exec_module(local_protection)
 
-APP_VERSION = "0.5.7.0"
+try:
+    import ban_sync
+except ModuleNotFoundError:
+    _BAN_SYNC_PATH = Path(__file__).with_name("ban_sync.py")
+    _BAN_SYNC_SPEC = importlib.util.spec_from_file_location("ban_sync", _BAN_SYNC_PATH)
+    if _BAN_SYNC_SPEC is None or _BAN_SYNC_SPEC.loader is None:
+        raise
+    ban_sync = importlib.util.module_from_spec(_BAN_SYNC_SPEC)
+    sys.modules.setdefault("ban_sync", ban_sync)
+    _BAN_SYNC_SPEC.loader.exec_module(ban_sync)
+
+APP_VERSION = "0.5.8.0"
 UTC = dt.timezone.utc
 LOG = logging.getLogger("argent-sentinel-agent")
 
@@ -141,7 +154,12 @@ DEFAULTS: dict[str, Any] = {
             "auth_verbose_fallback": True,
         },
     },
+    # Cross-node ban sync (0.5.8.0).  Disabled by default; when enabled the
+    # apply side starts in dry-run.  See docs/cross-node-ban-sync.md.
+    "ban_sync": json.loads(json.dumps(ban_sync.AGENT_DEFAULTS)),
 }
+
+TRANSPORT_KINDS = {"event_batch", "abuse_context", "protection_inventory", "decisions"}
 
 
 class AgentError(RuntimeError):
@@ -204,6 +222,10 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if destination_ip:
         ipaddress.ip_address(destination_ip)
     validate_mail_config(config.get("mail", {}))
+    try:
+        ban_sync.validate_agent_settings(config.get("ban_sync", {}))
+    except (ban_sync.BanSyncError, TypeError, ValueError) as exc:
+        raise AgentError(str(exc)) from exc
     protection = config.get("local_address_protection", {})
     if not isinstance(protection, Mapping):
         raise AgentError("local_address_protection must be an object")
@@ -333,7 +355,7 @@ def safe_claim(source: Path, destination: Path) -> None:
 
 
 def make_envelope(node_id: str, kind: str, payload: bytes, *, transport_uuid: str | None = None) -> dict[str, Any]:
-    if kind not in {"event_batch", "abuse_context", "protection_inventory"}:
+    if kind not in TRANSPORT_KINDS:
         raise AgentError(f"Unsupported transport kind: {kind}")
     return {
         "schema_version": 1,
@@ -1465,6 +1487,53 @@ def stage_protection_inventory(config: Mapping[str, Any]) -> int:
     return 1
 
 
+def stage_decisions_report(config: Mapping[str, Any], *, runner: Any = subprocess.run) -> int:
+    """Stage one ``decisions`` envelope when local bans changed or the
+    heartbeat lapsed.  Loop prevention lives in ban_sync: decisions whose
+    reason starts with ``argent-sentinel`` are never reported."""
+    settings = config.get("ban_sync") or {}
+    upstream = settings.get("upstream") or {}
+    if not settings.get("enabled") or not upstream.get("enabled"):
+        return 0
+    state_path = Path(str(upstream["state_file"]))
+    state = ban_sync.load_json_file(state_path)
+    now_epoch = int(time.time())
+    try:
+        decisions, info = ban_sync.collect_upstream_decisions(settings, now_epoch=now_epoch, runner=runner)
+    except ban_sync.BanSyncError as exc:
+        state["last_error"] = str(exc)[:500]
+        state["last_error_at"] = utc_text()
+        atomic_write(state_path, (json.dumps(state, indent=2, sort_keys=True) + "\n").encode(), 0o600)
+        LOG.warning("Ban-sync upstream collection failed: %s", exc)
+        return 0
+    digest = ban_sync.decisions_report_digest(decisions)
+    if not ban_sync.upstream_due(state, digest, now_epoch, int(upstream["heartbeat_seconds"])):
+        return 0
+    node_id = str(config["node"]["id"])
+    report = ban_sync.build_decisions_report(node_id, decisions)
+    payload = (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    save_envelope(config, make_envelope(node_id, "decisions", payload))
+    atomic_write(
+        state_path,
+        (
+            json.dumps(
+                {
+                    "digest": digest,
+                    "last_staged_at": utc_text(),
+                    "last_staged_epoch": now_epoch,
+                    "decisions": len(decisions),
+                    "sources": info,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode(),
+        0o600,
+    )
+    return 1
+
+
 def ssl_context(config: Mapping[str, Any]) -> ssl.SSLContext:
     context = ssl.create_default_context(cafile=str(config["ca_file"]))
     context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -1534,6 +1603,7 @@ def run_agent(config: Mapping[str, Any]) -> dict[str, int]:
             "sshd_events": 0,
             "mail_events": 0,
             "protection_inventories": 0,
+            "decision_reports": 0,
             "acknowledged": 0,
             "rejected": 0,
             "retried": 0,
@@ -1550,11 +1620,13 @@ def run_agent(config: Mapping[str, Any]) -> dict[str, int]:
         staged += 1
     sshd_events = collect_sshd(config)
     mail_events = collect_mail(config)
+    decision_reports = stage_decisions_report(config)
     counts = {
         "staged": staged,
         "sshd_events": sshd_events,
         "mail_events": mail_events,
         "protection_inventories": protection_inventories,
+        "decision_reports": decision_reports,
         "acknowledged": 0,
         "rejected": 0,
         "retried": 0,
@@ -1574,7 +1646,32 @@ def run_agent(config: Mapping[str, Any]) -> dict[str, int]:
         else:
             counts["retried"] += 1
             LOG.warning("Delivery deferred for %s: %s", path, detail)
+    # The pull/apply step runs after delivery so a central outage never delays
+    # telemetry, and its own failures never fail the agent run.
+    if (config.get("ban_sync") or {}).get("enabled"):
+        try:
+            result = run_ban_sync(config)
+        except Exception as exc:  # noqa: BLE001 - isolate the optional step
+            LOG.exception("Ban-sync pull failed: %s", exc)
+        else:
+            if result.get("status") not in {"not-due", "disabled"}:
+                LOG.info("Ban-sync: %s", json.dumps(result, sort_keys=True))
     return counts
+
+
+def run_ban_sync(config: Mapping[str, Any], *, force: bool = False) -> dict[str, Any]:
+    """Pull the effective ban set and converge local CrowdSec (dry-run by default)."""
+    if not config.get("ban_sync", {}).get("enabled", False):
+        return {"status": "disabled"}
+    try:
+        inventory = local_protection.build_inventory(config)
+    except local_protection.ProtectionError as exc:
+        # Fail closed: without the local protection inventory we cannot prove
+        # that a synced ban would not lock out this host's own operators.
+        LOG.warning("Ban-sync skipped; local protection inventory unavailable: %s", exc)
+        return {"status": "protection-unavailable", "error": str(exc)}
+    inventory_cidrs = [str(value) for value in inventory.get("effective_cidrs", [])]
+    return ban_sync.run_agent_sync(config, force=force, inventory_cidrs=inventory_cidrs)
 
 
 def configure_logging(verbose: bool) -> None:
@@ -1595,6 +1692,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser("status")
     sub.add_parser("protection-discover")
     sub.add_parser("protection-inventory")
+    sync_parser = sub.add_parser("ban-sync", help="Pull the cross-node ban set now (honours dry_run)")
+    sync_parser.add_argument("--force", action="store_true", help="Ignore apply.interval_minutes")
     args = parser.parse_args(argv)
     configure_logging(args.verbose)
     try:
@@ -1612,6 +1711,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "mail_enabled": bool((config.get("mail") or {}).get("enabled")),
                 "local_address_protection": inventory,
                 "pending": len(list(Path(config["pending_dir"]).glob("*.json"))),
+                "ban_sync": ban_sync.agent_status(config),
             }, indent=2, sort_keys=True))
             return 0
         if args.command == "protection-discover":
@@ -1621,6 +1721,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 include_unique_local=bool(local.get("include_unique_local", False)),
             ), indent=2, sort_keys=True))
             return 0
+        if args.command == "ban-sync":
+            with process_lock(Path(config["lock_file"])):
+                result = run_ban_sync(config, force=bool(args.force))
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result.get("status") in {"ok", "disabled", "not-due"} else 1
         if args.command == "protection-inventory":
             print(json.dumps(
                 local_protection.build_inventory(config),
@@ -1632,9 +1737,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             counts = run_agent(config)
         LOG.info(
             "Agent run complete: staged=%d sshd_events=%d mail_events=%d "
-            "protection_inventories=%d acknowledged=%d rejected=%d retried=%d",
+            "protection_inventories=%d decision_reports=%d acknowledged=%d rejected=%d retried=%d",
             counts["staged"], counts["sshd_events"], counts["mail_events"],
-            counts["protection_inventories"], counts["acknowledged"],
+            counts["protection_inventories"], counts["decision_reports"], counts["acknowledged"],
             counts["rejected"], counts["retried"],
         )
         print(json.dumps(counts, sort_keys=True))

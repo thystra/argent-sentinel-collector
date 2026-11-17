@@ -278,5 +278,30 @@
     "active_max_age_seconds": 86400,
     "stale_grace_seconds": 604800,
     "state_file": "/var/lib/argent-sentinel/collector/effective-protected-cidrs.json"
+  },
+  "ban_sync": {
+    "enabled": false,
+    "store_db": "/var/lib/argent-sentinel/server/ban-sync.sqlite3",
+    "status_file": "/var/lib/argent-sentinel/collector/ban-sync-status.json",
+    "incoming_globs": [
+      "/var/lib/argent-sentinel/drop/remote/*/decisions/incoming/*.json"
+    ],
+    "archive_dir": "/var/lib/argent-sentinel/collector/decisions-archive",
+    "rejected_dir": "/var/lib/argent-sentinel/collector/decisions-rejected",
+    "max_file_bytes": 8388608,
+    "include_central_crowdsec": true,
+    "central_origins": [
+      "crowdsec",
+      "cscli"
+    ],
+    "allowed_origins": [
+      "crowdsec",
+      "cscli",
+      "fail2ban"
+    ],
+    "max_duration_seconds": 604800,
+    "protected_cidrs": [],
+    "tombstone_retention_seconds": 691200,
+    "refresh_seconds": 60
   }
 }

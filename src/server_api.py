@@ -4,6 +4,10 @@
 The service listens on a Unix socket.  Nginx terminates TLS, requires a valid
 client certificate, removes client-supplied identity headers, and forwards the
 certificate subject as X-Argent-Client-DN plus X-Argent-Client-Verify=SUCCESS.
+
+``GET /v1/decisions?cursor=N`` (0.5.8.0, opt-in via ``ban_sync.enabled``)
+serves the cross-node effective ban set to nodes whose enrollment lists the
+``decisions`` service.
 """
 
 from __future__ import annotations
@@ -45,7 +49,18 @@ except ModuleNotFoundError:
     sys.modules.setdefault("local_protection", local_protection)
     _LOCAL_PROTECTION_SPEC.loader.exec_module(local_protection)
 
-APP_VERSION = "0.5.7.0"
+try:
+    import ban_sync
+except ModuleNotFoundError:
+    _BAN_SYNC_PATH = Path(__file__).with_name("ban_sync.py")
+    _BAN_SYNC_SPEC = importlib.util.spec_from_file_location("ban_sync", _BAN_SYNC_PATH)
+    if _BAN_SYNC_SPEC is None or _BAN_SYNC_SPEC.loader is None:
+        raise
+    ban_sync = importlib.util.module_from_spec(_BAN_SYNC_SPEC)
+    sys.modules.setdefault("ban_sync", ban_sync)
+    _BAN_SYNC_SPEC.loader.exec_module(ban_sync)
+
+APP_VERSION = "0.5.8.0"
 LOG = logging.getLogger("argent-sentinel-api")
 
 DEFAULTS: dict[str, Any] = {
@@ -57,7 +72,14 @@ DEFAULTS: dict[str, Any] = {
     "receipt_db": "/var/lib/argent-sentinel/server/ingress.sqlite3",
     "event_drop_root": "/var/lib/argent-sentinel/drop/remote",
     "require_proxy_verified_client": True,
+    "ban_sync": {
+        "enabled": False,
+        "store_db": "/var/lib/argent-sentinel/server/ban-sync.sqlite3",
+    },
 }
+
+TRANSPORT_KINDS = {"event_batch", "abuse_context", "protection_inventory", "decisions"}
+DECISIONS_SERVICE = "decisions"
 
 
 class APIError(RuntimeError):
@@ -161,7 +183,7 @@ def decode_envelope(raw: bytes, expected_node: str, max_payload: int) -> tuple[d
     if node_id != expected_node:
         raise APIError(403, "Envelope node_id does not match client certificate")
     kind = str(envelope.get("kind", ""))
-    if kind not in {"event_batch", "abuse_context", "protection_inventory"}:
+    if kind not in TRANSPORT_KINDS:
         raise APIError(400, "Unsupported transport kind")
     try:
         payload = base64.b64decode(str(envelope.get("payload_b64", "")), validate=True)
@@ -298,6 +320,64 @@ def validate_protection_inventory(payload: bytes, node: Mapping[str, Any]) -> di
     return inventory
 
 
+def require_decisions_service(node: Mapping[str, Any]) -> None:
+    """Ban sync needs an explicit ``decisions`` grant; an empty services list
+    (which authorizes every telemetry service) does not imply it."""
+    services = {str(value) for value in node.get("services", [])}
+    if DECISIONS_SERVICE not in services:
+        raise APIError(403, "Service 'decisions' is not authorized for this node")
+
+
+def validate_decisions(payload: bytes, node: Mapping[str, Any]) -> dict[str, Any]:
+    require_decisions_service(node)
+    if not payload or len(payload) > 8 * 1024 * 1024:
+        raise APIError(400, "Decisions report size is outside limits")
+    try:
+        report = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise APIError(400, f"Decisions report is invalid JSON: {exc}") from exc
+    try:
+        return ban_sync.validate_decisions_report(report, str(node["node_id"]))
+    except ban_sync.BanSyncError as exc:
+        status = 403 if "not authorized" in str(exc) else 400
+        raise APIError(status, str(exc)) from exc
+
+
+def parse_cursor(path: str) -> int:
+    query = urllib.parse.urlsplit(path).query
+    values = urllib.parse.parse_qs(query, keep_blank_values=True).get("cursor", ["0"])
+    if len(values) != 1 or not re.fullmatch(r"\d{1,18}", values[0] or "0"):
+        raise APIError(400, "cursor must be a non-negative integer")
+    return int(values[0] or "0")
+
+
+def serve_decisions(config: Mapping[str, Any], node_id: str, cursor: int) -> dict[str, Any]:
+    """Build one node's snapshot/delta and record the pull for lag tracking."""
+    settings = config.get("ban_sync") or {}
+    if not settings.get("enabled"):
+        raise APIError(404, "not found")
+    node_id = normalize_node_id(node_id)
+    node = load_node(Path(str(config["nodes_dir"])), node_id)
+    require_decisions_service(node)
+    store_path = Path(str(settings["store_db"]))
+    if not store_path.is_file():
+        raise APIError(503, "Ban-sync store is not initialised")
+    try:
+        store = ban_sync.BanSyncStore(store_path)
+        try:
+            view = store.node_view(node_id, cursor)
+            store.record_pull(
+                node_id, cursor, int(view["cursor"]), bool(view["reset"]),
+                len(view["entries"]) + len(view["upserts"]),
+            )
+        finally:
+            store.close()
+    except (ban_sync.BanSyncError, sqlite3.Error) as exc:
+        LOG.error("Ban-sync view failed for %s: %s", node_id, exc)
+        raise APIError(503, "Ban-sync store is unavailable") from exc
+    return view
+
+
 class ReceiptDB:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -367,6 +447,9 @@ class Ingress:
                 raise APIError(403, "Nginx abuse-context is not authorized for this node")
             validate_abuse_context(payload, node)
             destination = root / "abuse-context" / "incoming" / f"{envelope['transport_uuid']}.jsonl"
+        elif envelope["kind"] == "decisions":
+            validate_decisions(payload, node)
+            destination = root / "decisions" / "incoming" / f"{envelope['transport_uuid']}.json"
         else:
             validate_protection_inventory(payload, node)
             destination = root / "protection" / "incoming" / f"{envelope['transport_uuid']}.json"
@@ -400,8 +483,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/healthz":
             self.respond(200, {"status": "ok", "version": APP_VERSION})
-        else:
+            return
+        if urllib.parse.urlsplit(self.path).path != "/v1/decisions":
             self.respond(404, {"status": "error", "error": "not found"})
+            return
+        try:
+            config = self.server.config  # type: ignore[attr-defined]
+            if config.get("require_proxy_verified_client") and self.headers.get("X-Argent-Client-Verify") != "SUCCESS":
+                raise APIError(403, "Verified client certificate required")
+            node_id = client_node_from_subject(self.headers.get("X-Argent-Client-DN", ""))
+            cursor = parse_cursor(self.path)
+            self.respond(200, serve_decisions(config, node_id, cursor))
+        except APIError as exc:
+            self.respond(exc.status, {"status": "error", "error": str(exc)})
+        except Exception:
+            LOG.exception("Unhandled decisions request failure")
+            self.respond(500, {"status": "error", "error": "internal server error"})
 
     def do_POST(self) -> None:  # noqa: N802
         try:
