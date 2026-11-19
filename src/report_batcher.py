@@ -26,6 +26,7 @@ from collector import (
     clean_optional,
     configure_logging,
     load_config,
+    lock_wait_seconds,
     process_lock,
     utc_now,
 )
@@ -848,7 +849,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(args.verbose)
     try:
         config = load_config(Path(args.config))
-        with process_lock(Path(config["lock_file"])):
+        with process_lock(Path(config["lock_file"]), lock_wait_seconds(config)):
             collector = Collector(config)
             try:
                 result = run_report_batches(collector)

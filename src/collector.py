@@ -32,6 +32,7 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -67,6 +68,13 @@ DEFAULTS: dict[str, Any] = {
         "central_url": "https://sentinel.argentwolf.org/",
     },
     "lock_file": "/run/argent-sentinel/collector.lock",
+    # Seconds a lock-taking command (migrate, run, protection-state-refresh,
+    # ban-sync-merge, report-batch) waits for the shared collector lock before
+    # giving up. Readers such as the dashboard snapshot hold a shared lock for
+    # several seconds every minute; failing immediately made the collector's
+    # ExecStartPre migrate exit 1 whenever the two timers overlapped. 0 restores
+    # the historical fail-fast behaviour.
+    "lock_wait_seconds": 45,
     "incoming_globs": [
         "/var/lib/argent-sentinel/drop/wordpress/*/incoming/*.json",
         "/var/lib/argent-sentinel/drop/remote/*/events/incoming/*.json",
@@ -506,6 +514,7 @@ def load_config(path: Path) -> dict[str, Any]:
 
 
 def validate_config(config: Mapping[str, Any]) -> None:
+    lock_wait_seconds(config)
     policy = config["policy"]
     for name in (
         "window_seconds",
@@ -1045,14 +1054,63 @@ def ensure_parent(path: Path, mode: int = 0o750) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=mode)
 
 
+LOCK_BUSY_MESSAGE = "Another collector process is already running"
+MAX_LOCK_WAIT_SECONDS = 600
+
+
+def lock_wait_seconds(config: Mapping[str, Any]) -> float:
+    """Return the validated bounded wait for the shared collector lock."""
+    value = config.get("lock_wait_seconds", 0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CollectorError("lock_wait_seconds must be a number")
+    if value < 0 or value > MAX_LOCK_WAIT_SECONDS:
+        raise CollectorError(
+            f"lock_wait_seconds must be between 0 and {MAX_LOCK_WAIT_SECONDS}"
+        )
+    return float(value)
+
+
 @contextlib.contextmanager
-def process_lock(path: Path) -> Iterator[None]:
+def process_lock(
+    path: Path,
+    wait_seconds: float = 0.0,
+    poll_interval: float = 0.2,
+) -> Iterator[None]:
+    """Hold the exclusive collector lock, waiting at most ``wait_seconds``.
+
+    The lock is shared with readers (dashboard snapshot, review digest) that
+    take ``LOCK_SH`` and with other writers (report batcher, review
+    processor). A bounded wait turns a short, expected overlap into a delay
+    instead of a failed systemd start; a lock that stays busy past the bound
+    still raises the historical ``LOCK_BUSY_MESSAGE`` so a genuinely stuck
+    holder remains visible.
+    """
     ensure_parent(path)
     with path.open("a+", encoding="utf-8") as handle:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise CollectorError("Another collector process is already running") from exc
+        deadline = time.monotonic() + max(0.0, float(wait_seconds))
+        started = time.monotonic()
+        announced = False
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    raise CollectorError(LOCK_BUSY_MESSAGE) from exc
+                if not announced:
+                    LOG.info(
+                        "Shared collector lock %s is busy; waiting up to %gs",
+                        path,
+                        wait_seconds,
+                    )
+                    announced = True
+                time.sleep(max(0.01, min(poll_interval, deadline - time.monotonic())))
+        if announced:
+            LOG.info(
+                "Acquired shared collector lock %s after %.1fs",
+                path,
+                time.monotonic() - started,
+            )
         yield
 
 
@@ -6299,7 +6357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "migrate":
             state_path = Path(config["state_db"])
             lock_path = Path(config["lock_file"])
-            with process_lock(lock_path):
+            with process_lock(lock_path, lock_wait_seconds(config)):
                 backup_path = None
                 if args.backup_dir:
                     backup_path = backup_sqlite_database(state_path, Path(args.backup_dir))
@@ -6320,7 +6378,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             }, indent=2, sort_keys=True))
             return 0
         if args.command == "protection-state-refresh":
-            with process_lock(Path(config["lock_file"])):
+            with process_lock(Path(config["lock_file"]), lock_wait_seconds(config)):
                 collector = Collector(config)
                 try:
                     payload = collector.publish_effective_protection_state()
@@ -6329,7 +6387,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0
         if args.command == "ban-sync-merge":
-            with process_lock(Path(config["lock_file"])):
+            with process_lock(Path(config["lock_file"]), lock_wait_seconds(config)):
                 collector = Collector(config)
                 try:
                     payload = collector.run_ban_sync_merge(force=True)
@@ -6380,7 +6438,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 collector.close()
             return 0
         lock_path = Path(config["lock_file"])
-        with process_lock(lock_path):
+        with process_lock(lock_path, lock_wait_seconds(config)):
             collector = Collector(config)
             try:
                 collector.run()
@@ -6391,7 +6449,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except CollectorError as exc:
         if (
             args.command == "run"
-            and str(exc) == "Another collector process is already running"
+            and str(exc) == LOCK_BUSY_MESSAGE
         ):
             LOG.info("Collector cycle skipped because the shared lock is busy")
             print(json.dumps({
