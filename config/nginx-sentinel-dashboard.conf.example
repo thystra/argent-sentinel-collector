@@ -30,6 +30,23 @@ server {
         proxy_pass http://unix:/run/argent-sentinel-api/api.sock:;
     }
 
+    # Cross-node ban sync (0.5.8.0): mTLS-only GET of the effective ban set.
+    # The API additionally requires the "decisions" service in nodes.d.
+    location = /v1/decisions {
+        if ($ssl_client_verify != SUCCESS) {
+            return 403;
+        }
+        limit_except GET {
+            deny all;
+        }
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Argent-Client-Verify $ssl_client_verify;
+        proxy_set_header X-Argent-Client-DN $ssl_client_s_dn;
+        proxy_set_header X-Argent-Node "";
+        proxy_pass http://unix:/run/argent-sentinel-api/api.sock:;
+    }
+
     location = /healthz {
         # This checks the ingestion API, not the dashboard worker.
         proxy_pass http://unix:/run/argent-sentinel-api/api.sock:;

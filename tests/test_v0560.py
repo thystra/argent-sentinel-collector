@@ -395,8 +395,8 @@ class MailCentralTest(unittest.TestCase):
 
 class MailReleaseTest(unittest.TestCase):
     def test_release_version(self) -> None:
-        self.assertEqual("0.5.7.0", (ROOT / "VERSION").read_text().strip())
-        self.assertEqual("0.5.7.0", agent.APP_VERSION)
+        self.assertEqual("0.5.8.0", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.8.0", agent.APP_VERSION)
         self.assertIn('"test_v0560.py"', (ROOT / "packaging/build_debs.py").read_text())
 
 

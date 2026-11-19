@@ -26,7 +26,7 @@ from http.server import BaseHTTPRequestHandler
 from typing import Any, Mapping
 from review_queue import NETWORK_REVIEW_ACTIONS, REVIEW_ACTIONS
 
-APP_VERSION = "0.5.7.0"
+APP_VERSION = "0.5.8.0"
 LOG = logging.getLogger("argent-sentinel-dashboard")
 
 DEFAULTS: dict[str, Any] = {
@@ -347,6 +347,11 @@ def render_overview(snapshot: Mapping[str, Any]) -> str:
             "Unhealthy watchdogs",
             overview.get("watchdogs_unhealthy"),
             "/watchdogs",
+        ),
+        (
+            "Ban-sync nodes lagging",
+            overview.get("ban_sync_lagging_nodes"),
+            "/networks#ban-sync",
         ),
     ]
     card_html = "".join(
@@ -934,6 +939,7 @@ def render_networks(
     return (
         cards
         + protection_section
+        + render_ban_sync(snapshot)
         + '<section><h2>Audited CIDR review and enforcement</h2>'
         + '<p class="muted">Registered allocations remain ownership scopes. '
         'Only the displayed most-specific bounded proposal is eligible for a '
@@ -955,6 +961,67 @@ def render_networks(
             ],
             action_rows,
         )
+        + '</section>'
+    )
+
+
+def render_ban_sync(snapshot: Mapping[str, Any]) -> str:
+    """Cross-node ban sync: per-node sync lag and node report freshness."""
+    view = snapshot.get("ban_sync", {})
+    if not isinstance(view, Mapping) or not view.get("enabled"):
+        return (
+            '<section id="ban-sync"><h2>Cross-node ban sync</h2>'
+            '<div class="card muted">Ban sync is disabled (ban_sync.enabled is false).</div></section>'
+        )
+    alert = int(view.get("lag_alert_seconds", 1800) or 1800)
+    node_rows = [
+        [
+            h(node.get("node_id")),
+            when(node.get("last_pull_at")),
+            (
+                f'<span class="status-warning">{number(node.get("lag_seconds"))} s</span>'
+                if node.get("lagging")
+                else f'{number(node.get("lag_seconds"))} s'
+            ),
+            number(node.get("cursor")),
+            number(node.get("cursor_behind")),
+            number(node.get("served_entries")),
+            "yes" if node.get("last_reset") else "no",
+            number(node.get("pulls")),
+        ]
+        for node in view.get("nodes", [])
+        if isinstance(node, Mapping)
+    ]
+    report_rows = [
+        [
+            h(item.get("node_id")),
+            h(item.get("channel")),
+            number(item.get("decision_count")),
+            when(item.get("received_at")),
+            f'{number(item.get("age_seconds"))} s',
+        ]
+        for item in view.get("node_reports", [])
+        if isinstance(item, Mapping)
+    ]
+    merge = view.get("last_merge") or {}
+    origin_text = ", ".join(
+        f"{h(node)}={number(count)}"
+        for node, count in sorted((view.get("active_by_origin_node") or {}).items())
+    ) or "none"
+    return (
+        '<section id="ban-sync"><h2>Cross-node ban sync</h2>'
+        '<p class="muted">Effective ban set built from central CrowdSec decisions and '
+        'node-reported CrowdSec/fail2ban bans, filtered through enforcement protection. '
+        f'A node is flagged when it has not pulled for more than {number(alert)} seconds.</p>'
+        f'<p>Status: <strong>{h(view.get("status"))}</strong>; cursor {number(view.get("head_cursor"))}; '
+        f'active entries {number(view.get("active_entries"))} ({origin_text}); '
+        f'last merge {h(merge.get("status", "never"))}.</p>'
+        + table(
+            ["Node", "Last pull", "Sync lag", "Cursor", "Behind", "Served", "Full resync", "Pulls"],
+            node_rows,
+        )
+        + '<h3>Node decision reports</h3>'
+        + table(["Node", "Channel", "Decisions", "Received", "Age"], report_rows)
         + '</section>'
     )
 

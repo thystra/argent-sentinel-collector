@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class V044Test(unittest.TestCase):
     def test_release_versions_and_banner_layout(self) -> None:
-        expected_version = "0.5.7.0"
+        expected_version = "0.5.8.0"
         self.assertEqual(
             expected_version,
             (ROOT / "VERSION").read_text(encoding="utf-8").strip(),

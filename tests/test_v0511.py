@@ -268,7 +268,7 @@ class V0511Test(unittest.TestCase):
         self.assertIn("Recent outbound messages", rendered)
 
     def test_release_versions_and_packaging(self) -> None:
-        expected = "0.5.7.0"
+        expected = "0.5.8.0"
         self.assertEqual(
             expected,
             (ROOT / "VERSION").read_text(encoding="utf-8").strip(),
@@ -288,7 +288,7 @@ class V0511Test(unittest.TestCase):
         builder = (ROOT / "packaging/build_debs.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('upstream != "0.5.7.0"', builder)
+        self.assertIn('upstream != "0.5.8.0"', builder)
         self.assertIn('"reporting_view.py"', builder)
         self.assertIn('"test_v0511.py"', builder)
 

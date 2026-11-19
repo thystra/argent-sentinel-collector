@@ -357,7 +357,7 @@ class V0520Test(unittest.TestCase):
 
     def test_release_and_packaging_markers(self) -> None:
         self.assertEqual(
-            "0.5.7.0",
+            "0.5.8.0",
             (ROOT / "VERSION").read_text(encoding="utf-8").strip(),
         )
         collector = (ROOT / "src/collector.py").read_text(encoding="utf-8")
@@ -366,7 +366,7 @@ class V0520Test(unittest.TestCase):
         builder = (ROOT / "packaging/build_debs.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('upstream != "0.5.7.0"', builder)
+        self.assertIn('upstream != "0.5.8.0"', builder)
         self.assertIn('"review_queue.py"', builder)
         self.assertIn('"review_processor.py"', builder)
         self.assertIn(

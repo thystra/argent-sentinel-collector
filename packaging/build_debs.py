@@ -106,6 +106,7 @@ def make_common(root: Path, version: str) -> dict[str, str]:
         ("wordpress_sites.py", "wordpress_sites.py"),
         ("agent.py", "agent.py"),
         ("local_protection.py", "local_protection.py"),
+        ("ban_sync.py", "ban_sync.py"),
         ("server_api.py", "server_api.py"),
         ("fail2ban_export.py", "fail2ban_export.py"),
         ("review_digest.py", "review_digest.py"),
@@ -186,7 +187,7 @@ def make_agent(root: Path, version: str) -> dict[str, str]:
     install_file(ROOT / "packaging/systemd/argent-sentinel-agent.timer", root / "usr/lib/systemd/system/argent-sentinel-agent.timer")
     add_doc(root, "argent-sentinel-agent", ROOT / "docs/debian-packaging.md")
     return {
-        "description": "Argent Sentinel authenticated remote node agent\nStages WordPress and Nginx events, captures privacy-preserving OpenSSH failures,\nand delivers idempotent mTLS events and local-protection inventories.",
+        "description": "Argent Sentinel authenticated remote node agent\nStages WordPress and Nginx events, captures privacy-preserving OpenSSH failures,\ndelivers idempotent mTLS events and local-protection inventories, and\noptionally syncs cross-node CrowdSec bans (disabled and dry-run by default).",
         "depends": f"argent-sentinel-common (= {version}), adduser, debconf (>= 0.5) | debconf-2.0, iproute2, openssl, systemd | systemd-sysv",
         "suggests": "wp-cli",
         "provides": "argent-sentinel-client",
@@ -334,8 +335,8 @@ def main() -> int:
     if shutil.which("dpkg-deb") is None:
         parser.error("dpkg-deb is required (install dpkg-dev/build-essential)")
     upstream = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    if upstream != "0.5.7.0":
-        parser.error(f"VERSION must be 0.5.7.0, found {upstream!r}")
+    if upstream != "0.5.8.0":
+        parser.error(f"VERSION must be 0.5.8.0, found {upstream!r}")
     if not args.revision.isdigit() or int(args.revision) < 1:
         parser.error("--revision must be a positive integer")
     full_version = f"{upstream}-{args.revision}"
@@ -343,9 +344,9 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not args.skip_tests:
-        for source in ("collector.py", "report_batcher.py", "reporting_view.py", "review_queue.py", "review_processor.py", "wordpress_sites.py", "agent.py", "local_protection.py", "server_api.py", "fail2ban_export.py", "review_digest.py", "nginx_429_export.py", "dashboard.py", "dashboard_snapshot.py", "awstats_manager.py", "watchdog.py", "watchdog_runtime.py", "watchdogs/__init__.py", "watchdogs/unbound.py", "watchdogs/php_fpm.py"):
+        for source in ("collector.py", "report_batcher.py", "reporting_view.py", "review_queue.py", "review_processor.py", "wordpress_sites.py", "agent.py", "local_protection.py", "ban_sync.py", "server_api.py", "fail2ban_export.py", "review_digest.py", "nginx_429_export.py", "dashboard.py", "dashboard_snapshot.py", "awstats_manager.py", "watchdog.py", "watchdog_runtime.py", "watchdogs/__init__.py", "watchdogs/unbound.py", "watchdogs/php_fpm.py", "watchdogs/ban_sync_lag.py"):
             run(sys.executable, "-m", "py_compile", str(ROOT / "src" / source))
-        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_v045.py", "test_v046.py", "test_v047.py", "test_v048.py", "test_v049.py", "test_v0410.py", "test_v050.py", "test_v0501.py", "test_v0502.py", "test_v0503.py", "test_v0504.py", "test_v0505.py", "test_v0510.py", "test_v0511.py", "test_v0511_revision2.py", "test_v0520.py", "test_v0521.py", "test_v0530.py", "test_v0531.py", "test_v0540.py", "test_v0550.py", "test_v0551.py", "test_v0560.py", "test_v0560_mail_slowburn.py", "test_v0560_registration_abuse.py", "test_v0560_dashboard_registration.py", "test_packaging.py"):
+        for test in ("test_collector.py", "test_reporting_guardrails.py", "test_network_context.py", "test_v040.py", "test_v041.py", "test_v042.py", "test_v043.py", "test_v044.py", "test_v045.py", "test_v046.py", "test_v047.py", "test_v048.py", "test_v049.py", "test_v0410.py", "test_v050.py", "test_v0501.py", "test_v0502.py", "test_v0503.py", "test_v0504.py", "test_v0505.py", "test_v0510.py", "test_v0511.py", "test_v0511_revision2.py", "test_v0520.py", "test_v0521.py", "test_v0530.py", "test_v0531.py", "test_v0540.py", "test_v0550.py", "test_v0551.py", "test_v0560.py", "test_v0560_mail_slowburn.py", "test_v0560_registration_abuse.py", "test_v0560_dashboard_registration.py", "test_v0580_ban_sync.py", "test_packaging.py"):
             run(sys.executable, str(ROOT / "tests" / test), cwd=ROOT)
         for script in sorted((ROOT / "scripts").glob("*.sh")):
             run("bash", "-n", str(script))

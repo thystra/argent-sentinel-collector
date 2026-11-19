@@ -1,0 +1,14 @@
+{
+  "display_name": "Cross-node ban sync lag",
+  "enabled": false,
+  "expected_nodes": [],
+  "id": "ban_sync_lag",
+  "interval_seconds": 300,
+  "max_pull_age_seconds": 1800,
+  "max_status_age_seconds": 600,
+  "mode": "observe",
+  "module": "ban_sync_lag",
+  "notification_failure_threshold": 1,
+  "status_file": "/var/lib/argent-sentinel/collector/ban-sync-status.json",
+  "timeout_seconds": 30
+}

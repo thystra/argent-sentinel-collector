@@ -17,6 +17,7 @@ import tempfile
 from typing import Any, Iterator, Mapping, Sequence
 import urllib.parse
 
+import ban_sync
 import collector
 import review_digest
 from reporting_view import (
@@ -29,7 +30,7 @@ from review_queue import (
     recent_network_review_actions,
 )
 
-APP_VERSION = "0.5.7.0"
+APP_VERSION = "0.5.8.0"
 UTC = dt.timezone.utc
 
 DEFAULTS: dict[str, Any] = {
@@ -275,6 +276,56 @@ def load_watchdog_statuses(root: Path) -> list[dict[str, Any]]:
             }
         )
     return sorted(result, key=lambda item: str(item.get("display_name", "")).casefold())
+
+
+BAN_SYNC_LAG_ALERT_SECONDS = 1800
+
+
+def ban_sync_section(collector_config: Mapping[str, Any]) -> dict[str, Any]:
+    """Sanitized cross-node ban-sync status: per-node sync lag, no entries."""
+    settings = collector_config.get("ban_sync", {})
+    if not isinstance(settings, Mapping) or not settings.get("enabled"):
+        return {"enabled": False, "status": "disabled", "nodes": [], "lag_alert_seconds": BAN_SYNC_LAG_ALERT_SECONDS}
+    path = Path(str(settings.get("status_file", ban_sync.CENTRAL_DEFAULTS["status_file"])))
+    summary = load_optional_json(path)
+    if summary.get("schema_version") != 1:
+        return {
+            "enabled": True,
+            "status": "unavailable",
+            "error": f"ban-sync status file missing or invalid: {path}",
+            "nodes": [],
+            "lag_alert_seconds": BAN_SYNC_LAG_ALERT_SECONDS,
+        }
+    now_epoch = int(utc_now().timestamp())
+    nodes = []
+    for node in summary.get("nodes", []) if isinstance(summary.get("nodes"), list) else []:
+        if not isinstance(node, Mapping):
+            continue
+        item = dict(node)
+        # Recompute lag against now: the status file may be up to a minute old.
+        item["lag_seconds"] = max(0, now_epoch - int(item.get("last_pull_epoch", 0) or 0))
+        item["lagging"] = item["lag_seconds"] > BAN_SYNC_LAG_ALERT_SECONDS
+        nodes.append(item)
+    summary["nodes"] = nodes
+    reports = [
+        {
+            key: item.get(key)
+            for key in ("node_id", "channel", "decision_count", "received_at", "age_seconds")
+        }
+        for item in summary.get("node_reports", [])
+    ]
+    return {
+        "enabled": True,
+        "status": "ok",
+        "status_generated_at": summary.get("generated_at"),
+        "lag_alert_seconds": BAN_SYNC_LAG_ALERT_SECONDS,
+        "head_cursor": summary.get("head_cursor"),
+        "active_entries": summary.get("active_entries"),
+        "active_by_origin_node": summary.get("active_by_origin_node", {}),
+        "node_reports": reports,
+        "nodes": summary.get("nodes", []),
+        "last_merge": summary.get("last_merge"),
+    }
 
 
 def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -751,6 +802,10 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
     database_path = Path(str(config["state_db"]))
     watchdogs = load_watchdog_statuses(Path(str(config["watchdog_state_dir"])))
     overview["watchdogs_total"] = len(watchdogs)
+    ban_sync_view = ban_sync_section(collector_config)
+    overview["ban_sync_lagging_nodes"] = sum(
+        1 for node in ban_sync_view.get("nodes", []) if node.get("lagging")
+    )
     overview["watchdogs_unhealthy"] = sum(
         1 for item in watchdogs if item.get("status") in {"warning", "critical", "error"}
     )
@@ -808,6 +863,7 @@ def build_snapshot(config: Mapping[str, Any]) -> dict[str, Any]:
             "dynamic_cidrs": dynamic_state.get("dynamic_cidrs", []),
             "nodes": dynamic_state.get("nodes", []),
         },
+        "ban_sync": ban_sync_view,
         "repeated_sources": repeated_sources,
         "top_user_agents": top_user_agents,
         "crawler_groups": crawler_groups[:max_rows],

@@ -5,6 +5,19 @@
 - [ ] Optionally protect `main` on Forgejo so the `CI` checks are required
   before merge.
 
+## Implemented in 0.5.8.0 — cross-node ban sync (not deployed)
+
+- [x] `decisions` upstream report (CrowdSec + fail2ban all jails), central
+  merge of node reports with protection filter, 30-day cap and loop
+  prevention, `GET /v1/decisions` snapshot/delta with digest and Ed25519
+  signature, dry-run-by-default agent apply, status, dashboard section and
+  lag watchdog (`docs/cross-node-ban-sync.md`).
+- [x] Alan's decisions: 30-day cap, all fail2ban jails, signing in this PR,
+  nidhoggur as an ordinary node, hermod/home IPv4 protected.
+- [ ] Rollout on nidhoggur (central services + agent) and hermod: protected
+  list first, signing key + pinned public key, one day dry-run, review
+  `would_apply`, enable apply after Alan confirms, then `require_signing`.
+
 ## Implemented in 0.5.6.0 — Access Guard registration-abuse policy (PR4)
 
 - [x] Site-agnostic ingest of Access Guard `registration_abuse` from any

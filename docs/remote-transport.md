@@ -54,3 +54,16 @@ the public `sentinel.argentwolf.org` server certificate through
 the HTTPS service itself uses a private server-certificate CA.
 
 Enable the agent only after the certificate and configuration validate.
+
+## Cross-node ban sync service (0.5.8.0)
+
+The optional `decisions` service authorizes a node to upload its ban
+decisions (`kind: decisions` envelopes on `/v1/ingest`) and to read the
+effective cross-node ban set at `GET /v1/decisions`. It is not in the default
+service list. Grant it by adding `"decisions"` to `services` in
+`/etc/argent-sentinel/nodes.d/NODE.json` (no re-signing needed), or with
+`--service decisions` when signing. Grant it to the central host's own node
+record as well: nidhoggur's agent reports and pulls like any other node.
+Responses are signed with the Ed25519 key created by
+`argent-sentinel-api ban-sync-keygen`; agents pin its public key in
+`ban_sync.apply.signing_public_key_files`. See `docs/cross-node-ban-sync.md`.

@@ -900,9 +900,9 @@ class PolicySplitTest(unittest.TestCase):
 
 class VersionTest(unittest.TestCase):
     def test_release_version(self) -> None:
-        self.assertEqual("0.5.7.0", (ROOT / "VERSION").read_text().strip())
+        self.assertEqual("0.5.8.0", (ROOT / "VERSION").read_text().strip())
         for module in (agent, collector, dashboard, dashboard_snapshot, review_digest):
-            self.assertEqual("0.5.7.0", module.APP_VERSION)
+            self.assertEqual("0.5.8.0", module.APP_VERSION)
 
 
 if __name__ == "__main__":

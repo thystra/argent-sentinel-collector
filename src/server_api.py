@@ -4,6 +4,10 @@
 The service listens on a Unix socket.  Nginx terminates TLS, requires a valid
 client certificate, removes client-supplied identity headers, and forwards the
 certificate subject as X-Argent-Client-DN plus X-Argent-Client-Verify=SUCCESS.
+
+``GET /v1/decisions?cursor=N`` (0.5.8.0, opt-in via ``ban_sync.enabled``)
+serves the cross-node effective ban set to nodes whose enrollment lists the
+``decisions`` service.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ import re
 import socket
 import socketserver
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import urllib.parse
@@ -45,7 +50,18 @@ except ModuleNotFoundError:
     sys.modules.setdefault("local_protection", local_protection)
     _LOCAL_PROTECTION_SPEC.loader.exec_module(local_protection)
 
-APP_VERSION = "0.5.7.0"
+try:
+    import ban_sync
+except ModuleNotFoundError:
+    _BAN_SYNC_PATH = Path(__file__).with_name("ban_sync.py")
+    _BAN_SYNC_SPEC = importlib.util.spec_from_file_location("ban_sync", _BAN_SYNC_PATH)
+    if _BAN_SYNC_SPEC is None or _BAN_SYNC_SPEC.loader is None:
+        raise
+    ban_sync = importlib.util.module_from_spec(_BAN_SYNC_SPEC)
+    sys.modules.setdefault("ban_sync", ban_sync)
+    _BAN_SYNC_SPEC.loader.exec_module(ban_sync)
+
+APP_VERSION = "0.5.8.0"
 LOG = logging.getLogger("argent-sentinel-api")
 
 DEFAULTS: dict[str, Any] = {
@@ -57,7 +73,19 @@ DEFAULTS: dict[str, Any] = {
     "receipt_db": "/var/lib/argent-sentinel/server/ingress.sqlite3",
     "event_drop_root": "/var/lib/argent-sentinel/drop/remote",
     "require_proxy_verified_client": True,
+    "ban_sync": {
+        "enabled": False,
+        "store_db": "/var/lib/argent-sentinel/server/ban-sync.sqlite3",
+        # Responses are signed whenever this key exists.  require_signing
+        # refuses to serve unsigned views once every agent pins the key.
+        "signing_key_file": "/etc/argent-sentinel/ban-sync/signing.key",
+        "require_signing": False,
+        "openssl_path": "openssl",
+    },
 }
+
+TRANSPORT_KINDS = {"event_batch", "abuse_context", "protection_inventory", "decisions"}
+DECISIONS_SERVICE = "decisions"
 
 
 class APIError(RuntimeError):
@@ -161,7 +189,7 @@ def decode_envelope(raw: bytes, expected_node: str, max_payload: int) -> tuple[d
     if node_id != expected_node:
         raise APIError(403, "Envelope node_id does not match client certificate")
     kind = str(envelope.get("kind", ""))
-    if kind not in {"event_batch", "abuse_context", "protection_inventory"}:
+    if kind not in TRANSPORT_KINDS:
         raise APIError(400, "Unsupported transport kind")
     try:
         payload = base64.b64decode(str(envelope.get("payload_b64", "")), validate=True)
@@ -298,6 +326,80 @@ def validate_protection_inventory(payload: bytes, node: Mapping[str, Any]) -> di
     return inventory
 
 
+def require_decisions_service(node: Mapping[str, Any]) -> None:
+    """Ban sync needs an explicit ``decisions`` grant; an empty services list
+    (which authorizes every telemetry service) does not imply it."""
+    services = {str(value) for value in node.get("services", [])}
+    if DECISIONS_SERVICE not in services:
+        raise APIError(403, "Service 'decisions' is not authorized for this node")
+
+
+def validate_decisions(payload: bytes, node: Mapping[str, Any]) -> dict[str, Any]:
+    require_decisions_service(node)
+    if not payload or len(payload) > 8 * 1024 * 1024:
+        raise APIError(400, "Decisions report size is outside limits")
+    try:
+        report = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise APIError(400, f"Decisions report is invalid JSON: {exc}") from exc
+    try:
+        return ban_sync.validate_decisions_report(report, str(node["node_id"]))
+    except ban_sync.BanSyncError as exc:
+        status = 403 if "not authorized" in str(exc) else 400
+        raise APIError(status, str(exc)) from exc
+
+
+def parse_cursor(path: str) -> int:
+    query = urllib.parse.urlsplit(path).query
+    values = urllib.parse.parse_qs(query, keep_blank_values=True).get("cursor", ["0"])
+    if len(values) != 1 or not re.fullmatch(r"\d{1,18}", values[0] or "0"):
+        raise APIError(400, "cursor must be a non-negative integer")
+    return int(values[0] or "0")
+
+
+def serve_decisions(config: Mapping[str, Any], node_id: str, cursor: int) -> dict[str, Any]:
+    """Build one node's snapshot/delta and record the pull for lag tracking."""
+    settings = config.get("ban_sync") or {}
+    if not settings.get("enabled"):
+        raise APIError(404, "not found")
+    node_id = normalize_node_id(node_id)
+    node = load_node(Path(str(config["nodes_dir"])), node_id)
+    require_decisions_service(node)
+    store_path = Path(str(settings["store_db"]))
+    if not store_path.is_file():
+        raise APIError(503, "Ban-sync store is not initialised")
+    try:
+        store = ban_sync.BanSyncStore(store_path)
+        try:
+            view = store.node_view(node_id, cursor)
+            store.record_pull(
+                node_id, cursor, int(view["cursor"]), bool(view["reset"]),
+                len(view["entries"]) + len(view["upserts"]),
+            )
+        finally:
+            store.close()
+    except (ban_sync.BanSyncError, sqlite3.Error) as exc:
+        LOG.error("Ban-sync view failed for %s: %s", node_id, exc)
+        raise APIError(503, "Ban-sync store is unavailable") from exc
+    return sign_decisions_view(settings, view)
+
+
+def sign_decisions_view(settings: Mapping[str, Any], view: dict[str, Any]) -> dict[str, Any]:
+    """Attach the Ed25519 signature; never serve unsigned once a key exists."""
+    key_value = str(settings.get("signing_key_file") or "")
+    key_file = Path(key_value) if key_value else None
+    if key_file is None or not key_file.exists():
+        if settings.get("require_signing"):
+            LOG.error("Ban-sync signing required but no key at %s", key_value or "(unset)")
+            raise APIError(503, "Ban-sync signing is unavailable")
+        return view
+    try:
+        return ban_sync.sign_view(view, key_file, openssl=str(settings.get("openssl_path", "openssl")))
+    except (ban_sync.BanSyncError, OSError, subprocess.SubprocessError) as exc:
+        LOG.error("Ban-sync signing failed: %s", exc)
+        raise APIError(503, "Ban-sync signing is unavailable") from exc
+
+
 class ReceiptDB:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -367,6 +469,9 @@ class Ingress:
                 raise APIError(403, "Nginx abuse-context is not authorized for this node")
             validate_abuse_context(payload, node)
             destination = root / "abuse-context" / "incoming" / f"{envelope['transport_uuid']}.jsonl"
+        elif envelope["kind"] == "decisions":
+            validate_decisions(payload, node)
+            destination = root / "decisions" / "incoming" / f"{envelope['transport_uuid']}.json"
         else:
             validate_protection_inventory(payload, node)
             destination = root / "protection" / "incoming" / f"{envelope['transport_uuid']}.json"
@@ -400,8 +505,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/healthz":
             self.respond(200, {"status": "ok", "version": APP_VERSION})
-        else:
+            return
+        if urllib.parse.urlsplit(self.path).path != "/v1/decisions":
             self.respond(404, {"status": "error", "error": "not found"})
+            return
+        try:
+            config = self.server.config  # type: ignore[attr-defined]
+            if config.get("require_proxy_verified_client") and self.headers.get("X-Argent-Client-Verify") != "SUCCESS":
+                raise APIError(403, "Verified client certificate required")
+            node_id = client_node_from_subject(self.headers.get("X-Argent-Client-DN", ""))
+            cursor = parse_cursor(self.path)
+            self.respond(200, serve_decisions(config, node_id, cursor))
+        except APIError as exc:
+            self.respond(exc.status, {"status": "error", "error": str(exc)})
+        except Exception:
+            LOG.exception("Unhandled decisions request failure")
+            self.respond(500, {"status": "error", "error": "internal server error"})
 
     def do_POST(self) -> None:  # noqa: N802
         try:
@@ -470,10 +589,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("serve")
     sub.add_parser("validate-config")
+    keygen = sub.add_parser("ban-sync-keygen", help="Create the Ed25519 ban-sync signing key (0600) and .pub")
+    keygen.add_argument("--key", help="Private key path (default: ban_sync.signing_key_file)")
+    keygen.add_argument("--force", action="store_true", help="Replace an existing key")
     args = parser.parse_args(argv)
     configure_logging(args.verbose)
     try:
         config = load_config(Path(args.config))
+        if args.command == "ban-sync-keygen":
+            settings = config.get("ban_sync") or {}
+            target = Path(args.key or str(settings.get("signing_key_file") or DEFAULTS["ban_sync"]["signing_key_file"]))
+            try:
+                created = ban_sync.generate_signing_key(
+                    target, force=bool(args.force), openssl=str(settings.get("openssl_path", "openssl"))
+                )
+            except ban_sync.BanSyncError as exc:
+                LOG.error("%s", exc)
+                return 1
+            print(json.dumps(created, indent=2))
+            return 0
         if args.command == "validate-config":
             print(json.dumps({"status": "ok", "version": APP_VERSION}, indent=2))
             return 0
