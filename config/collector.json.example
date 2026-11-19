@@ -94,6 +94,7 @@
     "suppress_matching_markers": true
   },
   "lock_file": "/run/argent-sentinel/collector.lock",
+  "lock_wait_seconds": 45,
   "mail_account_policy": {
     "abuse_reporting_enabled": false,
     "ban_duration": "168h",

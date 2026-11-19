@@ -1,5 +1,24 @@
 ## 0.5.8.0 (unreleased — cross-node ban sync)
 
+### Fix: collector lock contention (nidhoggur ExecStartPre migrate failures)
+
+- `process_lock()` now waits up to `lock_wait_seconds` (new top-level config
+  key, default 45, range 0–600, `0` = historical fail-fast) for the shared
+  `/run/argent-sentinel/collector.lock` instead of failing on the first
+  `EWOULDBLOCK`. Used by `migrate`, `run`, `protection-state-refresh`,
+  `ban-sync-merge` and `argent-sentinel-report-batch`.
+- Root cause (confirmed on nidhoggur, 2026-11-17..19): all 562 failed
+  collector/report-batch starts in that window overlapped another lock holder;
+  538 of 548 collector failures overlapped `argent-sentinel-dashboard-snapshot`
+  (shared lock for ~10–15 s every minute). `migrate` (the collector and
+  report-batch `ExecStartPre`) took `LOCK_EX|LOCK_NB` and exited 1 with
+  "Another collector process is already running", failing the unit before
+  `ExecStart`. Manual runs succeeded because nothing else held the lock.
+- A holder that stays busy past the bound still produces the same error and a
+  non-zero exit (and `run` still reports `skipped`/`lock-busy`), so a stuck
+  holder stays visible. No systemd sandbox, timer or unit change.
+- Investigation notes: `docs/collector-lock-contention.md`.
+
 Disabled by default; the agent apply step is dry-run by default. Design:
 `docs/cross-node-ban-sync.md`.
 
